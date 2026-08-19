@@ -223,6 +223,14 @@ class PocketOptionOTCService:
             except Exception:
                 pass
 
+    async def _drop_client(self) -> None:
+        old, self._client = self._client, None
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
+
     async def health(self):
         await self._refresh_private_ssid()
         return {
@@ -237,27 +245,41 @@ class PocketOptionOTCService:
     async def server_time(self) -> int:
         return int(time.time())
 
+    async def _request_candles_once(self, asset: str, timeframe: str, count: int):
+        client = await self.connect()
+        async with self._request_lock:
+            return await asyncio.wait_for(
+                client.get_candles(asset=asset, timeframe=TF_SECONDS[timeframe], count=count),
+                timeout=30,
+            )
+
     async def get_candles(self, asset: str, timeframe: str = '1m', count: int = 240) -> List[dict]:
         if asset not in OTC_ASSETS:
             raise MarketDataUnavailable(f'Unsupported OTC asset: {asset}')
         if timeframe not in TF_SECONDS:
             raise MarketDataUnavailable(f'Unsupported timeframe: {timeframe}')
-        client = await self.connect()
-        try:
-            async with self._request_lock:
-                raw = await asyncio.wait_for(
-                    client.get_candles(asset=asset, timeframe=TF_SECONDS[timeframe], count=count),
-                    timeout=30,
-                )
-        except Exception as exc:
-            self._last_error = f'{type(exc).__name__}: {exc}'
-            old, self._client = self._client, None
-            if old is not None:
-                try:
-                    await old.disconnect()
-                except Exception:
-                    pass
-            raise MarketDataUnavailable(f'Cannot fetch {asset} {timeframe} candles: {exc}') from exc
+
+        raw = None
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                raw = await self._request_candles_once(asset, timeframe, count)
+                if raw:
+                    self._last_error = None
+                    break
+                raise RuntimeError('broker returned an empty candle response')
+            except Exception as exc:
+                last_exc = exc
+                self._last_error = f'{type(exc).__name__}: {exc}'
+                await self._drop_client()
+                if attempt == 0:
+                    logger.info('Retrying Pocket Option candle request after reconnect (%s/%s)', asset, timeframe)
+                    continue
+
+        if not raw:
+            raise MarketDataUnavailable(
+                f'Cannot fetch {asset} {timeframe} candles after reconnect: {last_exc}'
+            ) from last_exc
 
         out = []
         for item in raw or []:
