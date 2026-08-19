@@ -1,0 +1,111 @@
+name: Deploy AlphaPulse Runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'backend/**'
+      - 'bot/**'
+      - 'miniapp/**'
+      - 'pyproject.toml'
+      - 'vercel.json'
+      - 'bootstrap.py'
+      - '.github/workflows/deploy-runtime-staging.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alphapulse-runtime-production
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: team_VlqXJ1nwJeUfS9qzIqK5Em0o
+  VERCEL_PROJECT_ID: prj_7CmmwrqDxSRXBUjX3FfsefVpR6Nq
+  RUNTIME_URL: https://alphapulse-runtime-staging.vercel.app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Require Vercel deployment token
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: test -n "$VERCEL_TOKEN"
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@59.1.4
+
+      - name: Link public runtime project
+        run: |
+          mkdir -p .vercel
+          printf '%s\n' '{"orgId":"team_VlqXJ1nwJeUfS9qzIqK5Em0o","projectId":"prj_7CmmwrqDxSRXBUjX3FfsefVpR6Nq"}' > .vercel/project.json
+
+      - name: Pull production project settings
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build production runtime
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy production runtime
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN" 2>/dev/null | tail -n 1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $URL"
+
+      - name: Verify public runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            if curl --fail --silent --show-error "$RUNTIME_URL/health" -o /tmp/health.json; then
+              break
+            fi
+            sleep 5
+          done
+          python - <<'PY'
+          import json
+          data = json.load(open('/tmp/health.json'))
+          assert data.get('status') == 'ok', data
+          assert data.get('version') == '2.4', data
+          assert data.get('telegram_configured') is True, data
+          assert data.get('database_configured') is True, data
+          market = data.get('market') or {}
+          assert market.get('configured') is True, data
+          print('Health OK:', json.dumps(data, ensure_ascii=False))
+          PY
+
+          curl --fail --silent --show-error -D /tmp/root.headers "$RUNTIME_URL/" -o /tmp/root.html
+          grep -qi 'cache-control: no-store, max-age=0' /tmp/root.headers
+          grep -q '<div id="root"></div>' /tmp/root.html
+
+          curl --fail --silent --show-error -D /tmp/stale.headers \
+            "$RUNTIME_URL/assets/index-stale-telegram-cache.js" -o /tmp/stale.js
+          grep -qi 'x-alphapulse-asset-recovery: 1' /tmp/stale.headers
+          test -s /tmp/stale.js
+
+          curl --fail --silent --show-error "$RUNTIME_URL/api/market/health" -o /tmp/market.json
+          python - <<'PY'
+          import json
+          data = json.load(open('/tmp/market.json'))
+          assert data.get('configured') is True, data
+          print('Pocket market source OK')
+          PY
