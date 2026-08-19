@@ -142,6 +142,10 @@ async def scan_best(req: ScanRequest, db: AsyncSession = Depends(get_db)):
     return {'status': 'SIGNAL', 'signal': out(signal), 'duplicate': duplicate}
 
 
+def _new_performance(strategy: str) -> StrategyPerformance:
+    return StrategyPerformance(strategy=strategy, samples=0, wins=0, losses=0, draws=0)
+
+
 @router.post('/reconcile')
 async def reconcile(db: AsyncSession = Depends(get_db)):
     pending = (
@@ -180,6 +184,17 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
                 signal.closed_at = current
                 closed.append(out(signal))
 
+                performance = (
+                    await db.execute(
+                        select(StrategyPerformance).where(
+                            StrategyPerformance.strategy == signal.strategy
+                        )
+                    )
+                ).scalar_one_or_none()
+                if performance is None:
+                    performance = _new_performance(signal.strategy)
+                    db.add(performance)
+
                 if signal.result in {SignalResult.WIN, SignalResult.LOSS} and signal.trained_at is None:
                     await get_model(signal.strategy).learn(
                         json.loads(signal.features_json),
@@ -187,41 +202,19 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
                     )
                     signal.trained_at = current
                     trained += 1
-                    performance = (
-                        await db.execute(
-                            select(StrategyPerformance).where(
-                                StrategyPerformance.strategy == signal.strategy
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if performance is None:
-                        performance = StrategyPerformance(strategy=signal.strategy)
-                        db.add(performance)
-                    performance.samples += 1
+                    performance.samples = int(performance.samples or 0) + 1
                     if signal.result == SignalResult.WIN:
-                        performance.wins += 1
+                        performance.wins = int(performance.wins or 0) + 1
                     else:
-                        performance.losses += 1
+                        performance.losses = int(performance.losses or 0) + 1
                 elif signal.result == SignalResult.DRAW:
-                    performance = (
-                        await db.execute(
-                            select(StrategyPerformance).where(
-                                StrategyPerformance.strategy == signal.strategy
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if performance is None:
-                        performance = StrategyPerformance(strategy=signal.strategy)
-                        db.add(performance)
-                    performance.draws += 1
+                    performance.draws = int(performance.draws or 0) + 1
         except MarketDataUnavailable as exc:
             logger.warning('Reconcile market data unavailable for signal %s: %s', signal.id, exc)
             continue
         except Exception as exc:
             errors += 1
             logger.exception('Reconcile failed for signal id=%s asset=%s strategy=%s: %s', signal.id, signal.asset, signal.strategy, exc)
-            # Reset the session state in case a DB operation failed, then continue
-            # with future scheduler ticks instead of crashing the whole scanner.
             try:
                 await db.rollback()
             except Exception:
