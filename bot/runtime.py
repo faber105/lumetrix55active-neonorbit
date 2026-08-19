@@ -35,6 +35,10 @@ async def configure_webhook() -> str | None:
     if not base.startswith('https://'):
         return None
     url = f"{base.rstrip('/')}/telegram/webhook"
+    info = await bot.get_webhook_info()
+    if info.url == url:
+        logger.info('Telegram webhook already configured: %s', url)
+        return url
     await bot.set_webhook(url=url, secret_token=webhook_secret(), drop_pending_updates=False)
     logger.info('Telegram webhook configured: %s', url)
     return url
