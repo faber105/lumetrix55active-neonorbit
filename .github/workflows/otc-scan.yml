@@ -21,7 +21,7 @@ jobs:
       - name: Continuously trigger protected OTC scanner
         shell: bash
         env:
-          SCAN_URL: https://alpha-pulse-phi.vercel.app/api/internal/scan
+          SCAN_URL: https://alphapulse-otc.vercel.app/api/internal/scan
         run: |
           set -euo pipefail
           for i in $(seq 1 17); do
