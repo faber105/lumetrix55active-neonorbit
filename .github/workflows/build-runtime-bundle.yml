@@ -32,6 +32,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf /tmp/alphapulse-bundle
           mkdir -p /tmp/alphapulse-bundle
           python - <<'PY'
           from pathlib import Path
@@ -55,7 +56,7 @@ jobs:
           print(f'Runtime bundle: {output.stat().st_size} bytes')
           PY
           base64 -w0 /tmp/alphapulse-bundle/runtime.zip > /tmp/alphapulse-bundle/runtime.b64
-          split -b 45000 -d -a 2 /tmp/alphapulse-bundle/runtime.b64 /tmp/alphapulse-bundle/part_
+          split -b 12000 -d -a 2 /tmp/alphapulse-bundle/runtime.b64 /tmp/alphapulse-bundle/part_
           rm /tmp/alphapulse-bundle/runtime.zip /tmp/alphapulse-bundle/runtime.b64
           printf '%s\n' "$GITHUB_SHA" > /tmp/alphapulse-bundle/source_sha.txt
           sha256sum /tmp/alphapulse-bundle/part_* > /tmp/alphapulse-bundle/checksums.txt
