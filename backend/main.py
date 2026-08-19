@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.github_oidc import verify as verify_oidc
-from backend.routers import auth, market, settings, signals, stats, websocket
+from backend.routers import admin, auth, live, market, settings, signals, stats, websocket
 from backend.services.database import init_db
 from backend.services.pocketoption_otc import market_data
 from backend.services.scanner import scan_tick
@@ -33,7 +33,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.1", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.2", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -46,6 +46,8 @@ app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
 app.include_router(stats.router, prefix="/api/stats", tags=["stats"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(live.router, prefix="/api/live", tags=["live"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 
@@ -54,7 +56,7 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulsesbot",
-        "version": "2.1",
+        "version": "2.2",
         "scanner": "github-actions-15s-window",
         "market": await market_data.health(),
     }
