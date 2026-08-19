@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.github_oidc import verify as verify_oidc
@@ -57,7 +58,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.3", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.4", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,6 +66,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def miniapp_cache_headers(request, call_next):
+    response = await call_next(request)
+    if request.method == "GET" and request.url.path in {"/", "/index.html"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(market.router, prefix="/api/market", tags=["market"])
@@ -80,7 +93,7 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulsesbot",
-        "version": "2.3",
+        "version": "2.4",
         "scanner": "github-actions-15s-window",
         "telegram_configured": TELEGRAM_ENABLED,
         "database_configured": bool(os.getenv("DATABASE_URL", "").strip()),
@@ -112,5 +125,41 @@ async def internal_scan(authorization: str | None = Header(default=None)):
 
 
 DIST_DIR = Path(__file__).resolve().parents[1] / "miniapp" / "dist"
+ASSETS_DIR = DIST_DIR / "assets"
+
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+async def miniapp_asset(asset_path: str):
+    """Serve current hashed assets and recover Telegram WebViews with stale HTML.
+
+    Telegram can keep an old index.html after a deploy and request a Vite hash that
+    no longer exists. If that happens, map the obsolete JS/CSS hash to the current
+    built bundle instead of leaving the Mini App on a white/loading screen.
+    """
+    if not ASSETS_DIR.exists():
+        raise HTTPException(404, "Mini App assets are not built")
+
+    requested = ASSETS_DIR / Path(asset_path).name
+    if requested.is_file():
+        return FileResponse(requested)
+
+    suffix = requested.suffix.lower()
+    if suffix not in {".js", ".css"}:
+        raise HTTPException(404, "Asset not found")
+
+    candidates = sorted(
+        (path for path in ASSETS_DIR.glob(f"index-*{suffix}") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise HTTPException(404, "Asset not found")
+
+    return FileResponse(
+        candidates[0],
+        headers={"Cache-Control": "no-store, max-age=0", "X-AlphaPulse-Asset-Recovery": "1"},
+    )
+
+
 if DIST_DIR.exists():
     app.mount("/", StaticFiles(directory=str(DIST_DIR), html=True), name="miniapp")
