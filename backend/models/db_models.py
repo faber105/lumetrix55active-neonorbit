@@ -120,6 +120,20 @@ class StrategyPerformance(Base):
     draws = Column(Integer, default=0, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
+    def __init__(self, **kwargs):
+        # SQLAlchemy Column defaults are normally materialized at INSERT/flush.
+        # Reconciliation updates counters immediately on a newly constructed row,
+        # so initialize them in Python as well to avoid None += 1 on the first result.
+        super().__init__(**kwargs)
+        if self.samples is None:
+            self.samples = 0
+        if self.wins is None:
+            self.wins = 0
+        if self.losses is None:
+            self.losses = 0
+        if self.draws is None:
+            self.draws = 0
+
 
 class MLState(Base):
     __tablename__ = 'ml_state'
