@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,6 +18,7 @@ from backend.services.signal_engine import signal_engine
 from backend.services.strategies import STRATEGY_LABELS
 
 router = APIRouter()
+logger = logging.getLogger('alphapulse.signals')
 
 
 def now():
@@ -154,6 +156,7 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
     closed = []
     entered = 0
     trained = 0
+    errors = 0
     current = now()
 
     for signal in pending:
@@ -211,7 +214,18 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
                         performance = StrategyPerformance(strategy=signal.strategy)
                         db.add(performance)
                     performance.draws += 1
-        except MarketDataUnavailable:
+        except MarketDataUnavailable as exc:
+            logger.warning('Reconcile market data unavailable for signal %s: %s', signal.id, exc)
+            continue
+        except Exception as exc:
+            errors += 1
+            logger.exception('Reconcile failed for signal id=%s asset=%s strategy=%s: %s', signal.id, signal.asset, signal.strategy, exc)
+            # Reset the session state in case a DB operation failed, then continue
+            # with future scheduler ticks instead of crashing the whole scanner.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
             continue
 
     await db.commit()
@@ -219,6 +233,7 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
         'entered': entered,
         'closed': len(closed),
         'trained': trained,
+        'errors': errors,
         'closed_signals': closed,
     }
 
