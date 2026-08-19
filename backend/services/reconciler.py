@@ -39,14 +39,18 @@ async def _update_performance(strategy: str, result: SignalResult) -> None:
                 perf = StrategyPerformance(strategy=strategy)
                 db.add(perf)
                 await db.flush()
+            samples = int(perf.samples or 0)
+            wins = int(perf.wins or 0)
+            losses = int(perf.losses or 0)
+            draws = int(perf.draws or 0)
             if result == SignalResult.WIN:
-                perf.samples += 1
-                perf.wins += 1
+                perf.samples = samples + 1
+                perf.wins = wins + 1
             elif result == SignalResult.LOSS:
-                perf.samples += 1
-                perf.losses += 1
+                perf.samples = samples + 1
+                perf.losses = losses + 1
             elif result == SignalResult.DRAW:
-                perf.draws += 1
+                perf.draws = draws + 1
 
 
 async def _train_once(signal_id: int, strategy: str, features_json: str, won: bool) -> bool:

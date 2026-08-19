@@ -3,6 +3,8 @@ name: Validate AlphaPulse
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -36,6 +38,24 @@ jobs:
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: python -c "from api.main import app; assert app.title == 'AlphaPulse API'; print('FastAPI import OK')"
 
+      - name: Verify guarded auto trade primitives
+        env:
+          ADMIN_ID: '8535011479'
+          DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
+        run: |
+          python - <<'PY'
+          from backend.models.db_models import AutoTradeControl, TradeExecution
+          from backend.services.auto_trade import serialize_auto_trade
+          from pocketoptionapi_async import AsyncPocketOptionClient
+          state = serialize_auto_trade(None)
+          assert state['auto_trade_enabled'] is False
+          assert state['trade_amount'] == 1.0
+          assert hasattr(AsyncPocketOptionClient, 'place_order')
+          assert AutoTradeControl.__tablename__ == 'auto_trade_control'
+          assert TradeExecution.__tablename__ == 'trade_executions'
+          print('Auto trade guardrails OK')
+          PY
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -49,3 +69,30 @@ jobs:
       - name: Build Mini App
         working-directory: miniapp
         run: npm run build
+
+      - name: Verify Mini App admin controls
+        working-directory: miniapp
+        run: |
+          grep -R -q 'Авто-сделки Pocket' dist/assets/*.js
+          grep -R -q 'VIP сейчас' dist/assets/*.js
+          echo 'Mini App controls OK'
+
+      - name: Verify stale Telegram asset recovery
+        env:
+          ADMIN_ID: '8535011479'
+        run: |
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          from api.main import app
+          with TestClient(app) as client:
+              root = client.get('/')
+              assert root.status_code == 200, root.text
+              assert root.headers.get('cache-control') == 'no-store, max-age=0'
+              stale_js = client.get('/assets/index-stale-telegram-cache.js')
+              assert stale_js.status_code == 200, stale_js.text
+              assert stale_js.headers.get('x-alphapulse-asset-recovery') == '1'
+              stale_css = client.get('/assets/index-stale-telegram-cache.css')
+              assert stale_css.status_code == 200, stale_css.text
+              assert stale_css.headers.get('x-alphapulse-asset-recovery') == '1'
+          print('Stale asset recovery OK')
+          PY

@@ -1,0 +1,53 @@
+name: Ensure Vercel Public Access
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/vercel-public-access.yml'
+      - 'vercel.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-access:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Disable Vercel Authentication for AlphaPulse
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "VERCEL_TOKEN is not configured"
+            exit 1
+          fi
+          status=$(curl --silent --show-error --output /tmp/vercel-project --write-out '%{http_code}' \
+            -X PATCH \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"ssoProtection":null}' \
+            "https://api.vercel.com/v9/projects/prj_NDoUvOIYpOZAC5ggrMSZkuu1ApY6?teamId=team_VlqXJ1nwJeUfS9qzIqK5Em0o")
+          cat /tmp/vercel-project
+          echo "HTTP $status"
+          test "$status" -ge 200 -a "$status" -lt 300
+
+      - name: Verify public production domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            code=$(curl --silent --show-error --location --output /tmp/alphapulse-home --write-out '%{http_code}' https://alphapulse-otc.vercel.app/)
+            final=$(curl --silent --show-error --location --output /dev/null --write-out '%{url_effective}' https://alphapulse-otc.vercel.app/)
+            echo "attempt=$attempt code=$code final=$final"
+            if [ "$code" = "200" ] && [[ "$final" != *"vercel.com/sso-api"* ]]; then
+              exit 0
+            fi
+            sleep 4
+          done
+          echo "Production domain is still protected or unavailable"
+          exit 1

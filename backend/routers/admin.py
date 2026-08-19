@@ -8,6 +8,14 @@ from sqlalchemy import desc, func, select
 
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal, utcnow
 from backend.routers.signals import out, save_candidate
+from backend.services.auto_trade import (
+    get_auto_trade_control,
+    latest_execution,
+    maybe_execute_signal,
+    serialize_auto_trade,
+    trading_is_demo,
+    update_auto_trade_control,
+)
 from backend.services.control import (
     VALID_STRATEGIES,
     VALID_TIMEFRAMES,
@@ -31,6 +39,11 @@ class ControlPatch(BaseModel):
     regular_enabled: bool | None = None
     vip_enabled: bool | None = None
     vip_interval_seconds: int | None = None
+    auto_trade_enabled: bool | None = None
+    auto_trade_regular: bool | None = None
+    auto_trade_vip: bool | None = None
+    trade_amount: float | None = None
+    max_open_positions: int | None = None
 
 
 async def _scan_and_publish(*, vip: bool) -> dict:
@@ -62,16 +75,15 @@ async def _scan_and_publish(*, vip: bool) -> dict:
             'strategy': control.selected_strategy,
             'timeframe': control.selected_timeframe,
             'threshold': threshold,
+            'auto_trade': {'status': 'NO_SIGNAL'},
         }
-
-    if vip and float(candidate.get('confidence') or 0) < VIP_CONFIDENCE:
-        return {'status': 'NO_SIGNAL', 'vip': True}
 
     async with AsyncSessionLocal() as db:
         row, duplicate = await save_candidate(db, candidate)
         signal = out(row)
 
     notification = {'notified': 0, 'notification_errors': 0}
+    trade = {'status': 'DUPLICATE'} if duplicate else await maybe_execute_signal(signal)
     if not duplicate:
         from bot.main import bot
         notification = await notify_signal(bot, signal)
@@ -92,6 +104,7 @@ async def _scan_and_publish(*, vip: bool) -> dict:
         'vip': bool(signal.get('is_vip')),
         'duplicate': duplicate,
         'signal': signal,
+        'auto_trade': trade,
         **notification,
     }
 
@@ -99,6 +112,7 @@ async def _scan_and_publish(*, vip: bool) -> dict:
 @router.get('/state')
 async def state(_: TelegramMiniAppUser = Depends(admin_user)):
     control = await get_control()
+    auto_control = await get_auto_trade_control()
     market = await market_data.health()
     async with AsyncSessionLocal() as db:
         latest = (
@@ -113,10 +127,13 @@ async def state(_: TelegramMiniAppUser = Depends(admin_user)):
             or 0
         )
     payload = serialize_control(control)
+    payload.update(serialize_auto_trade(auto_control))
     payload.update({
         'market': market,
         'open_positions': open_positions,
         'latest_signal': out(latest) if latest else None,
+        'latest_execution': await latest_execution(),
+        'trade_account': 'demo' if trading_is_demo() else 'real',
     })
     if control and control.next_vip_at:
         payload['vip_seconds_remaining'] = max(0, int((control.next_vip_at - utcnow()).total_seconds()))
@@ -137,8 +154,27 @@ async def patch_state(
         raise HTTPException(400, 'Unknown timeframe')
     if 'vip_interval_seconds' in changes:
         changes['vip_interval_seconds'] = max(60, min(86400, int(changes['vip_interval_seconds'])))
-    control = await update_control(**changes)
-    return serialize_control(control)
+    if 'trade_amount' in changes and not (1.0 <= float(changes['trade_amount']) <= 50000.0):
+        raise HTTPException(400, 'Trade amount must be between 1 and 50000')
+
+    auto_map = {
+        'auto_trade_enabled': 'enabled',
+        'auto_trade_regular': 'regular_enabled',
+        'auto_trade_vip': 'vip_enabled',
+        'trade_amount': 'amount',
+        'max_open_positions': 'max_open_positions',
+    }
+    auto_changes = {auto_map[key]: changes.pop(key) for key in list(changes) if key in auto_map}
+
+    control = await update_control(**changes) if changes else await get_control()
+    try:
+        auto_control = await update_auto_trade_control(**auto_changes) if auto_changes else await get_auto_trade_control()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    payload = serialize_control(control)
+    payload.update(serialize_auto_trade(auto_control))
+    return payload
 
 
 @router.post('/scan-now')

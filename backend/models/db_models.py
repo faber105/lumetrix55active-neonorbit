@@ -155,6 +155,17 @@ class AdminControl(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class AutoTradeControl(Base):
+    __tablename__ = 'auto_trade_control'
+    telegram_id = Column(BigInteger, primary_key=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    regular_enabled = Column(Boolean, default=True, nullable=False)
+    vip_enabled = Column(Boolean, default=True, nullable=False)
+    amount = Column(Float, default=1.0, nullable=False)
+    max_open_positions = Column(Integer, default=1, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class PaperPosition(Base):
     __tablename__ = 'paper_positions'
     id = Column(Integer, primary_key=True, index=True)
@@ -174,3 +185,17 @@ class PaperPosition(Base):
     result = Column(Enum(SignalResult), default=SignalResult.PENDING, nullable=False, index=True)
     created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
     closed_at = Column(DateTime, nullable=True)
+
+
+class TradeExecution(Base):
+    __tablename__ = 'trade_executions'
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(BigInteger, nullable=False, index=True)
+    signal_id = Column(Integer, unique=True, nullable=False, index=True)
+    position_id = Column(Integer, nullable=True, index=True)
+    broker_order_id = Column(String(128), unique=True, nullable=True, index=True)
+    amount = Column(Float, nullable=False)
+    status = Column(String(20), default='EXECUTING', nullable=False, index=True)
+    error = Column(String(128), nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
