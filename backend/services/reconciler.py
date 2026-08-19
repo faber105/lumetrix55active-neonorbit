@@ -14,6 +14,7 @@ from backend.models.db_models import (
     StrategyPerformance,
     utcnow,
 )
+from backend.services.candle_outcome import exact_signal_candle_prices
 from backend.services.online_ml import get_model
 from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
 
@@ -79,7 +80,7 @@ async def _train_once(signal_id: int, strategy: str, features_json: str, won: bo
 
 
 async def reconcile_pending(limit: int = 100) -> dict:
-    """Resolve entry/expiry prices from Pocket data without letting one row kill the scanner."""
+    """Resolve each signal from the exact candle it targeted, then train its strategy once."""
     async with AsyncSessionLocal() as db:
         ids = list(
             (
@@ -117,10 +118,16 @@ async def reconcile_pending(limit: int = 100) -> dict:
                         signal.entry_price = await market_data.boundary_price(signal.asset, signal.entry_time)
                         entered += 1
 
-                    if signal.entry_price is not None and signal.expiry_time <= current:
-                        signal.close_price = await market_data.boundary_price(signal.asset, signal.expiry_time)
-                        delta = float(signal.close_price) - float(signal.entry_price)
-                        epsilon = max(abs(float(signal.entry_price)) * 1e-10, 1e-10)
+                    if signal.expiry_time <= current:
+                        candle_open, candle_close = await exact_signal_candle_prices(
+                            signal.asset,
+                            signal.timeframe,
+                            signal.entry_time,
+                        )
+                        signal.entry_price = candle_open
+                        signal.close_price = candle_close
+                        delta = float(candle_close) - float(candle_open)
+                        epsilon = max(abs(float(candle_open)) * 1e-10, 1e-10)
                         if abs(delta) <= epsilon:
                             signal.result = SignalResult.DRAW
                         elif signal.direction == SignalDirection.BUY:
@@ -134,8 +141,8 @@ async def reconcile_pending(limit: int = 100) -> dict:
                             "strategy": signal.strategy,
                             "features_json": signal.features_json,
                             "result": signal.result,
-                            "entry_price": float(signal.entry_price),
-                            "close_price": float(signal.close_price),
+                            "entry_price": float(candle_open),
+                            "close_price": float(candle_close),
                         }
 
             if closed_snapshot is not None:
@@ -153,7 +160,6 @@ async def reconcile_pending(limit: int = 100) -> dict:
                     await _update_performance(closed_snapshot["strategy"], result)
 
         except MarketDataUnavailable as exc:
-            # A transient broker/history failure should not poison other signals.
             logger.warning("Reconcile market data unavailable for signal %s: %s", signal_id, exc)
             errors.append({"id": signal_id, "type": "market_data"})
         except Exception as exc:
