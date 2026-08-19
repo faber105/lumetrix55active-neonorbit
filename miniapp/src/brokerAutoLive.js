@@ -1,6 +1,6 @@
 import { TG, TG_ID, apiFetch } from "./api";
 
-let lastBrokerPositionId = null;
+let lastLivePositionId = null;
 let installed = false;
 
 export function installBrokerAutoLive() {
@@ -18,21 +18,21 @@ export function installBrokerAutoLive() {
   const tick = async () => {
     try {
       const rows = await apiFetch("/api/live/active");
-      const brokerPosition = Array.isArray(rows)
-        ? rows.find((position) => position.status === "OPEN" && position.source === "broker")
+      const livePosition = Array.isArray(rows)
+        ? rows.find((position) => position.status === "OPEN" && ["broker", "auto"].includes(position.source))
         : null;
-      if (brokerPosition && brokerPosition.id !== lastBrokerPositionId) {
-        lastBrokerPositionId = brokerPosition.id;
+      if (livePosition && livePosition.id !== lastLivePositionId) {
+        lastLivePositionId = livePosition.id;
         openLiveTab();
         TG?.HapticFeedback?.notificationOccurred?.("success");
       }
     } catch {
       // Network/auth failures are transient; the next poll retries automatically.
     }
-    if (!stopped) timer = window.setTimeout(tick, 1400);
+    if (!stopped) timer = window.setTimeout(tick, 900);
   };
 
-  timer = window.setTimeout(tick, 700);
+  timer = window.setTimeout(tick, 350);
   return () => {
     stopped = true;
     if (timer) window.clearTimeout(timer);
