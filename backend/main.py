@@ -58,7 +58,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.4", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.5", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,10 +93,23 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulsesbot",
-        "version": "2.4",
+        "version": "2.5",
         "scanner": "github-actions-15s-window",
         "telegram_configured": TELEGRAM_ENABLED,
         "database_configured": bool(os.getenv("DATABASE_URL", "").strip()),
+        "source": {
+            "provider": os.getenv("VERCEL_GIT_PROVIDER", "manual"),
+            "repository": "/".join(
+                part
+                for part in (
+                    os.getenv("VERCEL_GIT_REPO_OWNER", ""),
+                    os.getenv("VERCEL_GIT_REPO_SLUG", ""),
+                )
+                if part
+            ) or "unknown",
+            "ref": os.getenv("VERCEL_GIT_COMMIT_REF", "unknown"),
+            "sha": os.getenv("VERCEL_GIT_COMMIT_SHA", "unknown"),
+        },
         "market": await market_data.health(),
     }
 
