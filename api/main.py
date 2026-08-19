@@ -77,8 +77,11 @@ async def scheduled_scan(authorization: str | None = Header(default=None)) -> di
 
 @app.on_event('startup')
 async def startup() -> None:
-    await init_db()
-    logger.info('Database is ready')
+    try:
+        await init_db()
+        logger.info('Database is ready')
+    except Exception:
+        logger.exception('Database startup failed; API health/webhook boot will remain available')
     try:
         from bot.runtime import configure_webhook
         await configure_webhook()
@@ -102,7 +105,6 @@ async def mini_app_index():
 
 @app.get('/{path:path}')
 async def mini_app_spa(path: str):
-    # API/root routes registered above win before this SPA fallback.
     candidate = DIST / path
     if candidate.is_file() and DIST in candidate.resolve().parents:
         return FileResponse(candidate)
