@@ -1,13 +1,20 @@
 """Read-only Pocket Option OTC market-data adapter.
 
 Pocket Option has no documented public developer candle API. This adapter uses an
-optional third-party client with a user supplied Pocket Option web-session SSID and
-calls only market-data/history methods. There is deliberately no trade execution.
-If the broker session is unavailable, the service fails closed: no random candles.
+unofficial read-only WebSocket client and NEVER calls order/trade methods.
+
+Two browser auth formats are supported:
+- legacy: 42["auth",{"session":"...", ...}]
+- current web chart: 42["auth",{"sessionToken":"...", ...}]
+
+For the current format we preserve and send the captured auth frame verbatim. The
+third-party library is used only as WebSocket/market-data transport. If auth or
+market data fails, the service fails closed: no synthetic/random candles.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -35,6 +42,20 @@ class MarketDataUnavailable(RuntimeError):
     pass
 
 
+def _parse_wire_auth(value: str) -> dict | None:
+    """Parse a Socket.IO `42["auth", {...}]` frame without exposing secrets."""
+    value = (value or '').strip()
+    if not value.startswith('42'):
+        return None
+    try:
+        event = json.loads(value[2:])
+        if isinstance(event, list) and len(event) >= 2 and event[0] == 'auth' and isinstance(event[1], dict):
+            return event[1]
+    except Exception:
+        return None
+    return None
+
+
 class PocketOptionOTCService:
     def __init__(self):
         self.ssid = os.getenv('POCKET_OPTION_SSID', '').strip()
@@ -43,37 +64,86 @@ class PocketOptionOTCService:
         self._lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
         self._last_error = None
+        self._auth_kind = 'none'
+        payload = _parse_wire_auth(self.ssid)
+        if payload:
+            if payload.get('session'):
+                self._auth_kind = 'legacy-session'
+                if 'isDemo' in payload:
+                    self.demo = bool(int(payload.get('isDemo') or 0))
+            elif payload.get('sessionToken'):
+                self._auth_kind = 'sessionToken-wire'
+                # Current browser packet does not include isDemo. The captured
+                # currentUrl is a reliable local hint only; the server still
+                # decides whether authentication succeeds.
+                current_url = str(payload.get('currentUrl') or '').lower()
+                if 'demo' in current_url:
+                    self.demo = True
+        elif self.ssid:
+            self._auth_kind = 'raw-session'
 
     @property
     def configured(self):
         return bool(self.ssid)
 
-    async def connect(self):
-        if self._client is not None:
-            return self._client
-        if not self.ssid:
-            raise MarketDataUnavailable('POCKET_OPTION_SSID is not configured. OTC scanner is disabled.')
-        async with self._lock:
-            if self._client is not None:
-                return self._client
+    def _make_client(self):
+        from pocketoptionapi_async.client import AsyncPocketOptionClient
+
+        payload = _parse_wire_auth(self.ssid)
+        if payload and payload.get('sessionToken') and not payload.get('session'):
+            # pocketoptionapi-async 2.0.1 only parses the legacy `session`
+            # property. Initialize it with the token/uid so its internals are
+            # valid, then override only the outgoing auth frame with the exact
+            # browser-captured packet. No trade methods are used.
+            token = str(payload.get('sessionToken') or '')
+            uid_raw = payload.get('uid') or 0
             try:
-                from pocketoptionapi_async.client import AsyncPocketOptionClient
-                client = AsyncPocketOptionClient(
-                    ssid=self.ssid,
-                    is_demo=self.demo,
-                    persistent_connection=True,
-                    auto_reconnect=True,
-                    enable_logging=False,
-                )
-                ok = await client.connect(persistent=True)
+                uid = int(uid_raw)
+            except Exception:
+                uid = 0
+            if len(token) < 10 or uid <= 0:
+                raise MarketDataUnavailable('Pocket Option sessionToken auth packet is incomplete')
+            client = AsyncPocketOptionClient(
+                ssid=token,
+                is_demo=self.demo,
+                uid=uid,
+                platform=1,
+                persistent_connection=False,
+                auto_reconnect=True,
+                enable_logging=False,
+            )
+            exact_wire_frame = self.ssid
+            client._format_session_message = lambda: exact_wire_frame
+            return client
+
+        return AsyncPocketOptionClient(
+            ssid=self.ssid,
+            is_demo=self.demo,
+            persistent_connection=False,
+            auto_reconnect=True,
+            enable_logging=False,
+        )
+
+    async def connect(self):
+        if self._client is not None and getattr(self._client, 'is_connected', True):
+            return self._client
+        async with self._lock:
+            if self._client is not None and getattr(self._client, 'is_connected', True):
+                return self._client
+            if not self.ssid:
+                raise MarketDataUnavailable('POCKET_OPTION_SSID is not configured. OTC scanner is disabled.')
+            try:
+                client = self._make_client()
+                ok = await asyncio.wait_for(client.connect(persistent=False), timeout=35)
                 if not ok:
-                    raise RuntimeError('Pocket Option session rejected')
+                    raise RuntimeError('Pocket Option session rejected or authentication timed out')
                 self._client = client
                 self._last_error = None
-                logger.info('Pocket Option OTC read-only connection ready')
+                logger.info('Pocket Option OTC read-only connection ready (%s)', self._auth_kind)
             except Exception as exc:
                 self._client = None
-                self._last_error = str(exc)
+                self._last_error = f'{type(exc).__name__}: {exc}'
+                logger.warning('Pocket Option connection failed (%s): %s', self._auth_kind, exc)
                 raise MarketDataUnavailable(f'Pocket Option connection failed: {exc}') from exc
         return self._client
 
@@ -88,7 +158,9 @@ class PocketOptionOTCService:
     async def health(self):
         return {
             'configured': self.configured,
-            'connected': self._client is not None,
+            'connected': self._client is not None and bool(getattr(self._client, 'is_connected', True)),
+            'auth_format': self._auth_kind,
+            'demo': self.demo,
             'provider': 'Pocket Option web-session stream (read-only, unofficial client)',
             'last_error': self._last_error,
         }
@@ -106,11 +178,19 @@ class PocketOptionOTCService:
             async with self._request_lock:
                 raw = await asyncio.wait_for(
                     client.get_candles(asset=asset, timeframe=TF_SECONDS[timeframe], count=count),
-                    timeout=25,
+                    timeout=30,
                 )
         except Exception as exc:
-            self._last_error = str(exc)
+            self._last_error = f'{type(exc).__name__}: {exc}'
+            # Force the next request through a fresh authentication attempt.
+            old, self._client = self._client, None
+            if old is not None:
+                try:
+                    await old.disconnect()
+                except Exception:
+                    pass
             raise MarketDataUnavailable(f'Cannot fetch {asset} {timeframe} candles: {exc}') from exc
+
         out=[]
         for item in raw or []:
             if hasattr(item, 'model_dump'):
