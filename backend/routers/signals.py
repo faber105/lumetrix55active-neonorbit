@@ -146,6 +146,7 @@ def _new_performance(strategy: str) -> StrategyPerformance:
     return StrategyPerformance(strategy=strategy, samples=0, wins=0, losses=0, draws=0)
 
 
+@router.get('/reconcile')  # temporary self-test alias; remove after verification
 @router.post('/reconcile')
 async def reconcile(db: AsyncSession = Depends(get_db)):
     pending = (
