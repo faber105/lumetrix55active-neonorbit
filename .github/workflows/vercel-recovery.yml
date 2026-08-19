@@ -1,0 +1,43 @@
+name: Vercel Production Recovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/vercel-recovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Vercel token
+        id: token
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        shell: bash
+        run: |
+          if [ -n "$VERCEL_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "VERCEL_TOKEN is configured"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "VERCEL_TOKEN is not configured"
+          fi
+
+      - name: Roll production back to last known-good deployment
+        if: steps.token.outputs.available == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --output /tmp/vercel-body --write-out '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v1/projects/prj_NDoUvOIYpOZAC5ggrMSZkuu1ApY6/rollback/dpl_3SaPpYLgz34asfcm6JdXmAx8E5HZ?teamId=team_VlqXJ1nwJeUfS9qzIqK5Em0o&description=AlphaPulse%20recovery")
+          cat /tmp/vercel-body || true
+          echo "HTTP $status"
+          test "$status" -ge 200 -a "$status" -lt 300
