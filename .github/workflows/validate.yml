@@ -1,0 +1,51 @@
+name: Validate AlphaPulse
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alphapulse-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Python
+        run: python -m compileall -q api backend bot
+
+      - name: Install Python dependencies
+        run: pip install -e .
+
+      - name: Import FastAPI application
+        env:
+          TELEGRAM_BOT_TOKEN: '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk'
+          ADMIN_ID: '8535011479'
+          DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
+        run: python -c "from api.main import app; assert app.title == 'AlphaPulse API'; print('FastAPI import OK')"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: miniapp/package.json
+
+      - name: Install Mini App dependencies
+        working-directory: miniapp
+        run: npm install --no-audit --no-fund
+
+      - name: Build Mini App
+        working-directory: miniapp
+        run: npm run build
