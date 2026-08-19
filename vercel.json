@@ -5,7 +5,7 @@
   "functions": {
     "api/main.py": {
       "maxDuration": 300,
-      "includeFiles": "runtime_secrets.json"
+      "includeFiles": "{runtime_secrets.json,miniapp/dist/**}"
     }
   }
 }
