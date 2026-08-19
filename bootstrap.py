@@ -7,6 +7,7 @@ from pathlib import Path
 # Command. Older deployments used this hook to copy a temporary source bundle.
 # The repository is now the source of truth, so the hook is intentionally a
 # validation-only no-op: it must never overwrite checked-out GitHub files.
+# This file is also an explicit deployment trigger for the public runtime.
 required = [
     Path("api/main.py"),
     Path("backend/main.py"),
