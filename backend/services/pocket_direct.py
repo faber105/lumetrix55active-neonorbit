@@ -30,7 +30,12 @@ _REAL_ENDPOINTS = (
 
 
 class DirectPocketOptionClient:
-    """Minimal read-only Socket.IO market client."""
+    """Minimal read-only Socket.IO market/deal-state client.
+
+    It never sends openOrder/buy/sell messages. Besides candles, it passively
+    captures Pocket's updateOpenedDeals/updateClosedDeals/successcloseOrder
+    events so AlphaPulse can notice trades opened manually in the Pocket UI.
+    """
 
     def __init__(self, ssid: str, is_demo: bool = True):
         self.ssid = (ssid or "").strip()
@@ -40,6 +45,9 @@ class DirectPocketOptionClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._endpoint: str | None = None
         self._lock = asyncio.Lock()
+        self._opened_deals: dict[str, dict] = {}
+        self._closed_deals: dict[str, dict] = {}
+        self._last_deals_event_at: float | None = None
 
     async def connect(self, persistent: bool = False) -> bool:
         del persistent
@@ -93,6 +101,49 @@ class DirectPocketOptionClient:
                 raise RuntimeError("Pocket Option rejected the market session")
         raise asyncio.TimeoutError("Pocket Option successauth was not received")
 
+    @staticmethod
+    def _deal_id(deal: dict) -> str | None:
+        for key in ("id", "uuid", "ticket", "dealId", "deal_id"):
+            value = deal.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return None
+
+    @staticmethod
+    def _deal_rows(payload: Any) -> list[dict]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if isinstance(payload, dict):
+            for key in ("deals", "data", "openedDeals", "closedDeals", "items"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
+            # Some Pocket events carry a single deal object directly.
+            if any(k in payload for k in ("id", "uuid", "ticket", "asset")):
+                return [payload]
+        return []
+
+    def _capture_deal_event(self, event: str, payload: Any) -> None:
+        if event not in {"updateOpenedDeals", "updateClosedDeals", "successcloseOrder"}:
+            return
+        rows = self._deal_rows(payload)
+        self._last_deals_event_at = time.time()
+        if event == "updateOpenedDeals":
+            # updateOpenedDeals is a snapshot in the current Pocket protocol.
+            snapshot: dict[str, dict] = {}
+            for row in rows:
+                key = self._deal_id(row)
+                if key:
+                    snapshot[key] = row
+            self._opened_deals = snapshot
+            return
+        for row in rows:
+            key = self._deal_id(row)
+            if not key:
+                continue
+            self._opened_deals.pop(key, None)
+            self._closed_deals[key] = row
+
     async def _recv_packet(self, timeout: float) -> tuple[str | None, Any]:
         if self._ws is None:
             raise RuntimeError("Pocket Option websocket is not open")
@@ -118,7 +169,10 @@ class DirectPocketOptionClient:
                     try: packet = json.loads(text[2:])
                     except Exception: continue
                     if isinstance(packet, list) and packet:
-                        return str(packet[0]), packet[1] if len(packet) > 1 else None
+                        event = str(packet[0])
+                        payload = packet[1] if len(packet) > 1 else None
+                        self._capture_deal_event(event, payload)
+                        return event, payload
                 if text.startswith("451-"):
                     try:
                         wrapper = json.loads(text.split("-", 1)[1])
@@ -133,6 +187,7 @@ class DirectPocketOptionClient:
                         raw = bytes(raw).decode("utf-8")
                     try: data = json.loads(raw)
                     except Exception: data = raw
+                    self._capture_deal_event(event, data)
                     return event, data
                 continue
             if msg.type == WSMsgType.BINARY:
@@ -141,6 +196,41 @@ class DirectPocketOptionClient:
                     return "binary", json.loads(raw)
                 except Exception:
                     continue
+
+    async def get_opened_deals(self, listen_seconds: float = 0.7) -> list[dict]:
+        """Passively refresh and return the broker's currently opened deals."""
+        if not await self.connect(persistent=False):
+            return []
+        if self._ws is None or self._ws.closed:
+            return []
+        deadline = time.monotonic() + max(0.05, min(float(listen_seconds), 1.5))
+        async with self._lock:
+            while time.monotonic() < deadline:
+                try:
+                    await self._recv_packet(min(0.25, max(0.05, deadline - time.monotonic())))
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    self.is_connected = False
+                    break
+        return list(self._opened_deals.values())
+
+    async def get_closed_deals(self, listen_seconds: float = 0.25) -> list[dict]:
+        if not await self.connect(persistent=False):
+            return []
+        if self._ws is None or self._ws.closed:
+            return list(self._closed_deals.values())
+        deadline = time.monotonic() + max(0.05, min(float(listen_seconds), 1.0))
+        async with self._lock:
+            while time.monotonic() < deadline:
+                try:
+                    await self._recv_packet(min(0.2, max(0.05, deadline - time.monotonic())))
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    self.is_connected = False
+                    break
+        return list(self._closed_deals.values())
 
     async def get_candles(self, asset: str, timeframe: int, count: int = 240, end_time: int | None = None):
         if not await self.connect(persistent=False):
