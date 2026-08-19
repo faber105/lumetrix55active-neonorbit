@@ -141,13 +141,20 @@ class PocketOptionOTCService:
             client._format_session_message = lambda: exact_wire_frame
             return client
 
-        return AsyncPocketOptionClient(
+        # Legacy full auth frames are parsed natively, but the library rebuilds
+        # the outgoing message and drops browser flags it does not know about
+        # (for example isOptimized). Preserve the captured frame byte-for-byte.
+        client = AsyncPocketOptionClient(
             ssid=self.ssid,
             is_demo=self.demo,
             persistent_connection=False,
             auto_reconnect=True,
             enable_logging=False,
         )
+        if payload and payload.get('session'):
+            exact_wire_frame = self.ssid
+            client._format_session_message = lambda: exact_wire_frame
+        return client
 
     async def connect(self):
         await self._refresh_private_ssid()
