@@ -14,5 +14,6 @@ async def verify(token:str):
         claims=jwt.decode(token,key,algorithms=[h.get('alg','RS256')],audience=AUDIENCE,issuer=ISSUER,options={'verify_at_hash':False})
     except Exception as e: raise HTTPException(401,'Invalid GitHub Actions OIDC token') from e
     if claims.get('repository','').lower()!=os.getenv('GITHUB_ACTIONS_REPOSITORY','').lower(): raise HTTPException(403,'Repository not allowed')
-    if claims.get('event_name') not in {'schedule','workflow_dispatch'}: raise HTTPException(403,'Event not allowed')
+    if claims.get('event_name') not in {'schedule','workflow_dispatch','push'}: raise HTTPException(403,'Event not allowed')
+    if claims.get('event_name')=='push' and claims.get('ref')!='refs/heads/main': raise HTTPException(403,'Push ref not allowed')
     return claims
