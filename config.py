@@ -73,10 +73,10 @@ class Settings(BaseSettings):
             value = 'postgresql://' + value[len('postgres://'):]
         if value.startswith('postgresql://'):
             value = 'postgresql+asyncpg://' + value[len('postgresql://'):]
-        if 'channel_binding=' in value:
+        if '?' in value:
             from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
             parts = urlsplit(value)
-            query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != 'channel_binding']
+            query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in {'channel_binding', 'sslmode'}]
             value = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
         return value
 
