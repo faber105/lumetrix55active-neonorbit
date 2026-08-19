@@ -1,5 +1,0 @@
-webhook_ok=true
-menu_ok=true
-message_ok=true
-bot_username=alphapulserbot
-run_id=32303557299
