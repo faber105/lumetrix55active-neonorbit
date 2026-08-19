@@ -14,3 +14,8 @@ dependencies = [
   "SQLAlchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.32,<1.0"
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["api*", "backend*", "bot*"]
+exclude = ["miniapp*"]
