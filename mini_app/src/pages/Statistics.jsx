@@ -1,0 +1,13 @@
+import { LineChart } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { CartesianGrid, Line, ResponsiveContainer, Tooltip, XAxis, YAxis, LineChart as ReLineChart } from 'recharts';
+import SessionCard from '../components/SessionCard';
+import StatsOverview from '../components/StatsOverview';
+import { useSession } from '../hooks/useSession';
+import { useTelegram } from '../hooks/useTelegram';
+
+export default function Statistics() {
+  const {haptic}=useTelegram(); const {history,stats}=useSession(haptic); const [selected,setSelected]=useState(null);
+  const chartData=useMemo(()=>{let cumulative=0;return [...history].reverse().map((item,index)=>{cumulative+=Number(item.pnl);return{name:`${index+1}`,pnl:Number(cumulative.toFixed(2))}})},[history]);
+  return <div className="pb-24"><header className="border-b border-terminal-border px-4 py-4"><h1 className="text-xl font-bold">Статистика</h1><p className="mt-1 text-sm text-terminal-muted">Сессии, результативность и общий P&L.</p></header><StatsOverview stats={stats}/><section className="px-4 pb-4"><div className="rounded-lg border border-terminal-border bg-terminal-card p-4"><div className="flex items-center gap-2 font-bold"><LineChart size={18} className="text-terminal-green"/>График P&L</div><div className="mt-3 h-44"><ResponsiveContainer width="100%" height="100%"><ReLineChart data={chartData}><CartesianGrid stroke="#2A2A2A"/><XAxis dataKey="name" stroke="#8A8A8A"/><YAxis stroke="#8A8A8A"/><Tooltip contentStyle={{background:'#1A1A1A',border:'1px solid #2A2A2A',color:'#fff'}}/><Line type="monotone" dataKey="pnl" stroke="#00FFA3" strokeWidth={2} dot={false}/></ReLineChart></ResponsiveContainer></div></div></section><section className="space-y-3 px-4"><h2 className="font-bold">История сессий</h2>{history.length?history.map((session)=><SessionCard key={session.id} session={session} onSelect={setSelected}/>):<div className="rounded-lg border border-terminal-border bg-terminal-card p-4 text-terminal-muted">История появится после первой завершенной сессии.</div>}</section>{selected&&<div className="fixed inset-0 z-40 grid place-items-end bg-black/70 px-3 pb-3"><div className="w-full rounded-lg border border-terminal-border bg-terminal-card p-4"><h3 className="text-lg font-bold">Детали сессии #{selected.id}</h3><div className="mt-3 grid grid-cols-2 gap-2 text-sm text-terminal-muted"><span>Сделок: {selected.total_trades}</span><span>WIN: {selected.wins}</span><span>LOSS: {selected.losses}</span><span>P&L: ${Number(selected.pnl).toFixed(2)}</span></div><button onClick={()=>setSelected(null)} className="mt-4 h-11 w-full rounded-md bg-terminal-green font-bold text-black">Закрыть</button></div></div>}</div>;
+}

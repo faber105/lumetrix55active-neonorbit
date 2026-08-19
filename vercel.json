@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm --prefix mini_app install --no-audit --no-fund && npm --prefix mini_app run build",
+  "functions": {
+    "api/main.py": {
+      "maxDuration": 300,
+      "includeFiles": "mini_app/dist/**"
+    }
+  }
+}

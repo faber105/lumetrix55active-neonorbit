@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: signals_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d signals_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8080
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://user:pass@postgres:5432/signals_db
+    ports:
+      - "8080:8080"
+    volumes:
+      - online_models:/app/models_online
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  bot:
+    build: .
+    command: python -m bot.main
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://user:pass@postgres:5432/signals_db
+    volumes:
+      - online_models:/app/models_online
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  mini_app:
+    build:
+      context: ./mini_app
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${MINI_APP_API_BASE_URL:-http://localhost:8080/api}
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN}
+    depends_on:
+      - api
+      - mini_app
+    profiles: ["tunnel"]
+
+volumes:
+  postgres_data:
+  online_models:

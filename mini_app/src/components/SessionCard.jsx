@@ -1,0 +1,6 @@
+import { ChevronRight } from 'lucide-react';
+import { dateTime, money } from '../utils/format';
+export default function SessionCard({ session, onSelect }) {
+  const winrate = session.total_trades ? Math.round((session.wins / session.total_trades) * 100) : 0; const positive = Number(session.pnl) >= 0;
+  return <button onClick={() => onSelect?.(session)} className="w-full rounded-lg border border-terminal-border bg-terminal-card p-4 text-left transition hover:bg-terminal-hover"><div className="flex items-center justify-between gap-3"><div><div className="font-bold">{dateTime(session.started_at)}</div><div className="mt-1 text-xs text-terminal-muted">{dateTime(session.started_at)} – {dateTime(session.ended_at)}</div></div><ChevronRight size={18} className="text-terminal-muted" /></div><div className="mt-4 grid grid-cols-2 gap-2 text-sm"><span className="text-terminal-muted">Цель: +${Number(session.goal_amount).toFixed(2)}</span><span className={`text-right font-bold ${positive ? 'text-terminal-green' : 'text-terminal-red'}`}>{money(session.pnl)}</span><span className="text-terminal-muted">Сделок: {session.total_trades}</span><span className="text-right text-terminal-muted">WIN {session.wins} · LOSS {session.losses} · {winrate}%</span></div></button>;
+}

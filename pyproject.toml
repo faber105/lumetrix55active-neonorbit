@@ -1,0 +1,7 @@
+[project]
+name = "alphapulse-otc"
+version = "2.1.0"
+requires-python = ">=3.12"
+
+[tool.vercel]
+entrypoint = "api.main:app"
