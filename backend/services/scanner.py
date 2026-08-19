@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from backend.models.db_models import AsyncSessionLocal, User, UserSettings, utcnow
 from backend.routers.signals import save_candidate
+from backend.services.auto_trade import maybe_execute_signal
 from backend.services.control import get_control, update_control
 from backend.services.pocketoption_otc import OTC_ASSETS, market_data
 from backend.services.positions import reconcile_positions, sync_broker_positions
@@ -97,8 +98,6 @@ async def scan_tick(bot: Bot) -> dict:
     if not market_health.get("configured"):
         return {"ok": True, "scanner": "disabled", "reason": "market source is not configured"}
 
-    # Read-only fallback: even when Mini App is not open, periodically capture a
-    # manually opened Pocket deal and attach it to its matching AlphaPulse signal.
     broker_sync = await sync_broker_positions(ADMIN_ID) if ADMIN_ID else {"supported": False}
     reconciliation = await reconcile_pending()
     position_reconciliation = await reconcile_positions()
@@ -127,6 +126,7 @@ async def scan_tick(bot: Bot) -> dict:
         )
 
     published: list[dict] = []
+    auto_trade_results: list[dict] = []
     notified = 0
     notification_errors = 0
     vip_status = control.last_vip_status
@@ -138,6 +138,7 @@ async def scan_tick(bot: Bot) -> dict:
             signal, duplicate = await _save(candidate)
             if not duplicate:
                 published.append(signal)
+                auto_trade_results.append({"signal_id": signal["id"], **await maybe_execute_signal(signal)})
                 info = await notify_signal(bot, signal)
                 notified += info["notified"]
                 notification_errors += info["notification_errors"]
@@ -161,6 +162,7 @@ async def scan_tick(bot: Bot) -> dict:
             signal, duplicate = await _save(candidate)
             if not duplicate:
                 published.append(signal)
+                auto_trade_results.append({"signal_id": signal["id"], **await maybe_execute_signal(signal)})
                 info = await notify_signal(bot, signal)
                 notified += info["notified"]
                 notification_errors += info["notification_errors"]
@@ -178,5 +180,6 @@ async def scan_tick(bot: Bot) -> dict:
         "published": len(published),
         "notified": notified,
         "notification_errors": notification_errors,
+        "auto_trade": auto_trade_results,
         "signals": published,
     }
