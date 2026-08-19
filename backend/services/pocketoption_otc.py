@@ -4,12 +4,12 @@ Pocket Option has no documented public developer candle API. This adapter uses a
 unofficial read-only WebSocket client and NEVER calls order/trade methods.
 
 Two browser auth formats are supported:
-- legacy: 42["auth",{"session":"...", ...}]
-- current web chart: 42["auth",{"sessionToken":"...", ...}]
+- legacy: 42[\"auth\",{\"session\":\"...\", ...}]
+- current web chart: 42[\"auth\",{\"sessionToken\":\"...\", ...}]
 
-For the current format we preserve and send the captured auth frame verbatim. The
-third-party library is used only as WebSocket/market-data transport. If auth or
-market data fails, the service fails closed: no synthetic/random candles.
+For production the captured auth frame can be supplied through POCKET_OPTION_SSID
+or a private DB row keyed as ``__runtime_pocket__`` in ``ml_state``. The DB value
+has priority so credentials never need to be committed to GitHub.
 """
 from __future__ import annotations
 
@@ -34,8 +34,9 @@ OTC_ASSETS: Dict[str, str] = {
     'EURJPY_otc': 'EUR/JPY OTC',
     'GBPJPY_otc': 'GBP/JPY OTC',
 }
-DISPLAY_TO_ASSET = {v.replace(' OTC',''): k for k, v in OTC_ASSETS.items()}
+DISPLAY_TO_ASSET = {v.replace(' OTC', ''): k for k, v in OTC_ASSETS.items()}
 TF_SECONDS = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600}
+PRIVATE_SSID_KEY = '__runtime_pocket__'
 
 
 class MarketDataUnavailable(RuntimeError):
@@ -43,7 +44,6 @@ class MarketDataUnavailable(RuntimeError):
 
 
 def _parse_wire_auth(value: str) -> dict | None:
-    """Parse a Socket.IO `42["auth", {...}]` frame without exposing secrets."""
     value = (value or '').strip()
     if not value.startswith('42'):
         return None
@@ -58,29 +58,58 @@ def _parse_wire_auth(value: str) -> dict | None:
 
 class PocketOptionOTCService:
     def __init__(self):
-        self.ssid = os.getenv('POCKET_OPTION_SSID', '').strip()
-        self.demo = os.getenv('POCKET_OPTION_DEMO', 'true').lower() in {'1','true','yes','on'}
+        self.ssid = ''
+        self.demo = os.getenv('POCKET_OPTION_DEMO', 'true').lower() in {'1', 'true', 'yes', 'on'}
         self._client = None
         self._lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
         self._last_error = None
+        self._auth_kind = 'none'
+        self._private_secret_loaded = False
+        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip())
+
+    def _apply_ssid(self, value: str) -> None:
+        self.ssid = (value or '').strip()
         self._auth_kind = 'none'
         payload = _parse_wire_auth(self.ssid)
         if payload:
             if payload.get('session'):
                 self._auth_kind = 'legacy-session'
                 if 'isDemo' in payload:
-                    self.demo = bool(int(payload.get('isDemo') or 0))
+                    try:
+                        self.demo = bool(int(payload.get('isDemo') or 0))
+                    except Exception:
+                        pass
             elif payload.get('sessionToken'):
                 self._auth_kind = 'sessionToken-wire'
-                # Current browser packet does not include isDemo. The captured
-                # currentUrl is a reliable local hint only; the server still
-                # decides whether authentication succeeds.
                 current_url = str(payload.get('currentUrl') or '').lower()
                 if 'demo' in current_url:
                     self.demo = True
         elif self.ssid:
             self._auth_kind = 'raw-session'
+
+    async def _refresh_private_ssid(self) -> None:
+        """Load the broker auth frame from private Postgres storage once per cold start."""
+        if self._private_secret_loaded:
+            return
+        try:
+            from backend.models.db_models import AsyncSessionLocal, MLState
+            async with AsyncSessionLocal() as db:
+                state = await db.get(MLState, PRIVATE_SSID_KEY)
+                if state and state.payload and state.payload.strip():
+                    private_ssid = state.payload.strip()
+                    if private_ssid != self.ssid:
+                        old, self._client = self._client, None
+                        if old is not None:
+                            try:
+                                await old.disconnect()
+                            except Exception:
+                                pass
+                        self._apply_ssid(private_ssid)
+                    logger.info('Pocket Option credential loaded from private DB storage (%s)', self._auth_kind)
+            self._private_secret_loaded = True
+        except Exception as exc:
+            logger.warning('Cannot load private Pocket Option credential: %s', type(exc).__name__)
 
     @property
     def configured(self):
@@ -91,10 +120,6 @@ class PocketOptionOTCService:
 
         payload = _parse_wire_auth(self.ssid)
         if payload and payload.get('sessionToken') and not payload.get('session'):
-            # pocketoptionapi-async 2.0.1 only parses the legacy `session`
-            # property. Initialize it with the token/uid so its internals are
-            # valid, then override only the outgoing auth frame with the exact
-            # browser-captured packet. No trade methods are used.
             token = str(payload.get('sessionToken') or '')
             uid_raw = payload.get('uid') or 0
             try:
@@ -125,9 +150,11 @@ class PocketOptionOTCService:
         )
 
     async def connect(self):
+        await self._refresh_private_ssid()
         if self._client is not None and getattr(self._client, 'is_connected', True):
             return self._client
         async with self._lock:
+            await self._refresh_private_ssid()
             if self._client is not None and getattr(self._client, 'is_connected', True):
                 return self._client
             if not self.ssid:
@@ -156,6 +183,7 @@ class PocketOptionOTCService:
                 pass
 
     async def health(self):
+        await self._refresh_private_ssid()
         return {
             'configured': self.configured,
             'connected': self._client is not None and bool(getattr(self._client, 'is_connected', True)),
@@ -168,7 +196,7 @@ class PocketOptionOTCService:
     async def server_time(self) -> int:
         return int(time.time())
 
-    async def get_candles(self, asset: str, timeframe: str='1m', count: int=240) -> List[dict]:
+    async def get_candles(self, asset: str, timeframe: str = '1m', count: int = 240) -> List[dict]:
         if asset not in OTC_ASSETS:
             raise MarketDataUnavailable(f'Unsupported OTC asset: {asset}')
         if timeframe not in TF_SECONDS:
@@ -182,7 +210,6 @@ class PocketOptionOTCService:
                 )
         except Exception as exc:
             self._last_error = f'{type(exc).__name__}: {exc}'
-            # Force the next request through a fresh authentication attempt.
             old, self._client = self._client, None
             if old is not None:
                 try:
@@ -191,21 +218,31 @@ class PocketOptionOTCService:
                     pass
             raise MarketDataUnavailable(f'Cannot fetch {asset} {timeframe} candles: {exc}') from exc
 
-        out=[]
+        out = []
         for item in raw or []:
             if hasattr(item, 'model_dump'):
-                item=item.model_dump()
+                item = item.model_dump()
             elif not isinstance(item, dict):
-                try: item=vars(item)
-                except Exception: continue
+                try:
+                    item = vars(item)
+                except Exception:
+                    continue
             try:
-                ts=item.get('timestamp') or item.get('time') or item.get('from')
-                close=float(item.get('close', item.get('price')))
-                op=float(item.get('open', close)); hi=float(item.get('high', close)); lo=float(item.get('low', close))
-                out.append({'time': int(float(ts)) if ts is not None else int(time.time()), 'open':op, 'high':max(hi,op,close), 'low':min(lo,op,close), 'close':close})
+                ts = item.get('timestamp') or item.get('time') or item.get('from')
+                close = float(item.get('close', item.get('price')))
+                op = float(item.get('open', close))
+                hi = float(item.get('high', close))
+                lo = float(item.get('low', close))
+                out.append({
+                    'time': int(float(ts)) if ts is not None else int(time.time()),
+                    'open': op,
+                    'high': max(hi, op, close),
+                    'low': min(lo, op, close),
+                    'close': close,
+                })
             except Exception:
                 continue
-        out.sort(key=lambda c:c['time'])
+        out.sort(key=lambda candle: candle['time'])
         if len(out) < min(80, count):
             raise MarketDataUnavailable(f'Broker returned only {len(out)} usable candles for {asset}/{timeframe}')
         return out[-count:]
