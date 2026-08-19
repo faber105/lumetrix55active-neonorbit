@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: alphapulse-runtime-production
@@ -109,3 +109,18 @@ jobs:
           assert data.get('configured') is True, data
           print('Pocket market source OK')
           PY
+
+      - name: Record deploy result
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        shell: bash
+        run: |
+          printf 'status=%s\ndeployment_url=%s\ncommit=%s\nrun_id=%s\n' \
+            "$JOB_STATUS" "$DEPLOY_URL" "$GITHUB_SHA" "$GITHUB_RUN_ID" > runtime-deploy-status.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runtime-deploy-status.txt
+          git commit -m "Record AlphaPulse runtime deploy status" || exit 0
+          git push
