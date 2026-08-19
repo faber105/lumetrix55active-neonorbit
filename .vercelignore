@@ -1,0 +1,7 @@
+runtime_bootstrap.json
+runtime_secrets.json
+.env
+.env.*
+miniapp/node_modules
+**/__pycache__
+**/*.pyc
