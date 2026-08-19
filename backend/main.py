@@ -58,7 +58,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.5", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.6", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,7 +93,7 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulsesbot",
-        "version": "2.5",
+        "version": "2.6",
         "scanner": "github-actions-15s-window",
         "telegram_configured": TELEGRAM_ENABLED,
         "database_configured": bool(os.getenv("DATABASE_URL", "").strip()),
