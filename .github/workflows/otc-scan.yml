@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'bot/**'
+      - 'api/**'
+      - '.github/workflows/otc-scan.yml'
 
 permissions:
   contents: read
@@ -16,14 +23,18 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
       - name: Trigger serverless scanner window
         env:
           SCAN_URL: https://alphapulse-otc.vercel.app/api/internal/scan
+          EVENT_NAME: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
+          # A push-run can begin before Vercel has promoted the matching commit.
+          # Give production time to switch. Scheduled/manual runs start immediately.
+          if [ "$EVENT_NAME" = "push" ]; then sleep 70; fi
           for i in $(seq 1 19); do
             START=$(date +%s)
             TOKEN_JSON=$(curl --fail --silent --show-error \
