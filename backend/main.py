@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,15 +14,38 @@ from backend.routers import admin, auth, live, market, settings, signals, stats,
 from backend.services.database import init_db
 from backend.services.pocketoption_otc import market_data
 from backend.services.scanner import scan_tick
-from bot.main import bot, configure_webhook, feed_update, valid_secret
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alphapulse")
 
+# Production has the Telegram secret. Preview/build validation deployments are
+# intentionally allowed to boot without importing aiogram's Bot object so we can
+# validate the API/frontend without copying production secrets into previews.
+TELEGRAM_ENABLED = bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
+if TELEGRAM_ENABLED:
+    from bot.main import bot, configure_webhook, feed_update, valid_secret
+else:
+    bot = None
+
+    async def configure_webhook() -> str | None:
+        return None
+
+    async def feed_update(payload: dict) -> None:
+        del payload
+        raise RuntimeError("Telegram is not configured in this deployment")
+
+    def valid_secret(value: str | None) -> bool:
+        del value
+        return False
+
 
 @asynccontextmanager
 async def lifespan(app):
-    await init_db()
+    del app
+    if os.getenv("DATABASE_URL", "").strip():
+        await init_db()
+    else:
+        logger.warning("DATABASE_URL is not configured; database routes are disabled in this deployment")
     try:
         await configure_webhook()
     except Exception:
@@ -33,7 +57,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.2", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.3", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,8 +80,10 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulsesbot",
-        "version": "2.2",
+        "version": "2.3",
         "scanner": "github-actions-15s-window",
+        "telegram_configured": TELEGRAM_ENABLED,
+        "database_configured": bool(os.getenv("DATABASE_URL", "").strip()),
         "market": await market_data.health(),
     }
 
@@ -67,6 +93,8 @@ async def telegram_webhook(
     payload: dict,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ):
+    if not TELEGRAM_ENABLED:
+        raise HTTPException(503, "Telegram is not configured in this deployment")
     if not valid_secret(x_telegram_bot_api_secret_token):
         raise HTTPException(403, "Invalid Telegram webhook secret")
     await feed_update(payload)
@@ -75,6 +103,8 @@ async def telegram_webhook(
 
 @app.post("/api/internal/scan")
 async def internal_scan(authorization: str | None = Header(default=None)):
+    if bot is None:
+        raise HTTPException(503, "Telegram is not configured in this deployment")
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Bearer token required")
     await verify_oidc(authorization.split(" ", 1)[1])
