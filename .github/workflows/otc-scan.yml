@@ -1,14 +1,25 @@
 name: AlphaPulse OTC Scanner
+
 on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'bot/**'
+      - 'api/**'
+      - '.github/workflows/otc-scan.yml'
+
 permissions:
   contents: read
   id-token: write
+
 concurrency:
   group: alphapulsesbot-scanner
-  cancel-in-progress: false
+  cancel-in-progress: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -20,9 +31,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for i in $(seq 1 17); do
-            TOKEN_JSON=$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulsesbot-scanner")
+          for i in $(seq 1 19); do
+            START=$(date +%s)
+            TOKEN_JSON=$(curl --fail --silent --show-error \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulsesbot-scanner")
             TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$TOKEN_JSON")
-            curl --fail --silent --show-error --retry 2 -X POST "$SCAN_URL" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json"
-            [ "$i" -eq 17 ] || sleep 15
+            curl --fail --silent --show-error --retry 2 \
+              -X POST "$SCAN_URL" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json"
+            if [ "$i" -lt 19 ]; then
+              ELAPSED=$(( $(date +%s) - START ))
+              SLEEP_FOR=$(( 15 - ELAPSED ))
+              if [ "$SLEEP_FOR" -gt 0 ]; then sleep "$SLEEP_FOR"; fi
+            fi
           done
