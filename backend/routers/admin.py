@@ -13,6 +13,7 @@ from backend.services.auto_trade import (
     latest_execution,
     maybe_execute_signal,
     serialize_auto_trade,
+    trading_is_demo,
     update_auto_trade_control,
 )
 from backend.services.control import (
@@ -132,7 +133,7 @@ async def state(_: TelegramMiniAppUser = Depends(admin_user)):
         'open_positions': open_positions,
         'latest_signal': out(latest) if latest else None,
         'latest_execution': await latest_execution(),
-        'trade_account': 'demo' if market.get('demo') else 'real',
+        'trade_account': 'demo' if trading_is_demo() else 'real',
     })
     if control and control.next_vip_at:
         payload['vip_seconds_remaining'] = max(0, int((control.next_vip_at - utcnow()).total_seconds()))
@@ -153,8 +154,8 @@ async def patch_state(
         raise HTTPException(400, 'Unknown timeframe')
     if 'vip_interval_seconds' in changes:
         changes['vip_interval_seconds'] = max(60, min(86400, int(changes['vip_interval_seconds'])))
-    if 'trade_amount' in changes and float(changes['trade_amount']) <= 0:
-        raise HTTPException(400, 'Trade amount must be greater than zero')
+    if 'trade_amount' in changes and not (1.0 <= float(changes['trade_amount']) <= 50000.0):
+        raise HTTPException(400, 'Trade amount must be between 1 and 50000')
 
     auto_map = {
         'auto_trade_enabled': 'enabled',
