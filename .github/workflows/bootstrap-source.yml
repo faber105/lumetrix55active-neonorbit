@@ -1,0 +1,34 @@
+name: Bootstrap AlphaPulse Source
+
+on:
+  push:
+    paths:
+      - 'alphapulse_source.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Unpack sanitized project source
+        run: |
+          set -euo pipefail
+          unzip -o alphapulse_source.zip
+          rm -f alphapulse_source.zip
+      - name: Commit extracted source
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Publish AlphaPulse OTC source'
+          git push origin HEAD:main

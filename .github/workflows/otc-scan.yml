@@ -1,0 +1,41 @@
+name: AlphaPulse OTC Scanner
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: alphapulse-otc-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Continuously trigger protected OTC scanner
+        shell: bash
+        env:
+          SCAN_URL: https://alpha-pulse-phi.vercel.app/api/internal/scan
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 17); do
+            OIDC_JSON=$(curl --fail --silent --show-error \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulse-otc-scanner")
+            OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$OIDC_JSON")
+
+            curl --fail --silent --show-error --retry 2 \
+              -X POST "$SCAN_URL" \
+              -H "Authorization: Bearer $OIDC_TOKEN" \
+              -H "Content-Type: application/json"
+
+            if [ "$i" -lt 17 ]; then
+              sleep 15
+            fi
+          done
