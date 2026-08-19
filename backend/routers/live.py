@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 
-from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal, SignalResult
+from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal
 from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
-from backend.services.positions import reconcile_positions, serialize_position, take_signal
+from backend.services.positions import reconcile_positions, serialize_position, sync_broker_positions, take_signal
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
@@ -38,6 +38,9 @@ async def take(
 
 @router.get('/active')
 async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
+    # For the admin's connected Pocket session, passively detect a deal opened
+    # manually in Pocket and attach it to the matching recent AlphaPulse signal.
+    broker_sync = await sync_broker_positions(user.id)
     await reconcile_positions()
     async with AsyncSessionLocal() as db:
         rows = (
@@ -48,7 +51,10 @@ async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
                 .limit(20)
             )
         ).scalars().all()
-        return [serialize_position(row) for row in rows]
+        payload = [serialize_position(row) for row in rows]
+    # Keep the existing array API for Mini App compatibility. The sync status is
+    # intentionally not exposed because deal counts are account-private.
+    return payload
 
 
 @router.get('/position/{position_id}')
