@@ -47,6 +47,27 @@ class SignalEngine:
         if not confirmed: return None
         confirmed.sort(key=lambda x:x['confidence'],reverse=True); return confirmed[0]
 
+    async def scan_strategy(self, timeframe: str, assets: list[str], strategy: str) -> Optional[dict]:
+        if timeframe not in TF_SECONDS: raise ValueError(f'Unsupported timeframe: {timeframe}')
+        if strategy not in STRATEGIES: raise ValueError(f'Unknown strategy: {strategy}')
+        results=[]; unavailable=None
+        for asset in assets:
+            if asset not in OTC_ASSETS: continue
+            try:
+                candidate=await self.evaluate_asset(asset,timeframe,strategy)
+                if candidate: results.append(candidate)
+            except MarketDataUnavailable as exc:
+                unavailable=exc
+                if 'SSID' in str(exc) or 'connection failed' in str(exc).lower(): raise
+            except Exception as exc:
+                logger.warning('Strategy scan failed %s/%s/%s: %s',strategy,asset,timeframe,exc)
+        if not results:
+            if unavailable and not results:
+                logger.debug('No strategy setup; last market error: %s', unavailable)
+            return None
+        results.sort(key=lambda x:x['confidence'],reverse=True)
+        return results[0]
+
     async def scan_best(self, timeframe: str, assets: list[str]) -> Optional[dict]:
         if timeframe not in TF_SECONDS: raise ValueError(f'Unsupported timeframe: {timeframe}')
         results=[]; unavailable=None
