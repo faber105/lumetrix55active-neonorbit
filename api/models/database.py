@@ -15,8 +15,9 @@ settings = get_settings()
 
 engine_options = {"pool_pre_ping": True}
 if not settings.async_database_url.startswith("sqlite"):
-    # Serverless functions should not keep a process-local SQLAlchemy pool alive.
-    # Neon/PgBouncer handles pooling outside the function.
+    # SQLAlchemy's asyncpg dialect passes URL query params as connect() kwargs.
+    # For Neon/PgBouncer, use asyncpg-native SSL and disable its statement cache.
+    engine_options["connect_args"] = {"ssl": "require", "statement_cache_size": 0}
     import os
     if os.getenv("VERCEL"):
         engine_options["poolclass"] = NullPool
@@ -36,7 +37,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    # Import models so SQLAlchemy registers all tables before create_all.
     import api.models.app_setting  # noqa: F401
     import api.models.channel_join  # noqa: F401
     import api.models.payment  # noqa: F401
