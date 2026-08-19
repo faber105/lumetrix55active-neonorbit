@@ -1,45 +1,314 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import CandleChart from "./CandleChart";
+import { TG, TG_ID, apiFetch, patchJson, postJson } from "./api";
 
-const API = window.location.origin;
-const TG = window.Telegram?.WebApp;
-const TG_ID = TG?.initDataUnsafe?.user?.id ?? null;
-const PAIRS = ["EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","NZD/USD","EUR/GBP","EUR/JPY","GBP/JPY"];
-const TFS = ["1m","5m","15m","1h"];
-const C={bg:"#0d1117",card:"#141824",card2:"#1a1f2e",border:"#232b3e",text:"#e8eaf6",muted:"#8892b0",accent:"#5c6bc0",accent2:"#3f51b5",green:"#00e5a0",red:"#ff4d6d",gold:"#f5c542"};
-const box={background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:16};
-const button={border:0,borderRadius:10,padding:"11px 14px",background:`linear-gradient(90deg,${C.accent2},${C.accent})`,color:"white",fontWeight:800,cursor:"pointer"};
+const STRATEGIES = [
+  { id: "ema_trend", short: "EMA", name: "EMA Trend", desc: "EMA20/50/200 + MACD + RSI" },
+  { id: "bollinger_reversal", short: "BB", name: "Bollinger Reversal", desc: "Bollinger Bands + RSI" },
+  { id: "atr_breakout", short: "ATR", name: "ATR Breakout", desc: "ATR volatility + breakout momentum" },
+];
+const TFS = ["1m", "5m", "15m", "1h"];
+const PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "EUR/GBP", "EUR/JPY", "GBP/JPY"];
 
-function Badge({direction}){const buy=direction==="BUY";return <span style={{padding:"3px 9px",borderRadius:7,fontSize:12,fontWeight:800,color:buy?C.green:C.red,border:`1px solid ${buy?C.green:C.red}`,background:buy?"rgba(0,229,160,.1)":"rgba(255,77,109,.1)"}}>{buy?"BUY / CALL":"SELL / PUT"}</span>}
-function Pill({children,color=C.accent}){return <span style={{fontSize:11,border:`1px solid ${color}`,color,borderRadius:20,padding:"2px 7px"}}>{children}</span>}
-function SignalCard({s}){return <div style={{...box,marginBottom:10,background:`linear-gradient(135deg,${C.card},${C.card2})`}}>
-  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}><b>{s.pair}</b><div style={{display:"flex",gap:6,alignItems:"center"}}>{s.is_vip&&<Pill color={C.gold}>VIP</Pill>}<Pill>{s.timeframe}</Pill><Badge direction={s.direction}/></div></div>
-  <div style={{height:6,background:C.card2,borderRadius:8,overflow:"hidden",margin:"10px 0 6px"}}><div style={{height:"100%",width:`${Math.min(100,s.confidence||0)}%`,background:(s.confidence||0)>=80?C.green:C.gold}}/></div>
-  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted}}><span>Confidence <b style={{color:C.text}}>{s.confidence}%</b></span>{s.result&&<span style={{color:s.result==="WIN"?C.green:s.result==="LOSS"?C.red:C.gold,fontWeight:800}}>{s.result}</span>}</div>
-  {(s.strategy_label||s.strategy)&&<div style={{fontSize:12,color:C.muted,marginTop:8}}>Strategy: <b style={{color:C.text}}>{s.strategy_label||s.strategy}</b></div>}
-  {s.entry_time&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>Entry: <b style={{color:C.green}}>{new Date(s.entry_time).toLocaleTimeString()}</b>{s.expiry_time&&<> · Expiry: <b style={{color:C.text}}>{new Date(s.expiry_time).toLocaleTimeString()}</b></>}</div>}
-  {s.reason&&<div style={{fontSize:12,color:C.muted,borderTop:`1px solid ${C.border}`,paddingTop:8,marginTop:8}}>{s.reason}</div>}
-</div>}
-function Selector({value,onChange,items}){return <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{items.map(x=><button key={x} onClick={()=>onChange(x)} style={{border:`1px solid ${value===x?C.accent:C.border}`,background:value===x?C.accent2:C.card2,color:value===x?"white":C.muted,borderRadius:8,padding:"6px 10px",fontSize:12,fontWeight:value===x?800:500}}>{x}</button>)}</div>}
-function Empty({children}){return <div style={{...box,textAlign:"center",color:C.muted,fontSize:13}}>{children}</div>}
+const strategyName = (id) => STRATEGIES.find((s) => s.id === id)?.name || id;
+const timeFmt = (value) => (value ? new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—");
+const priceFmt = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return Math.abs(n) >= 100 ? n.toFixed(3) : n.toFixed(5);
+};
 
-function Signals(){const[pair,setPair]=useState("EUR/USD"),[tf,setTf]=useState("5m"),[signal,setSignal]=useState(null),[loading,setLoading]=useState(false),[error,setError]=useState("");
- const analyze=async()=>{setLoading(true);setError("");setSignal(null);try{const r=await fetch(`${API}/api/signals/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pair,timeframe:tf,user_id:TG_ID})});const d=await r.json();if(!r.ok||d.error)throw new Error(d.detail||d.error||"No signal");setSignal(d)}catch(e){setError(e.message)}finally{setLoading(false)}};
- return <><SectionTitle title="Signal Analysis" sub="Select an OTC pair and timeframe"/><Label>Currency Pair</Label><Selector value={pair} onChange={setPair} items={PAIRS}/><div style={{height:14}}/><Label>Timeframe</Label><Selector value={tf} onChange={setTf} items={TFS}/><button style={{...button,width:"100%",margin:"18px 0 14px",opacity:loading?.6:1}} onClick={analyze} disabled={loading}>{loading?"⏳ Analyzing...":"⚡ Analyze Market"}</button>{error&&<div style={{...box,color:C.red,borderColor:C.red,marginBottom:10}}>{error}</div>}{signal&&<SignalCard s={signal}/>}</>}
+function usePolling(fn, delay, enabled = true) {
+  const fnRef = useRef(fn);
+  useEffect(() => { fnRef.current = fn; }, [fn]);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let stopped = false;
+    let timer = null;
+    const run = async () => {
+      try { await fnRef.current(); } catch { /* UI owns errors */ }
+      if (!stopped) timer = window.setTimeout(run, delay);
+    };
+    run();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [delay, enabled]);
+}
 
-function VIP(){const[items,setItems]=useState([]),[loading,setLoading]=useState(true);const load=useCallback(async()=>{try{const r=await fetch(`${API}/api/signals/vip?limit=20`);const d=await r.json();setItems(Array.isArray(d)?d:[])}catch{setItems([])}finally{setLoading(false)}},[]);useEffect(()=>{load();const id=setInterval(load,30000);return()=>clearInterval(id)},[load]);return <><SectionTitle title="VIP Signals" sub="Only high-confidence setups ≥ 80%"/>{loading?<Empty>Loading VIP signals…</Empty>:items.length?items.map(s=><SignalCard key={s.id} s={s}/>):<Empty>No VIP signals yet. The scanner publishes only confirmed strategy setups.</Empty>}</>}
+function DirectionBadge({ direction }) {
+  const buy = direction === "BUY";
+  return <span className={`direction ${buy ? "buy" : "sell"}`}>{buy ? "▲ CALL" : "▼ PUT"}</span>;
+}
 
-function Market(){const[pair,setPair]=useState("EUR/USD"),[data,setData]=useState(null),[loading,setLoading]=useState(false),[error,setError]=useState("");const run=async()=>{setLoading(true);setError("");try{const r=await fetch(`${API}/api/market/analysis?pair=${encodeURIComponent(pair)}`);const d=await r.json();if(!r.ok)throw new Error(d.detail||"Market data unavailable");setData(d)}catch(e){setError(e.message);setData(null)}finally{setLoading(false)}};return <><SectionTitle title="Market AI" sub="Multi-timeframe analysis of the selected OTC pair"/><Label>Currency Pair</Label><Selector value={pair} onChange={setPair} items={PAIRS}/><button style={{...button,width:"100%",margin:"18px 0 14px"}} onClick={run}>{loading?"Analyzing…":"📈 Analyze Pair"}</button>{error&&<div style={{...box,color:C.red,borderColor:C.red}}>{error}</div>}{data&&<div style={box}><h3 style={{margin:"0 0 12px"}}>{data.pair}</h3><div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>{Object.entries(data.timeframes||{}).map(([tf,v])=><div key={tf} style={{background:C.card2,borderRadius:10,padding:10}}><div style={{fontSize:11,color:C.muted}}>{tf}</div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4}}><Badge direction={v.direction}/><b>{v.confidence}%</b></div></div>)}</div><div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>{Object.entries(data.indicators||{}).map(([k,v])=><Pill key={k}>{k}: {v}</Pill>)}</div></div>}</>}
+function ResultBadge({ result }) {
+  if (!result) return null;
+  return <span className={`result ${String(result).toLowerCase()}`}>{result}</span>;
+}
 
-function Settings(){const[settings,setSettings]=useState({vip_enabled:true,notification_frequency:"standard",signal_mode:"vip"}),[saved,setSaved]=useState(false);useEffect(()=>{if(!TG_ID)return;fetch(`${API}/api/settings/user/${TG_ID}`).then(r=>r.json()).then(setSettings).catch(()=>{})},[]);const patch=async(next)=>{setSettings(next);setSaved(false);if(!TG_ID)return;try{const r=await fetch(`${API}/api/settings/user/${TG_ID}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(next)});if(r.ok){setSettings(await r.json());setSaved(true);setTimeout(()=>setSaved(false),1600)}}catch{}};return <><SectionTitle title="Settings" sub={TG_ID?`Telegram ID: ${TG_ID}`:"Open inside Telegram to persist settings"}/><div style={box}>
- <Row label="VIP notifications" desc="Receive VIP alerts"><Toggle value={settings.vip_enabled} onChange={v=>patch({...settings,vip_enabled:v})}/></Row>
- <Label>Notification Frequency</Label><Selector value={settings.notification_frequency} onChange={v=>patch({...settings,notification_frequency:v})} items={["rarely","standard","often"]}/><div style={{height:16}}/><Label>Signal Mode</Label><Selector value={settings.signal_mode} onChange={v=>patch({...settings,signal_mode:v})} items={["all","vip","mixed"]}/>{saved&&<div style={{color:C.green,fontSize:12,marginTop:12}}>✓ Saved</div>}
- </div></>}
+function SectionTitle({ title, sub, action }) {
+  return <div className="section-title"><div><h2>{title}</h2>{sub && <p>{sub}</p>}</div>{action}</div>;
+}
 
-function Stats(){const[stats,setStats]=useState(null),[history,setHistory]=useState([]);useEffect(()=>{fetch(`${API}/api/stats/summary`).then(r=>r.json()).then(setStats).catch(()=>{});fetch(`${API}/api/signals/history?limit=20`).then(r=>r.json()).then(d=>setHistory(Array.isArray(d)?d:[])).catch(()=>{})},[]);const cards=[['Winrate',stats?.winrate!=null?`${stats.winrate}%`:'—',C.green],['VIP Winrate',stats?.vip_winrate!=null?`${stats.vip_winrate}%`:'—',C.gold],['Signals',stats?.total??history.length,C.accent],['VIP',stats?.vip_total??'—',C.accent2]];return <><SectionTitle title="Statistics" sub="Resolved signals and online ML performance"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>{cards.map(([l,v,c])=><div key={l} style={{...box,textAlign:"center"}}><div style={{fontSize:11,color:C.muted,textTransform:"uppercase"}}>{l}</div><div style={{fontSize:25,fontWeight:900,color:c,marginTop:5}}>{v}</div></div>)}</div><div style={box}><Label>Last 20 Signals</Label>{history.length?history.map(s=><div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:`1px solid ${C.border}`,padding:"8px 0"}}><div><b style={{fontSize:13}}>{s.pair}</b> <Badge direction={s.direction}/></div><div style={{fontSize:12,color:s.result==="WIN"?C.green:s.result==="LOSS"?C.red:C.muted}}>{s.confidence}% · {s.result}</div></div>):<div style={{color:C.muted,fontSize:13}}>No history yet.</div>}</div></>}
+function StrategySelector({ value, onChange }) {
+  return <div className="strategy-grid">{STRATEGIES.map((s) => (
+    <button key={s.id} className={`strategy-card ${value === s.id ? "active" : ""}`} onClick={() => onChange(s.id)}>
+      <span className="strategy-short">{s.short}</span><b>{s.name}</b><small>{s.desc}</small>
+    </button>
+  ))}</div>;
+}
 
-function Toggle({value,onChange}){return <button onClick={()=>onChange(!value)} style={{width:44,height:24,borderRadius:20,border:0,background:value?C.accent2:C.card2,padding:3}}><span style={{display:"block",width:18,height:18,borderRadius:"50%",background:"white",transform:`translateX(${value?20:0}px)`,transition:".2s"}}/></button>}
-function Row({label,desc,children}){return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingBottom:14,marginBottom:14,borderBottom:`1px solid ${C.border}`}}><div><b>{label}</b><div style={{fontSize:11,color:C.muted}}>{desc}</div></div>{children}</div>}
-function Label({children}){return <div style={{fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:1,marginBottom:7}}>{children}</div>}
-function SectionTitle({title,sub}){return <div style={{marginBottom:16}}><div style={{fontSize:20,fontWeight:900}}>{title}</div><div style={{fontSize:12,color:C.muted,marginTop:3}}>{sub}</div></div>}
-const tabs=[['signals','Signals','📡'],['vip','VIP','🔥'],['market','Market AI','📈'],['settings','Settings','⚙️'],['stats','Stats','📊']];
-export default function App(){const[tab,setTab]=useState('vip');useEffect(()=>{TG?.ready();TG?.expand();try{TG?.disableVerticalSwipes?.()}catch{}},[]);return <div style={{minHeight:'100vh',background:C.bg,color:C.text,fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",paddingBottom:74}}><header style={{position:'sticky',top:0,zIndex:10,display:'flex',alignItems:'center',gap:10,padding:'13px 16px',background:`linear-gradient(135deg,${C.bg},${C.card})`,borderBottom:`1px solid ${C.border}`}}><div style={{width:34,height:34,borderRadius:10,display:'grid',placeItems:'center',background:`linear-gradient(135deg,${C.accent2},${C.accent})`}}>⚡</div><div><b>AlphaPulse</b><div style={{fontSize:10,color:C.accent,textTransform:'uppercase',letterSpacing:1}}>AI Forex Engine</div></div><div style={{marginLeft:'auto',fontSize:11,color:C.green,border:`1px solid rgba(0,229,160,.3)`,borderRadius:20,padding:'3px 9px'}}>● LIVE</div></header><main style={{padding:'16px'}}>{tab==='signals'&&<Signals/>}{tab==='vip'&&<VIP/>}{tab==='market'&&<Market/>}{tab==='settings'&&<Settings/>}{tab==='stats'&&<Stats/>}</main><nav style={{position:'fixed',left:0,right:0,bottom:0,zIndex:20,display:'flex',background:C.bg,borderTop:`1px solid ${C.border}`,padding:'7px 0 10px'}}>{tabs.map(([id,label,icon])=><button key={id} onClick={()=>setTab(id)} style={{flex:1,border:0,background:'none',color:tab===id?C.accent:C.muted,opacity:tab===id?1:.55,fontSize:10,fontWeight:tab===id?800:500}}><span style={{display:'block',fontSize:18,marginBottom:2}}>{icon}</span>{label}</button>)}</nav></div>}
+function Chips({ items, value, onChange }) {
+  return <div className="chips">{items.map((item) => <button key={item} className={value === item ? "active" : ""} onClick={() => onChange(item)}>{item}</button>)}</div>;
+}
+
+function Toggle({ value, onChange }) {
+  return <button aria-label="toggle" className={`toggle ${value ? "on" : ""}`} onClick={() => onChange(!value)}><span /></button>;
+}
+
+function SignalCard({ signal, onTake, busy = false, compact = false }) {
+  if (!signal) return null;
+  const expired = signal.expiry_time && Date.now() >= new Date(signal.expiry_time).getTime();
+  return <article className={`signal-card ${signal.is_vip ? "vip" : ""} ${compact ? "compact" : ""}`}>
+    <div className="signal-top">
+      <div><div className="signal-pair">{signal.pair}</div><div className="muted tiny">{strategyName(signal.strategy)} · {signal.timeframe}</div></div>
+      <div className="row gap"><span className={`quality ${signal.is_vip ? "gold" : ""}`}>{signal.confidence}%</span><DirectionBadge direction={signal.direction} /></div>
+    </div>
+    <div className="confidence"><span style={{ width: `${Math.min(100, Number(signal.confidence) || 0)}%` }} /></div>
+    <div className="signal-times"><span>Вход <b>{timeFmt(signal.entry_time)}</b></span><span>Закрытие <b>{timeFmt(signal.expiry_time)}</b></span></div>
+    {!compact && signal.reason && <p className="reason">{signal.reason}</p>}
+    <div className="signal-bottom">
+      <ResultBadge result={signal.result} />
+      {signal.is_vip && <span className="vip-label">VIP</span>}
+      {onTake && signal.result === "PENDING" && !expired && <button className="primary small" disabled={busy} onClick={() => onTake(signal)}>{busy ? "Открываю…" : "Взял сигнал"}</button>}
+    </div>
+  </article>;
+}
+
+function Empty({ children }) { return <div className="empty">{children}</div>; }
+function ErrorBox({ children }) { return children ? <div className="error-box">{children}</div> : null; }
+
+function useTakeSignal(onDone) {
+  const [taking, setTaking] = useState(null);
+  const take = useCallback(async (signal) => {
+    setTaking(signal.id);
+    try {
+      const position = await postJson("/api/live/take", { signal_id: signal.id });
+      TG?.HapticFeedback?.notificationOccurred?.("success");
+      onDone?.(position);
+      return position;
+    } catch (e) {
+      TG?.HapticFeedback?.notificationOccurred?.("error");
+      throw e;
+    } finally { setTaking(null); }
+  }, [onDone]);
+  return { take, taking };
+}
+
+function Signals({ onOpenLive }) {
+  const [strategy, setStrategy] = useState("ema_trend");
+  const [tf, setTf] = useState("1m");
+  const [latest, setLatest] = useState(null);
+  const [feed, setFeed] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const { take, taking } = useTakeSignal((position) => onOpenLive(position.id));
+
+  const loadFeed = useCallback(async () => {
+    const rows = await apiFetch("/api/live/feed?kind=regular&limit=12");
+    setFeed(Array.isArray(rows) ? rows : []);
+  }, []);
+  usePolling(loadFeed, 2200, true);
+
+  const scan = async () => {
+    setBusy(true); setError(""); setLatest(null);
+    try {
+      const data = await postJson("/api/signals/scan-strategy", { strategy, timeframe: tf, min_confidence: 72 });
+      if (data.status !== "SIGNAL" || !data.signal) throw new Error("Сейчас нет подтверждённого сетапа по этой стратегии.");
+      setLatest(data.signal);
+      loadFeed();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const handleTake = async (signal) => {
+    setError("");
+    try { await take(signal); } catch (e) { setError(e.message); }
+  };
+
+  return <>
+    <SectionTitle title="Сигналы" sub="Выбери одну стратегию — бот проверит все OTC-пары и найдёт лучший подтверждённый сетап." />
+    <div className="panel"><label>Стратегия</label><StrategySelector value={strategy} onChange={setStrategy} /><label className="top-gap">Таймфрейм</label><Chips items={TFS} value={tf} onChange={setTf} /><button className="primary full top-gap" onClick={scan} disabled={busy}>{busy ? "Анализирую все пары…" : "⚡ Анализировать все пары"}</button></div>
+    <ErrorBox>{error}</ErrorBox>
+    {latest && <div className="top-gap"><SignalCard signal={latest} onTake={handleTake} busy={taking === latest.id} /></div>}
+    <SectionTitle title="Последние сигналы" sub="Обновляются автоматически" />
+    <div className="stack">{feed.length ? feed.map((s) => <SignalCard key={s.id} signal={s} onTake={handleTake} busy={taking === s.id} compact />) : <Empty>Обычных сигналов пока нет.</Empty>}</div>
+  </>;
+}
+
+function VIP({ onOpenLive }) {
+  const [items, setItems] = useState([]);
+  const [error, setError] = useState("");
+  const { take, taking } = useTakeSignal((position) => onOpenLive(position.id));
+  const load = useCallback(async () => {
+    try { setItems(await apiFetch("/api/live/feed?kind=vip&limit=20")); setError(""); } catch (e) { setError(e.message); }
+  }, []);
+  usePolling(load, 1800, true);
+  const handleTake = async (signal) => { try { await take(signal); } catch (e) { setError(e.message); } };
+  return <>
+    <SectionTitle title="VIP" sub="Высокая уверенность ≥80%. Автоматический VIP-скан управляется админом и не создаёт сигнал, если сетап не подтверждён." />
+    <ErrorBox>{error}</ErrorBox>
+    <div className="stack">{items.length ? items.map((s) => <SignalCard key={s.id} signal={s} onTake={handleTake} busy={taking === s.id} />) : <Empty>Подтверждённого VIP-сигнала сейчас нет.</Empty>}</div>
+  </>;
+}
+
+function Live({ requestedPositionId }) {
+  const [positions, setPositions] = useState([]);
+  const [selectedId, setSelectedId] = useState(requestedPositionId || null);
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => { if (requestedPositionId) setSelectedId(requestedPositionId); }, [requestedPositionId]);
+  const loadPositions = useCallback(async () => {
+    try {
+      const rows = await apiFetch("/api/live/active");
+      setPositions(Array.isArray(rows) ? rows : []);
+      if (!selectedId && rows?.length) setSelectedId((rows.find((p) => p.status === "OPEN") || rows[0]).id);
+    } catch (e) { setError(e.message); }
+  }, [selectedId]);
+  usePolling(loadPositions, 1800, Boolean(TG_ID));
+
+  const loadDetail = useCallback(async () => {
+    if (!selectedId) return;
+    try { setDetail(await apiFetch(`/api/live/position/${selectedId}?count=50`)); setError(""); }
+    catch (e) { setError(e.message); }
+  }, [selectedId]);
+  usePolling(loadDetail, 900, Boolean(selectedId && TG_ID));
+
+  if (!TG_ID) return <><SectionTitle title="Live" sub="Открой Mini App внутри Telegram" /><Empty>Live-позиции доступны только внутри Telegram.</Empty></>;
+  const p = detail?.position;
+  const progress = p ? Math.max(0, Math.min(100, 100 - (Number(detail.seconds_to_expiry || 0) / Math.max(1, (new Date(p.expiry_time) - new Date(p.entry_time)) / 1000)) * 100)) : 0;
+  return <>
+    <SectionTitle title="Live сделка" sub="Текущая свеча и цена обновляются примерно раз в секунду с Pocket Option." />
+    <ErrorBox>{error}</ErrorBox>
+    <div className="position-tabs">{positions.map((pos) => <button key={pos.id} className={selectedId === pos.id ? "active" : ""} onClick={() => setSelectedId(pos.id)}><span>{pos.pair}</span><small>{pos.status === "OPEN" ? "LIVE" : pos.result}</small></button>)}</div>
+    {!p ? <Empty>Возьми обычный или VIP-сигнал — активная позиция появится здесь.</Empty> : <div className="live-card">
+      <div className="live-head"><div><div className="signal-pair">{p.pair}</div><div className="muted tiny">{strategyName(p.strategy)} · {p.timeframe} · {p.source.toUpperCase()}</div></div><div className="row gap"><DirectionBadge direction={p.direction} /><ResultBadge result={p.status === "CLOSED" ? p.result : detail.floating_result} /></div></div>
+      <div className="live-metrics"><div><small>Вход</small><b>{priceFmt(p.entry_price)}</b></div><div><small>Сейчас</small><b>{priceFmt(detail.current_price)}</b></div><div><small>До закрытия</small><b>{p.status === "OPEN" ? `${detail.seconds_to_expiry}s` : "0s"}</b></div></div>
+      <div className="expiry-progress"><span style={{ width: `${p.status === "CLOSED" ? 100 : progress}%` }} /></div>
+      <CandleChart candles={detail.candles || []} entryPrice={p.entry_price} currentPrice={detail.current_price} />
+      <div className="live-foot"><span>Открыта: <b>{timeFmt(p.entry_time)}</b></span><span>Экспирация: <b>{timeFmt(p.expiry_time)}</b></span>{p.status === "CLOSED" && <span>Close: <b>{priceFmt(p.close_price)}</b></span>}</div>
+    </div>}
+  </>;
+}
+
+function Market() {
+  const [pair, setPair] = useState("EUR/USD");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const analyze = async () => {
+    setLoading(true); setError("");
+    try { setData(await apiFetch(`/api/market/analysis?pair=${encodeURIComponent(pair)}`)); }
+    catch (e) { setError(e.message); setData(null); }
+    finally { setLoading(false); }
+  };
+  return <>
+    <SectionTitle title="Market AI" sub="Анализ выбранной OTC-пары по нескольким таймфреймам." />
+    <div className="panel"><label>Валютная пара</label><Chips items={PAIRS} value={pair} onChange={setPair} /><button className="primary full top-gap" onClick={analyze} disabled={loading}>{loading ? "Анализ…" : "📈 Анализировать пару"}</button></div>
+    <ErrorBox>{error}</ErrorBox>
+    {data && <div className="panel top-gap"><div className="signal-pair">{data.pair}</div><div className="market-grid">{Object.entries(data.timeframes || {}).map(([tf, item]) => <div key={tf}><small>{tf}</small><DirectionBadge direction={item.direction} /><b>{item.confidence}%</b></div>)}</div><div className="indicator-row">{Object.entries(data.indicators || {}).map(([k, v]) => <span key={k}>{k}: <b>{v}</b></span>)}</div></div>}
+  </>;
+}
+
+function SettingsPane() {
+  const [settings, setSettings] = useState({ vip_enabled: true, notification_frequency: "standard", signal_mode: "all" });
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { if (TG_ID) apiFetch(`/api/settings/user/${TG_ID}`).then(setSettings).catch(() => {}); }, []);
+  const save = async (next) => {
+    setSettings(next); setSaved(false);
+    if (!TG_ID) return;
+    try { const data = await patchJson(`/api/settings/user/${TG_ID}`, next); setSettings(data); setSaved(true); setTimeout(() => setSaved(false), 1200); } catch { /* no-op */ }
+  };
+  return <div className="panel"><div className="setting-row"><div><b>VIP уведомления</b><small>Получать VIP-сигналы в Telegram</small></div><Toggle value={settings.vip_enabled} onChange={(v) => save({ ...settings, vip_enabled: v })} /></div><label>Режим сигналов</label><Chips items={["all", "vip", "mixed"]} value={settings.signal_mode} onChange={(v) => save({ ...settings, signal_mode: v })} /><label className="top-gap">Частота</label><Chips items={["rarely", "standard", "often"]} value={settings.notification_frequency} onChange={(v) => save({ ...settings, notification_frequency: v })} />{saved && <div className="saved">✓ Сохранено</div>}</div>;
+}
+
+function StatsPane() {
+  const [stats, setStats] = useState(null);
+  const [history, setHistory] = useState([]);
+  const load = useCallback(async () => {
+    const [s, h] = await Promise.all([apiFetch("/api/stats/summary"), apiFetch("/api/signals/history?limit=12")]);
+    setStats(s); setHistory(Array.isArray(h) ? h : []);
+  }, []);
+  usePolling(load, 5000, true);
+  return <><div className="stats-grid"><div><small>Winrate</small><b>{stats?.winrate ?? "—"}{stats?.winrate != null ? "%" : ""}</b></div><div><small>VIP Winrate</small><b>{stats?.vip_winrate ?? "—"}{stats?.vip_winrate != null ? "%" : ""}</b></div><div><small>Signals</small><b>{stats?.total ?? "—"}</b></div><div><small>VIP</small><b>{stats?.vip_total ?? "—"}</b></div></div><div className="stack top-gap">{history.map((s) => <SignalCard key={s.id} signal={s} compact />)}</div></>;
+}
+
+function AdminPane({ onAdminState }) {
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try { const data = await apiFetch("/api/admin/state"); setState(data); onAdminState?.(true); setError(""); }
+    catch (e) { onAdminState?.(false); setError(e.status === 403 ? "Нет доступа к админке" : e.message); }
+  }, [onAdminState]);
+  usePolling(load, 1600, true);
+
+  const patch = async (changes) => {
+    setError("");
+    try { const data = await patchJson("/api/admin/state", changes); setState((prev) => ({ ...prev, ...data })); } catch (e) { setError(e.message); }
+  };
+  const action = async (kind) => {
+    setBusy(kind); setMessage(""); setError("");
+    try {
+      const data = await postJson(kind === "vip" ? "/api/admin/vip-now" : "/api/admin/scan-now");
+      setMessage(data.status === "SIGNAL" ? `${data.vip ? "VIP" : "Сигнал"}: ${data.signal?.pair} ${data.signal?.direction} ${data.signal?.confidence}%` : "Сейчас подтверждённого сетапа нет.");
+      load();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(""); }
+  };
+
+  if (!state) return <><ErrorBox>{error}</ErrorBox><Empty>Проверяю доступ к админке…</Empty></>;
+  const mins = Math.max(1, Math.round((state.vip_interval_seconds || 300) / 60));
+  return <>
+    <div className="admin-status"><div><span className={`dot ${state.market?.configured ? "ok" : "bad"}`} />Pocket <b>{state.market?.configured ? "ONLINE" : "OFFLINE"}</b></div><div>Открытых позиций <b>{state.open_positions}</b></div><div>VIP через <b>{state.vip_seconds_remaining ?? "—"}s</b></div></div>
+    <div className="panel"><label>Глобальная стратегия</label><StrategySelector value={state.selected_strategy} onChange={(v) => patch({ selected_strategy: v })} /><label className="top-gap">Таймфрейм scanner</label><Chips items={TFS} value={state.selected_timeframe} onChange={(v) => patch({ selected_timeframe: v })} /><div className="setting-row top-gap"><div><b>Обычные сигналы</b><small>Автоматический scanner</small></div><Toggle value={state.regular_enabled} onChange={(v) => patch({ regular_enabled: v })} /></div><div className="setting-row"><div><b>VIP scanner</b><small>Проверяет все пары по выбранной стратегии</small></div><Toggle value={state.vip_enabled} onChange={(v) => patch({ vip_enabled: v })} /></div><label>VIP интервал</label><div className="interval-row"><input type="number" min="1" max="1440" value={mins} onChange={(e) => patch({ vip_interval_seconds: Math.max(1, Number(e.target.value) || 1) * 60 })} /><span>мин.</span><Chips items={["1", "3", "5", "10", "15"]} value={String(mins)} onChange={(v) => patch({ vip_interval_seconds: Number(v) * 60 })} /></div><div className="admin-actions"><button className="secondary" disabled={busy} onClick={() => action("regular")}>{busy === "regular" ? "Сканирую…" : "Сигнал сейчас"}</button><button className="primary" disabled={busy} onClick={() => action("vip")}>{busy === "vip" ? "VIP анализ…" : "🔥 VIP сейчас"}</button></div>{message && <div className="saved">{message}</div>}<ErrorBox>{error}</ErrorBox></div>
+    <div className="panel top-gap"><div className="kv"><span>Последний VIP статус</span><b>{state.last_vip_status || "—"}</b></div><div className="kv"><span>Последний scanner</span><b>{timeFmt(state.last_scan_at)}</b></div><div className="kv"><span>Pocket auth</span><b>{state.market?.auth_format || "—"}</b></div>{state.latest_signal && <div className="top-gap"><SignalCard signal={state.latest_signal} compact /></div>}</div>
+  </>;
+}
+
+function More({ isAdmin, setIsAdmin }) {
+  const [page, setPage] = useState(isAdmin ? "admin" : "stats");
+  useEffect(() => { if (!isAdmin && page === "admin") setPage("stats"); }, [isAdmin, page]);
+  return <><SectionTitle title="Меню" sub="Статистика, уведомления и управление" /><div className="subnav"><button className={page === "stats" ? "active" : ""} onClick={() => setPage("stats")}>Статистика</button><button className={page === "settings" ? "active" : ""} onClick={() => setPage("settings")}>Настройки</button>{isAdmin && <button className={page === "admin" ? "active" : ""} onClick={() => setPage("admin")}>Админ</button>}</div>{page === "stats" && <StatsPane />}{page === "settings" && <SettingsPane />}{page === "admin" && <AdminPane onAdminState={setIsAdmin} />}</>;
+}
+
+const NAV = [
+  ["signals", "Сигналы", "⚡"],
+  ["vip", "VIP", "🔥"],
+  ["live", "Live", "📊"],
+  ["market", "Market", "📈"],
+  ["more", "Меню", "☰"],
+];
+
+export default function App() {
+  const [tab, setTab] = useState("signals");
+  const [livePositionId, setLivePositionId] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [marketLive, setMarketLive] = useState(false);
+
+  useEffect(() => {
+    TG?.ready(); TG?.expand();
+    try { TG?.disableVerticalSwipes?.(); } catch { /* no-op */ }
+    document.documentElement.style.background = "#090d16";
+    apiFetch("/api/market/health").then((x) => setMarketLive(Boolean(x.configured))).catch(() => setMarketLive(false));
+    if (TG_ID) apiFetch("/api/admin/state").then(() => setIsAdmin(true)).catch(() => setIsAdmin(false));
+  }, []);
+
+  const openLive = (positionId) => { setLivePositionId(positionId); setTab("live"); };
+  return <div className="app-shell">
+    <header className="header"><div className="logo">A</div><div><b>AlphaPulse</b><small>OTC AI signal engine</small></div><div className={`live-pill ${marketLive ? "ok" : ""}`}><span />{marketLive ? "POCKET LIVE" : "CONNECTING"}</div></header>
+    {!TG_ID && <div className="telegram-warning">Открой Mini App из Telegram-бота, чтобы брать сигналы и видеть свои позиции.</div>}
+    <main className="content">{tab === "signals" && <Signals onOpenLive={openLive} />}{tab === "vip" && <VIP onOpenLive={openLive} />}{tab === "live" && <Live requestedPositionId={livePositionId} />}{tab === "market" && <Market />}{tab === "more" && <More isAdmin={isAdmin} setIsAdmin={setIsAdmin} />}</main>
+    <nav className="bottom-nav">{NAV.map(([id, label, icon]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}><span>{icon}</span><small>{label}</small></button>)}</nav>
+  </div>;
+}
