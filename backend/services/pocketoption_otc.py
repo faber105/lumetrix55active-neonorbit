@@ -2,14 +2,6 @@
 
 Pocket Option has no documented public developer candle API. This adapter uses an
 unofficial read-only WebSocket client and NEVER calls order/trade methods.
-
-Two browser auth formats are supported:
-- legacy: 42[\"auth\",{\"session\":\"...\", ...}]
-- current web chart: 42[\"auth\",{\"sessionToken\":\"...\", ...}]
-
-For production the captured auth frame can be supplied through POCKET_OPTION_SSID
-or a private DB row keyed as ``__runtime_pocket__`` in ``ml_state``. The DB value
-has priority so credentials never need to be committed to GitHub.
 """
 from __future__ import annotations
 
@@ -18,6 +10,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Dict, List
 
 logger = logging.getLogger('alphapulse.pocketoption')
@@ -56,6 +49,23 @@ def _parse_wire_auth(value: str) -> dict | None:
     return None
 
 
+def _timestamp(value) -> int:
+    if value is None:
+        return int(time.time())
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+    return int(float(value))
+
+
 class PocketOptionOTCService:
     def __init__(self):
         self.ssid = ''
@@ -89,7 +99,6 @@ class PocketOptionOTCService:
             self._auth_kind = 'raw-session'
 
     async def _refresh_private_ssid(self) -> None:
-        """Load the broker auth frame from private Postgres storage once per cold start."""
         if self._private_secret_loaded:
             return
         try:
@@ -106,10 +115,10 @@ class PocketOptionOTCService:
                             except Exception:
                                 pass
                         self._apply_ssid(private_ssid)
-                    logger.info('Pocket Option credential loaded from private DB storage (%s)', self._auth_kind)
+                    logger.info('Pocket Option market session loaded (%s)', self._auth_kind)
             self._private_secret_loaded = True
         except Exception as exc:
-            logger.warning('Cannot load private Pocket Option credential: %s', type(exc).__name__)
+            logger.warning('Cannot load Pocket Option market session: %s', type(exc).__name__)
 
     @property
     def configured(self):
@@ -117,7 +126,6 @@ class PocketOptionOTCService:
 
     @staticmethod
     def _patch_socketio_event_parser(client) -> None:
-        """Fix pocketoptionapi-async 2.0.1 handling of regular Socket.IO 42 events."""
         websocket = client._websocket
         if getattr(websocket, '_alphapulse_regular_42_patch', False):
             return
@@ -149,13 +157,12 @@ class PocketOptionOTCService:
         payload = _parse_wire_auth(self.ssid)
         if payload and payload.get('sessionToken') and not payload.get('session'):
             token = str(payload.get('sessionToken') or '')
-            uid_raw = payload.get('uid') or 0
             try:
-                uid = int(uid_raw)
+                uid = int(payload.get('uid') or 0)
             except Exception:
                 uid = 0
             if len(token) < 10 or uid <= 0:
-                raise MarketDataUnavailable('Pocket Option sessionToken auth packet is incomplete')
+                raise MarketDataUnavailable('Pocket Option auth packet is incomplete')
             client = AsyncPocketOptionClient(
                 ssid=token,
                 is_demo=self.demo,
@@ -192,7 +199,7 @@ class PocketOptionOTCService:
             if self._client is not None and getattr(self._client, 'is_connected', True):
                 return self._client
             if not self.ssid:
-                raise MarketDataUnavailable('POCKET_OPTION_SSID is not configured. OTC scanner is disabled.')
+                raise MarketDataUnavailable('Pocket Option market source is not configured')
             try:
                 client = self._make_client()
                 ok = await asyncio.wait_for(client.connect(persistent=False), timeout=35)
@@ -262,13 +269,13 @@ class PocketOptionOTCService:
                 except Exception:
                     continue
             try:
-                ts = item.get('timestamp') or item.get('time') or item.get('from')
+                ts = _timestamp(item.get('timestamp') or item.get('time') or item.get('from'))
                 close = float(item.get('close', item.get('price')))
                 op = float(item.get('open', close))
                 hi = float(item.get('high', close))
                 lo = float(item.get('low', close))
                 out.append({
-                    'time': int(float(ts)) if ts is not None else int(time.time()),
+                    'time': ts,
                     'open': op,
                     'high': max(hi, op, close),
                     'low': min(lo, op, close),
@@ -284,6 +291,19 @@ class PocketOptionOTCService:
     async def latest_price(self, asset: str) -> float:
         candles = await self.get_candles(asset, '1m', 100)
         return float(candles[-1]['close'])
+
+    async def boundary_price(self, asset: str, when: datetime | int | float) -> float:
+        target = _timestamp(when)
+        minute = target - (target % 60)
+        candles = await self.get_candles(asset, '1m', 240)
+        for candle in reversed(candles):
+            candle_minute = candle['time'] - (candle['time'] % 60)
+            if candle_minute == minute:
+                return float(candle['open'])
+        previous = [c for c in candles if c['time'] <= target]
+        if previous:
+            return float(previous[-1]['close'])
+        raise MarketDataUnavailable(f'No historical boundary price for {asset}')
 
 
 market_data = PocketOptionOTCService()
