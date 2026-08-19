@@ -33,7 +33,7 @@ async def lifespan(app):
         pass
 
 
-app = FastAPI(title="AlphaPulse API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="AlphaPulse API", version="2.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -51,7 +51,13 @@ app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "alphapulsesbot", "market": await market_data.health()}
+    return {
+        "status": "ok",
+        "service": "alphapulsesbot",
+        "version": "2.1",
+        "scanner": "github-actions-15s-window",
+        "market": await market_data.health(),
+    }
 
 
 @app.post("/telegram/webhook")
@@ -73,9 +79,6 @@ async def internal_scan(authorization: str | None = Header(default=None)):
     return await scan_tick(bot)
 
 
-# Mount last so API/webhook routes keep priority. During the Vercel build the
-# original second-archive Mini App is compiled to miniapp/dist and bundled with
-# the Python function. StaticFiles(html=True) also provides SPA index fallback.
 DIST_DIR = Path(__file__).resolve().parents[1] / "miniapp" / "dist"
 if DIST_DIR.exists():
     app.mount("/", StaticFiles(directory=str(DIST_DIR), html=True), name="miniapp")
