@@ -21,6 +21,8 @@ from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire
 
 logger = logging.getLogger("alphapulse.auto_trade")
 _trade_lock = asyncio.Lock()
+MIN_TRADE_AMOUNT = 1.0
+MAX_TRADE_AMOUNT = 50000.0
 
 
 def _to_utc_naive(value) -> datetime:
@@ -31,6 +33,20 @@ def _to_utc_naive(value) -> datetime:
     if dt.tzinfo:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.replace(tzinfo=None)
+
+
+def trading_is_demo() -> bool:
+    payload = _parse_wire_auth(market_data.ssid)
+    if payload:
+        if "isDemo" in payload:
+            try:
+                return bool(int(payload.get("isDemo") or 0))
+            except Exception:
+                pass
+        current_url = str(payload.get("currentUrl") or "").strip().lower()
+        if current_url:
+            return "demo" in current_url
+    return bool(market_data.demo)
 
 
 async def get_auto_trade_control() -> AutoTradeControl | None:
@@ -72,8 +88,8 @@ async def update_auto_trade_control(**changes) -> AutoTradeControl:
             row.vip_enabled = bool(changes["vip_enabled"])
         if "amount" in changes and changes["amount"] is not None:
             amount = float(changes["amount"])
-            if amount <= 0:
-                raise ValueError("Trade amount must be greater than zero")
+            if amount < MIN_TRADE_AMOUNT or amount > MAX_TRADE_AMOUNT:
+                raise ValueError(f"Trade amount must be between {MIN_TRADE_AMOUNT:g} and {MAX_TRADE_AMOUNT:g}")
             row.amount = round(amount, 2)
         if "max_open_positions" in changes and changes["max_open_positions"] is not None:
             row.max_open_positions = max(1, min(10, int(changes["max_open_positions"])))
@@ -113,14 +129,18 @@ async def latest_execution() -> dict | None:
                 .limit(1)
             )
         ).scalar_one_or_none()
+        position = await db.get(PaperPosition, row.position_id) if row and row.position_id else None
     if row is None:
         return None
+    display_status = row.status
+    if position is not None and position.status == "CLOSED":
+        display_status = position.result.value
     return {
         "signal_id": row.signal_id,
         "position_id": row.position_id,
         "broker_order_id": row.broker_order_id,
         "amount": row.amount,
-        "status": row.status,
+        "status": display_status,
         "error": row.error,
         "created_at": row.created_at.isoformat() + "Z",
         "updated_at": row.updated_at.isoformat() + "Z",
@@ -129,11 +149,11 @@ async def latest_execution() -> dict | None:
 
 def _build_trading_client():
     """Create the upstream order-capable client without replacing read-only market data."""
-    # Importing this module installs the race-safe auth patch on the upstream client.
     from backend.services import pocketoption_compat  # noqa: F401
     from pocketoptionapi_async import AsyncPocketOptionClient
 
     payload = _parse_wire_auth(market_data.ssid)
+    is_demo = trading_is_demo()
     if payload and payload.get("sessionToken") and not payload.get("session"):
         token = str(payload.get("sessionToken") or "")
         try:
@@ -144,7 +164,7 @@ def _build_trading_client():
             raise MarketDataUnavailable("Pocket Option auth packet is incomplete")
         client = AsyncPocketOptionClient(
             ssid=token,
-            is_demo=market_data.demo,
+            is_demo=is_demo,
             uid=uid,
             platform=1,
             persistent_connection=False,
@@ -158,7 +178,7 @@ def _build_trading_client():
 
     client = AsyncPocketOptionClient(
         ssid=market_data.ssid,
-        is_demo=market_data.demo,
+        is_demo=is_demo,
         persistent_connection=False,
         auto_reconnect=False,
         enable_logging=False,
@@ -308,17 +328,18 @@ async def maybe_execute_signal(signal: dict) -> dict:
                 await db.commit()
                 await db.refresh(position)
 
+            is_demo = trading_is_demo()
             logger.warning(
                 "Admin auto trade opened signal=%s asset=%s demo=%s",
                 signal["id"],
                 signal["asset"],
-                market_data.demo,
+                is_demo,
             )
             return {
                 "status": "OPEN",
                 "position_id": position.id,
                 "amount": amount,
-                "account": "demo" if market_data.demo else "real",
+                "account": "demo" if is_demo else "real",
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
