@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import io
 import json
 import logging
-import os
-from pathlib import Path
+import math
 from typing import Any
 
-import joblib
 import numpy as np
-from sklearn.linear_model import SGDClassifier
-from sklearn.preprocessing import StandardScaler
 
 from config import get_settings
 
@@ -24,76 +19,49 @@ FEATURE_NAMES = [
 
 
 def vectorize(features: dict[str, Any]) -> np.ndarray:
-    return np.array([[float(features.get(name, 0.0)) for name in FEATURE_NAMES]], dtype=float)
+    return np.array([float(features.get(name, 0.0)) for name in FEATURE_NAMES], dtype=float)
 
 
 class OnlineDirectionModel:
+    """Dependency-light online logistic regression with streaming normalization.
+
+    Every resolved real signal updates normalization statistics and weights. State is
+    serialized to JSON bytes and persisted by signal_engine.ml_store in Postgres, so
+    serverless cold starts do not reset learning.
+    """
+
     def __init__(self) -> None:
         settings = get_settings()
-        self.path = Path(settings.model_dir) / 'otc_online_direction.joblib'
-        self.meta_path = Path(settings.model_dir) / 'otc_online_meta.json'
         self.min_samples = settings.online_ml_min_samples
-        self.scaler = StandardScaler()
-        self.model = SGDClassifier(loss='log_loss', alpha=0.0008, random_state=42)
+        self.learning_rate = 0.035
+        self.l2 = 0.0005
+        size = len(FEATURE_NAMES)
         self.samples = 0
+        self.mean = np.zeros(size, dtype=float)
+        self.m2 = np.zeros(size, dtype=float)
+        self.weights = np.zeros(size, dtype=float)
+        self.bias = 0.0
         self.fitted = False
-        self._mtime = 0.0
-        self._load()
 
-    def _load(self) -> None:
-        try:
-            if self.path.exists():
-                payload = joblib.load(self.path)
-                self.scaler = payload['scaler']
-                self.model = payload['model']
-                self.samples = int(payload.get('samples', 0))
-                self.fitted = bool(payload.get('fitted', self.samples > 0))
-                self._mtime = self.path.stat().st_mtime
-        except Exception as exc:
-            logger.warning('Could not load online ML model; starting fresh: %s', exc)
+    def _std(self) -> np.ndarray:
+        if self.samples < 2:
+            return np.ones(len(FEATURE_NAMES), dtype=float)
+        variance = self.m2 / max(1, self.samples - 1)
+        return np.sqrt(np.maximum(variance, 1e-8))
 
-    def _payload(self) -> dict[str, Any]:
-        return {'scaler': self.scaler, 'model': self.model, 'samples': self.samples, 'fitted': self.fitted, 'features': FEATURE_NAMES}
+    def _normalize(self, x: np.ndarray) -> np.ndarray:
+        return np.clip((x - self.mean) / self._std(), -8.0, 8.0)
 
-    def dumps(self) -> bytes:
-        buffer = io.BytesIO()
-        joblib.dump(self._payload(), buffer)
-        return buffer.getvalue()
-
-    def loads(self, payload_bytes: bytes) -> None:
-        payload = joblib.load(io.BytesIO(payload_bytes))
-        self.scaler = payload['scaler']
-        self.model = payload['model']
-        self.samples = int(payload.get('samples', 0))
-        self.fitted = bool(payload.get('fitted', self.samples > 0))
-
-    def _save(self) -> None:
-        if os.getenv('VERCEL'):
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.path.with_suffix('.tmp')
-            joblib.dump(self._payload(), tmp_path)
-            tmp_path.replace(self.path)
-            self._mtime = self.path.stat().st_mtime
-            self.meta_path.write_text(json.dumps({'samples': self.samples,'fitted': self.fitted,'min_samples_for_weight': self.min_samples,'feature_names': FEATURE_NAMES}, ensure_ascii=False, indent=2), encoding='utf-8')
-        except OSError as exc:
-            logger.warning('Could not persist local ML model copy: %s', exc)
-
-    def _maybe_reload(self) -> None:
-        try:
-            if self.path.exists() and self.path.stat().st_mtime > self._mtime:
-                self._load()
-        except Exception as exc:
-            logger.warning('Could not refresh online ML model: %s', exc)
+    @staticmethod
+    def _sigmoid(value: float) -> float:
+        value = max(-40.0, min(40.0, value))
+        return 1.0 / (1.0 + math.exp(-value))
 
     def predict(self, features: dict[str, Any]) -> tuple[str | None, float]:
-        self._maybe_reload()
         if not self.fitted or self.samples < self.min_samples:
             return None, 0.50
-        x = vectorize(features)
-        xs = self.scaler.transform(x)
-        p_up = float(self.model.predict_proba(xs)[0][1])
+        x = self._normalize(vectorize(features))
+        p_up = self._sigmoid(float(np.dot(self.weights, x) + self.bias))
         direction = 'CALL' if p_up >= 0.5 else 'PUT'
         confidence = p_up if direction == 'CALL' else 1.0 - p_up
         return direction, float(np.clip(confidence, 0.5, 0.98))
@@ -101,18 +69,49 @@ class OnlineDirectionModel:
     def learn(self, features: dict[str, Any], went_up: bool) -> None:
         if not features:
             return
-        x = vectorize(features)
-        y = np.array([1 if went_up else 0], dtype=int)
-        self.scaler.partial_fit(x)
-        xs = self.scaler.transform(x)
-        if not self.fitted:
-            self.model.partial_fit(xs, y, classes=np.array([0, 1], dtype=int))
-            self.fitted = True
-        else:
-            self.model.partial_fit(xs, y)
-        self.samples += 1
-        self._save()
+        raw = vectorize(features)
+
+        next_n = self.samples + 1
+        delta = raw - self.mean
+        self.mean = self.mean + delta / next_n
+        delta2 = raw - self.mean
+        self.m2 = self.m2 + delta * delta2
+        self.samples = next_n
+
+        x = self._normalize(raw)
+        target = 1.0 if went_up else 0.0
+        p_up = self._sigmoid(float(np.dot(self.weights, x) + self.bias))
+        error = target - p_up
+        self.weights += self.learning_rate * (error * x - self.l2 * self.weights)
+        self.bias += self.learning_rate * error
+        self.fitted = True
         logger.info('Online ML learned sample #%s label=%s', self.samples, int(went_up))
+
+    def dumps(self) -> bytes:
+        payload = {
+            'version': 2,
+            'features': FEATURE_NAMES,
+            'samples': self.samples,
+            'fitted': self.fitted,
+            'mean': self.mean.tolist(),
+            'm2': self.m2.tolist(),
+            'weights': self.weights.tolist(),
+            'bias': self.bias,
+        }
+        return json.dumps(payload, separators=(',', ':')).encode('utf-8')
+
+    def loads(self, payload: bytes) -> None:
+        if not payload:
+            return
+        data = json.loads(payload.decode('utf-8'))
+        if list(data.get('features') or []) != FEATURE_NAMES:
+            raise ValueError('Stored ML feature schema does not match current code')
+        self.samples = int(data.get('samples', 0))
+        self.fitted = bool(data.get('fitted', self.samples > 0))
+        self.mean = np.asarray(data.get('mean', [0.0] * len(FEATURE_NAMES)), dtype=float)
+        self.m2 = np.asarray(data.get('m2', [0.0] * len(FEATURE_NAMES)), dtype=float)
+        self.weights = np.asarray(data.get('weights', [0.0] * len(FEATURE_NAMES)), dtype=float)
+        self.bias = float(data.get('bias', 0.0))
 
 
 online_model = OnlineDirectionModel()
