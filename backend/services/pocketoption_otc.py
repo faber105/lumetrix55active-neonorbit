@@ -115,6 +115,34 @@ class PocketOptionOTCService:
     def configured(self):
         return bool(self.ssid)
 
+    @staticmethod
+    def _patch_socketio_event_parser(client) -> None:
+        """Fix pocketoptionapi-async 2.0.1 handling of regular Socket.IO 42 events."""
+        websocket = client._websocket
+        if getattr(websocket, '_alphapulse_regular_42_patch', False):
+            return
+        original_process = websocket._process_message
+
+        async def patched_process(message):
+            text = message
+            if isinstance(text, (bytes, bytearray, memoryview)):
+                try:
+                    text = bytes(text).decode('utf-8')
+                except Exception:
+                    text = None
+            if isinstance(text, str) and text.startswith('42') and 'NotAuthorized' not in text:
+                try:
+                    packet = json.loads(text[2:])
+                    if isinstance(packet, list) and packet:
+                        await websocket._handle_json_message(packet)
+                        return
+                except Exception:
+                    pass
+            await original_process(message)
+
+        websocket._process_message = patched_process
+        websocket._alphapulse_regular_42_patch = True
+
     def _make_client(self):
         from pocketoptionapi_async.client import AsyncPocketOptionClient
 
@@ -139,11 +167,9 @@ class PocketOptionOTCService:
             )
             exact_wire_frame = self.ssid
             client._format_session_message = lambda: exact_wire_frame
+            self._patch_socketio_event_parser(client)
             return client
 
-        # Legacy full auth frames are parsed natively, but the library rebuilds
-        # the outgoing message and drops browser flags it does not know about
-        # (for example isOptimized). Preserve the captured frame byte-for-byte.
         client = AsyncPocketOptionClient(
             ssid=self.ssid,
             is_demo=self.demo,
@@ -154,6 +180,7 @@ class PocketOptionOTCService:
         if payload and payload.get('session'):
             exact_wire_frame = self.ssid
             client._format_session_message = lambda: exact_wire_frame
+        self._patch_socketio_event_parser(client)
         return client
 
     async def connect(self):
