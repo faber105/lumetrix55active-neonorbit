@@ -11,13 +11,14 @@ from backend.models.db_models import AsyncSessionLocal, User, UserSettings, utcn
 from backend.routers.signals import save_candidate
 from backend.services.control import get_control, update_control
 from backend.services.pocketoption_otc import OTC_ASSETS, market_data
-from backend.services.positions import reconcile_positions
+from backend.services.positions import reconcile_positions, sync_broker_positions
 from backend.services.reconciler import reconcile_pending
 from backend.services.signal_engine import signal_engine
 
 logger = logging.getLogger("alphapulse.scanner")
 MIN_CONF = float(os.getenv("SIGNAL_MIN_CONFIDENCE", "72"))
 VIP_CONF = float(os.getenv("VIP_SIGNAL_MIN_CONFIDENCE", "80"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
 
 
 def format_signal(signal: dict) -> str:
@@ -96,6 +97,9 @@ async def scan_tick(bot: Bot) -> dict:
     if not market_health.get("configured"):
         return {"ok": True, "scanner": "disabled", "reason": "market source is not configured"}
 
+    # Read-only fallback: even when Mini App is not open, periodically capture a
+    # manually opened Pocket deal and attach it to its matching AlphaPulse signal.
+    broker_sync = await sync_broker_positions(ADMIN_ID) if ADMIN_ID else {"supported": False}
     reconciliation = await reconcile_pending()
     position_reconciliation = await reconcile_positions()
     control = await get_control()
@@ -104,6 +108,7 @@ async def scan_tick(bot: Bot) -> dict:
             "ok": True,
             "scanner": "disabled",
             "reason": "ADMIN_ID is not configured",
+            "broker_sync": broker_sync,
             "reconcile": reconciliation,
             "positions": position_reconciliation,
         }
@@ -167,6 +172,7 @@ async def scan_tick(bot: Bot) -> dict:
         "timeframe": control.selected_timeframe,
         "vip_due": vip_due,
         "vip_status": vip_status,
+        "broker_sync": broker_sync,
         "reconcile": reconciliation,
         "positions": position_reconciliation,
         "published": len(published),
