@@ -206,12 +206,25 @@ async def support(message: types.Message):
 async def about(message: types.Message):
     if await verified_or_reply(message): await message.answer("AlphaPulse\n\nPocket Option OTC market scanner\n3 независимые стратегии\nOnline ML обучается после закрытия сигналов\nАвтосделок нет.",reply_markup=kb_miniapp())
 
-def webhook_secret() -> str: return hashlib.sha256(f"alphapulsesbot:{BOT_TOKEN}".encode()).hexdigest()
-def valid_secret(value: str | None) -> bool: return bool(value) and hmac.compare_digest(value, webhook_secret())
+def webhook_secret() -> str:
+    return hashlib.sha256(f"alphapulsesbot:{BOT_TOKEN}".encode()).hexdigest()
+
+def legacy_webhook_secret() -> str:
+    # Keep accepting the secret used by the previous production deployment.
+    # Telegram does not expose the configured secret in getWebhookInfo, so a
+    # same-URL migration otherwise causes every update to be rejected with 403.
+    return hashlib.sha256(f"alphapulse-webhook:{BOT_TOKEN}".encode()).hexdigest()
+
+def valid_secret(value: str | None) -> bool:
+    if not value:
+        return False
+    return hmac.compare_digest(value, webhook_secret()) or hmac.compare_digest(value, legacy_webhook_secret())
+
 async def configure_webhook() -> str | None:
     if not BACKEND_URL.startswith("https://"): return None
     url=BACKEND_URL+"/telegram/webhook"; info=await bot.get_webhook_info()
-    if info.url != url: await bot.set_webhook(url=url,secret_token=webhook_secret(),drop_pending_updates=False)
+    if info.url != url:
+        await bot.set_webhook(url=url,secret_token=webhook_secret(),drop_pending_updates=False)
     return url
 async def feed_update(payload: dict) -> None:
     update=Update.model_validate(payload,context={"bot":bot}); await dp.feed_update(bot,update)
