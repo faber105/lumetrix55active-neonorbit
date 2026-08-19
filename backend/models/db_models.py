@@ -138,3 +138,39 @@ class MLState(Base):
     payload = Column(Text, nullable=False)
     samples = Column(Integer, default=0, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AdminControl(Base):
+    __tablename__ = 'admin_control'
+    telegram_id = Column(BigInteger, primary_key=True)
+    selected_strategy = Column(String(32), default='ema_trend', nullable=False)
+    selected_timeframe = Column(String(8), default='1m', nullable=False)
+    regular_enabled = Column(Boolean, default=True, nullable=False)
+    vip_enabled = Column(Boolean, default=True, nullable=False)
+    vip_interval_seconds = Column(Integer, default=300, nullable=False)
+    next_vip_at = Column(DateTime, nullable=True, index=True)
+    last_vip_at = Column(DateTime, nullable=True)
+    last_vip_status = Column(String(32), nullable=True)
+    last_scan_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class PaperPosition(Base):
+    __tablename__ = 'paper_positions'
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(BigInteger, nullable=False, index=True)
+    signal_id = Column(Integer, nullable=False, index=True)
+    source = Column(String(16), default='regular', nullable=False, index=True)
+    pair = Column(String(40), nullable=False)
+    asset = Column(String(40), nullable=False, index=True)
+    timeframe = Column(String(8), nullable=False)
+    strategy = Column(String(32), nullable=False)
+    direction = Column(Enum(SignalDirection), nullable=False)
+    status = Column(String(16), default='OPEN', nullable=False, index=True)
+    entry_price = Column(Float, nullable=False)
+    close_price = Column(Float, nullable=True)
+    entry_time = Column(DateTime, nullable=False)
+    expiry_time = Column(DateTime, nullable=False, index=True)
+    result = Column(Enum(SignalResult), default=SignalResult.PENDING, nullable=False, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+    closed_at = Column(DateTime, nullable=True)
