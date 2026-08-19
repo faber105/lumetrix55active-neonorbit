@@ -51,3 +51,5 @@ jobs:
           done
           echo "Production domain is still protected or unavailable"
           exit 1
+
+# Triggered after the production merge so the workflow exists on the default branch.
