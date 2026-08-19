@@ -76,3 +76,23 @@ jobs:
           grep -R -q 'Авто-сделки Pocket' dist/assets/*.js
           grep -R -q 'VIP сейчас' dist/assets/*.js
           echo 'Mini App controls OK'
+
+      - name: Verify stale Telegram asset recovery
+        env:
+          ADMIN_ID: '8535011479'
+        run: |
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          from api.main import app
+          with TestClient(app) as client:
+              root = client.get('/')
+              assert root.status_code == 200, root.text
+              assert root.headers.get('cache-control') == 'no-store, max-age=0'
+              stale_js = client.get('/assets/index-stale-telegram-cache.js')
+              assert stale_js.status_code == 200, stale_js.text
+              assert stale_js.headers.get('x-alphapulse-asset-recovery') == '1'
+              stale_css = client.get('/assets/index-stale-telegram-cache.css')
+              assert stale_css.status_code == 200, stale_css.text
+              assert stale_css.headers.get('x-alphapulse-asset-recovery') == '1'
+          print('Stale asset recovery OK')
+          PY
