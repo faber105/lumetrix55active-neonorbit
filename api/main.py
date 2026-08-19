@@ -9,6 +9,7 @@ import asyncpg
 from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parents[1]
+ALPHAPULSE_DATABASE = "alphapulsesbot"
 
 # New deployments need only a restricted database bootstrap credential. Telegram,
 # admin and Pocket runtime secrets live in Neon and are loaded before bot imports.
@@ -23,50 +24,83 @@ for source in (bootstrap, legacy):
             pass
 
 
+def _asyncpg_kwargs(url):
+    return {
+        "host": url.host,
+        "port": url.port or 5432,
+        "user": url.username,
+        "password": url.password,
+        "database": url.database,
+        "ssl": "require" if url.host and "neon.tech" in url.host else None,
+        "statement_cache_size": 0,
+        "timeout": 12,
+    }
+
+
 async def _load_runtime_secrets_from_db() -> None:
     raw = os.getenv("DATABASE_URL", "").strip()
     if not raw:
         return
-    url = make_url(raw)
-    conn = None
-    try:
-        conn = await asyncpg.connect(
-            host=url.host,
-            port=url.port or 5432,
-            user=url.username,
-            password=url.password,
-            database=url.database,
-            ssl="require" if url.host and "neon.tech" in url.host else None,
-            statement_cache_size=0,
-            timeout=12,
-        )
-        rows = await conn.fetch(
-            "SELECT strategy, payload FROM ml_state WHERE strategy = ANY($1::text[])",
-            [
-                "__runtime_telegram_bot__",
-                "__runtime_admin_secret__",
-                "__runtime_admin_id__",
-                "__runtime_pocket__",
-            ],
-        )
-        values = {str(row["strategy"]): str(row["payload"] or "") for row in rows}
-        bot_token = values.get("__runtime_telegram_bot__", "").strip()
-        admin_secret = values.get("__runtime_admin_secret__", "").strip()
-        admin_id = values.get("__runtime_admin_id__", "").strip()
-        pocket = values.get("__runtime_pocket__", "").strip()
-        if bot_token:
-            os.environ.setdefault("TELEGRAM_BOT_TOKEN", bot_token)
-            os.environ.setdefault("BOT_TOKEN", bot_token)
-        if admin_secret:
-            os.environ.setdefault("ADMIN_SECRET", admin_secret)
-        if admin_id:
-            os.environ.setdefault("ADMIN_ID", admin_id)
-            os.environ.setdefault("ADMIN_TELEGRAM_ID", admin_id)
-        if pocket:
-            os.environ.setdefault("POCKET_OPTION_SSID", pocket)
-    finally:
-        if conn is not None:
-            await conn.close()
+
+    original = make_url(raw)
+    candidates = [original]
+    if (
+        original.host
+        and "neon.tech" in original.host
+        and original.database != ALPHAPULSE_DATABASE
+    ):
+        candidates.append(original.set(database=ALPHAPULSE_DATABASE))
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        conn = None
+        try:
+            conn = await asyncpg.connect(**_asyncpg_kwargs(candidate))
+            rows = await conn.fetch(
+                "SELECT strategy, payload FROM ml_state WHERE strategy = ANY($1::text[])",
+                [
+                    "__runtime_telegram_bot__",
+                    "__runtime_admin_secret__",
+                    "__runtime_admin_id__",
+                    "__runtime_pocket__",
+                ],
+            )
+            values = {str(row["strategy"]): str(row["payload"] or "") for row in rows}
+            bot_token = values.get("__runtime_telegram_bot__", "").strip()
+            admin_secret = values.get("__runtime_admin_secret__", "").strip()
+            admin_id = values.get("__runtime_admin_id__", "").strip()
+            pocket = values.get("__runtime_pocket__", "").strip()
+
+            # Vercel/Neon Marketplace integrations commonly point DATABASE_URL at
+            # the project's default `neondb`. AlphaPulse's production schema lives
+            # in `alphapulsesbot`, so retry that database when the default DB does
+            # not contain our runtime markers.
+            if not bot_token and candidate.database != ALPHAPULSE_DATABASE and len(candidates) > 1:
+                continue
+
+            if candidate.database != original.database:
+                os.environ["DATABASE_URL"] = candidate.render_as_string(hide_password=False)
+
+            if bot_token:
+                os.environ.setdefault("TELEGRAM_BOT_TOKEN", bot_token)
+                os.environ.setdefault("BOT_TOKEN", bot_token)
+            if admin_secret:
+                os.environ.setdefault("ADMIN_SECRET", admin_secret)
+            if admin_id:
+                os.environ.setdefault("ADMIN_ID", admin_id)
+                os.environ.setdefault("ADMIN_TELEGRAM_ID", admin_id)
+            if pocket:
+                os.environ.setdefault("POCKET_OPTION_SSID", pocket)
+            return
+        except (asyncpg.UndefinedTableError, asyncpg.InvalidCatalogNameError) as exc:
+            last_error = exc
+            continue
+        finally:
+            if conn is not None:
+                await conn.close()
+
+    if last_error is not None:
+        raise last_error
 
 
 if os.getenv("DATABASE_URL", "").strip() and not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
