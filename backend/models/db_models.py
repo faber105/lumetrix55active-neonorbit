@@ -77,7 +77,7 @@ class UserSettings(Base):
     telegram_id = Column(BigInteger, unique=True, nullable=False, index=True)
     vip_enabled = Column(Boolean, default=True, nullable=False)
     notification_frequency = Column(String(16), default='standard', nullable=False)
-    signal_mode = Column(String(16), default='vip', nullable=False)
+    signal_mode = Column(String(16), default='all', nullable=False)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -121,9 +121,6 @@ class StrategyPerformance(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     def __init__(self, **kwargs):
-        # SQLAlchemy Column defaults are normally materialized at INSERT/flush.
-        # Reconciliation updates counters immediately on a newly constructed row,
-        # so initialize them in Python as well to avoid None += 1 on the first result.
         super().__init__(**kwargs)
         if self.samples is None:
             self.samples = 0
