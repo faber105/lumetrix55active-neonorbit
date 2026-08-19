@@ -1,11 +1,37 @@
 from functools import lru_cache
+import json
 import os
+from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _load_runtime_secrets() -> None:
+    """Load Vercel direct-deploy secrets without committing them to GitHub."""
+    path = Path(__file__).with_name('runtime_secrets.json')
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return
+    for key, value in data.items():
+        if value is None or key in os.environ:
+            continue
+        if isinstance(value, bool):
+            os.environ[key] = 'true' if value else 'false'
+        elif isinstance(value, (dict, list)):
+            os.environ[key] = json.dumps(value)
+        else:
+            os.environ[key] = str(value)
+
+
+_load_runtime_secrets()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+
     project_name: str = 'AlphaPulse OTC'
     bot_token: str
     admin_telegram_id: int
