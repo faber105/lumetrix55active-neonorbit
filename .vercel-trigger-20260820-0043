@@ -1,1 +1,2 @@
 trigger deployment from main after Neon reconnect
+include automatic alphapulsesbot database resolution
