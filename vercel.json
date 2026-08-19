@@ -1,11 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm --prefix mini_app install --no-audit --no-fund && npm --prefix mini_app run build",
-  "outputDirectory": "mini_app/dist",
+  "buildCommand": "cat miniapp/src/App.part*.jsx > miniapp/src/App.jsx && npm --prefix miniapp install --no-audit --no-fund && npm --prefix miniapp run build",
+  "outputDirectory": "miniapp/dist",
   "functions": {
     "api/main.py": {
       "maxDuration": 300,
-      "includeFiles": "{runtime_secrets.json,mini_app/dist/**}"
+      "includeFiles": "runtime_secrets.json"
     }
   }
 }

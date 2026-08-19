@@ -1,2 +1,0 @@
-"""AlphaPulse Telegram bot package."""
-

@@ -1,2 +1,0 @@
-"""Database models for AlphaPulse."""
-
