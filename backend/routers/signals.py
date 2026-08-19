@@ -15,7 +15,8 @@ from backend.services.database import get_db
 from backend.services.online_ml import get_model
 from backend.services.pocketoption_otc import DISPLAY_TO_ASSET, MarketDataUnavailable, OTC_ASSETS, TF_SECONDS, market_data
 from backend.services.signal_engine import signal_engine
-from backend.services.strategies import STRATEGY_LABELS
+from backend.services.strategies import STRATEGY_LABELS, STRATEGIES
+from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
 logger = logging.getLogger('alphapulse.signals')
@@ -123,6 +124,37 @@ async def analyze(req: AnalyzeRequest, db: AsyncSession = Depends(get_db)):
     return data
 
 
+class StrategyScanRequest(BaseModel):
+    strategy: str
+    timeframe: str = '1m'
+    min_confidence: float = Field(72.0, ge=0, le=99)
+
+
+@router.post('/scan-strategy')
+async def scan_strategy(
+    req: StrategyScanRequest,
+    user: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
+    del user
+    if req.strategy not in STRATEGIES:
+        raise HTTPException(400, 'Unknown strategy')
+    if req.timeframe not in TF_SECONDS:
+        raise HTTPException(400, 'Unsupported timeframe')
+    try:
+        candidate = await signal_engine.scan_strategy(
+            req.timeframe,
+            list(OTC_ASSETS.keys()),
+            req.strategy,
+        )
+    except MarketDataUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    if not candidate or float(candidate.get('confidence') or 0) < req.min_confidence:
+        return {'status': 'NO_SIGNAL', 'signal': None}
+    signal, duplicate = await save_candidate(db, candidate)
+    return {'status': 'SIGNAL', 'signal': out(signal), 'duplicate': duplicate}
+
+
 class ScanRequest(BaseModel):
     timeframe: str = '1m'
     assets: list[str] = Field(default_factory=lambda: list(OTC_ASSETS.keys()))
@@ -140,10 +172,6 @@ async def scan_best(req: ScanRequest, db: AsyncSession = Depends(get_db)):
         return {'status': 'NO_SIGNAL', 'signal': None}
     signal, duplicate = await save_candidate(db, candidate)
     return {'status': 'SIGNAL', 'signal': out(signal), 'duplicate': duplicate}
-
-
-def _new_performance(strategy: str) -> StrategyPerformance:
-    return StrategyPerformance(strategy=strategy, samples=0, wins=0, losses=0, draws=0)
 
 
 @router.post('/reconcile')
@@ -192,7 +220,7 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
                     )
                 ).scalar_one_or_none()
                 if performance is None:
-                    performance = _new_performance(signal.strategy)
+                    performance = StrategyPerformance(strategy=signal.strategy, samples=0, wins=0, losses=0, draws=0)
                     db.add(performance)
 
                 if signal.result in {SignalResult.WIN, SignalResult.LOSS} and signal.trained_at is None:
