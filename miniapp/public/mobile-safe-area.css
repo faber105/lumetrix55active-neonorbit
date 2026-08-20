@@ -6,21 +6,24 @@ html,body,#root{min-height:100%;background:#070a12}
 body{padding-top:max(14px,var(--ap-tg-top));}
 .app{
   min-height:calc(100dvh - max(14px,var(--ap-tg-top)));
-  padding-bottom:calc(104px + var(--ap-tg-bottom))!important;
+  padding-bottom:calc(132px + var(--ap-tg-bottom))!important;
 }
 .topbar{
   top:0!important;
   padding-top:14px!important;
   min-height:68px;
 }
-main{padding-top:22px!important;padding-bottom:34px!important;}
+main{padding-top:22px!important;padding-bottom:44px!important;}
 .bottom-nav{
-  bottom:calc(10px + var(--ap-tg-bottom))!important;
+  bottom:calc(34px + var(--ap-tg-bottom))!important;
   min-height:66px;
 }
 @media (max-width:600px){
   body{padding-top:max(18px,var(--ap-tg-top));}
   .topbar{padding-top:16px!important;padding-bottom:12px!important;}
   main{padding-top:20px!important;}
-  .bottom-nav{bottom:calc(12px + var(--ap-tg-bottom))!important;}
+  .bottom-nav{bottom:calc(38px + var(--ap-tg-bottom))!important;}
+}
+@media (max-width:390px){
+  .bottom-nav{bottom:calc(40px + var(--ap-tg-bottom))!important;}
 }
