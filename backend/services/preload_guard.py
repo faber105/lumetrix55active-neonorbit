@@ -82,7 +82,6 @@ async def _announce_profit_preanalysis(session: dict) -> None:
     if status in {"PREPARED", "WAIT_CLOSE"}:
         return
 
-    # One event per trade/preanalysis window. The current active position id is stored in payload.
     async with AsyncSessionLocal() as db:
         exists = (
             await db.execute(
@@ -92,7 +91,10 @@ async def _announce_profit_preanalysis(session: dict) -> None:
                        AND payload LIKE :needle
                      LIMIT 1
                 """),
-                {"sid": int(session["id"]), "needle": f'%\"position_id\": {int(session["active_position_id"])}%"},
+                {
+                    "sid": int(session["id"]),
+                    "needle": f'%"position_id": {int(session["active_position_id"])}%'
+                },
             )
         ).scalar_one_or_none()
     if not exists:
@@ -122,8 +124,6 @@ async def preload_cycle() -> dict | None:
     await _announce_profit_preanalysis(session)
     result = await preload_next.preload_cycle()
 
-    # After the base cycle chooses a candidate, immediately re-read the DB row and
-    # publish the exact signal that is actually eligible for execution.
     latest = await _candidate(int(session["id"]))
     if latest and str(latest.get("status")) in {"PREPARED", "WAIT_CLOSE"}:
         await _sync_prepared_pair(session, latest)
