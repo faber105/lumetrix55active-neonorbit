@@ -104,3 +104,7 @@ export function syncDeviceTimezone() {
   }).catch(() => null);
   return timezoneSyncPromise;
 }
+
+if (TG_ID) {
+  setTimeout(() => { syncDeviceTimezone(); }, 0);
+}
