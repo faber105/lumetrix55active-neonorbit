@@ -19,6 +19,12 @@ class TelegramMiniAppUser:
     last_name: str | None = None
 
 
+def _telegram_hash(token: str, values: dict[str, str]) -> str:
+    check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
+    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    return hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+
+
 def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -28,14 +34,21 @@ def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
 
     values = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = values.pop("hash", "")
-    values.pop("signature", None)
     if not received_hash:
         raise HTTPException(401, "Telegram initData hash missing")
 
-    check_string = "\n".join(f"{key}={values[key]}" for key in sorted(values))
-    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
-    expected_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_hash, received_hash):
+    # Bot API 9.x Mini Apps may include the new `signature` field in initData.
+    # For bot-token HMAC validation Telegram's current data-check-string contains
+    # all received fields except `hash`, so `signature` must not be discarded.
+    # Keep a legacy variant as a compatibility fallback for older clients that
+    # generated the hash before the signature field was introduced.
+    expected_hash = _telegram_hash(token, values)
+    valid = hmac.compare_digest(expected_hash, received_hash)
+    if not valid and "signature" in values:
+        legacy_values = dict(values)
+        legacy_values.pop("signature", None)
+        valid = hmac.compare_digest(_telegram_hash(token, legacy_values), received_hash)
+    if not valid:
         raise HTTPException(401, "Invalid Telegram Mini App initData")
 
     try:
