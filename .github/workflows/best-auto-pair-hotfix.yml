@@ -1,0 +1,51 @@
+name: Best AUTO Pair Hotfix
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/best-auto-pair-hotfix.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Rank AUTO candidates and keep one best pair
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p=Path('backend/services/session_engine.py')
+          s=p.read_text()
+          old='''    confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]\n    tradable_candidates = [candidate for candidate in confirmed if _tradable(snapshot, str(candidate.get("asset") or ""))]\n'''
+          new='''    confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]\n    # One scan -> one order candidate. Rank all tradable setups explicitly so\n    # scanner return order can never behave like a queue. Confidence wins;\n    # live payout is only a tie-breaker.\n    tradable_candidates = sorted(\n        [candidate for candidate in confirmed if _tradable(snapshot, str(candidate.get("asset") or ""))],\n        key=lambda candidate: (\n            float(candidate.get("confidence") or 0),\n            float(_payout(snapshot, str(candidate.get("asset") or "")) or 0),\n        ),\n        reverse=True,\n    )\n'''
+          if 'One scan -> one order candidate' not in s:
+              if old not in s: raise SystemExit('session_engine ranking anchor not found')
+              s=s.replace(old,new,1)
+
+          old='''    signal = None\n    payout = None\n    confirmed_candidate = None\n    for candidate in tradable_candidates:\n'''
+          new='''    signal = None\n    payout = None\n    confirmed_candidate = None\n    # We may fall through only when a stronger candidate fails the mandatory\n    # second-pass confirmation/duplicate guard. Once one valid candidate is\n    # accepted, the loop breaks and no other pair is queued for this cycle.\n    for candidate in tradable_candidates:\n'''
+          if 'no other pair is queued for this cycle' not in s:
+              if old not in s: raise SystemExit('session_engine selection anchor not found')
+              s=s.replace(old,new,1)
+          p.write_text(s)
+
+          p=Path('backend/services/preload_next.py')
+          s=p.read_text()
+          old='''    confirmed = [\n        item for item in candidates\n        if float(item.get("confidence") or 0) >= threshold\n        and _tradable(snapshot, str(item.get("asset") or ""))\n    ]\n\n    for candidate in confirmed:\n'''
+          new='''    confirmed = sorted(\n        [\n            item for item in candidates\n            if float(item.get("confidence") or 0) >= threshold\n            and _tradable(snapshot, str(item.get("asset") or ""))\n        ],\n        key=lambda item: (\n            float(item.get("confidence") or 0),\n            float(_payout(snapshot, str(item.get("asset") or "")) or 0),\n        ),\n        reverse=True,\n    )\n\n    # Pre-analysis also prepares exactly one best pair; alternatives are never queued.\n    for candidate in confirmed:\n'''
+          if 'alternatives are never queued' not in s:
+              if old not in s: raise SystemExit('preload ranking anchor not found')
+              s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          git config user.name 'AlphaPulse Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/session_engine.py backend/services/preload_next.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Choose only the best AUTO pair per scan'
+          git push origin main
