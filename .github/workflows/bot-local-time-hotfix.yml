@@ -1,0 +1,66 @@
+name: Apply bot local-time hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bot-local-time-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch Telegram bot signal times
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bot/main.py')
+          text = path.read_text()
+
+          text = text.replace('import hmac\nimport logging', 'import hmac\nimport json\nimport logging')
+          text = text.replace('from datetime import datetime, timezone', 'from datetime import datetime, timedelta, timezone')
+          text = text.replace('from typing import Any, Awaitable, Callable, Dict\n', 'from typing import Any, Awaitable, Callable, Dict\nfrom zoneinfo import ZoneInfo\n')
+          text = text.replace('from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder\n', 'from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder\n\nfrom backend.models.db_models import AsyncSessionLocal, MLState\n')
+
+          marker = '''async def set_status(telegram_id: int, status: str) -> bool:\n    data = await api("POST", "/api/auth/status", json={"telegram_id": telegram_id, "status": status, "secret": ADMIN_SECRET})\n    return bool(data and data.get("ok"))\n'''
+          helper = marker + '''\n\nasync def get_user_timezone(telegram_id: int):\n    try:\n        async with AsyncSessionLocal() as db:\n            state = await db.get(MLState, f"__user_tz__:{int(telegram_id)}")\n        payload = json.loads(state.payload or "{}") if state else {}\n    except Exception:\n        payload = {}\n    name = str(payload.get("name") or "").strip()\n    if name:\n        try:\n            return ZoneInfo(name)\n        except Exception:\n            pass\n    try:\n        minutes = max(-840, min(840, int(payload.get("offset_minutes") or 0)))\n    except Exception:\n        minutes = 0\n    return timezone(timedelta(minutes=minutes))\n\n\ndef local_signal_time(value: str | None, tz) -> str:\n    if not value:\n        return "—"\n    try:\n        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))\n        if dt.tzinfo is None:\n            dt = dt.replace(tzinfo=timezone.utc)\n        return dt.astimezone(tz).strftime("%H:%M:%S")\n    except Exception:\n        return "—"\n'''
+          if 'async def get_user_timezone' not in text:
+              if marker not in text:
+                  raise SystemExit('set_status marker not found')
+              text = text.replace(marker, helper)
+
+          old = '''@dp.message(F.text == "VIP Сигналы")\nasync def vip_signals(message: types.Message):\n    if not await verified_or_reply(message): return\n    signals=await api("GET","/api/signals/vip?limit=5") or []\n    if not signals: await message.answer("VIP сигналов пока нет.",reply_markup=kb_miniapp()); return\n    lines=["VIP Сигналы",""]+[f"{s['pair']} {s['timeframe']} | {'CALL' if s['direction']=='BUY' else 'PUT'} | {s['confidence']}%" for s in signals]; await message.answer("\\n".join(lines),reply_markup=kb_miniapp())\n'''
+          new = '''@dp.message(F.text == "VIP Сигналы")\nasync def vip_signals(message: types.Message):\n    if not await verified_or_reply(message): return\n    signals=await api("GET","/api/signals/vip?limit=5") or []\n    if not signals: await message.answer("VIP сигналов пока нет.",reply_markup=kb_miniapp()); return\n    tz = await get_user_timezone(message.from_user.id)\n    lines = ["🔥 <b>VIP Сигналы</b>", ""]\n    for s in signals:\n        direction = "CALL" if s.get("direction") == "BUY" else "PUT"\n        entry = local_signal_time(s.get("entry_time"), tz)\n        expiry = local_signal_time(s.get("expiry_time"), tz)\n        lines.append(\n            f"<b>{s.get('pair','—')}</b> · {s.get('timeframe','5m')} · {direction} · {s.get('confidence','—')}%\\n"\n            f"⏰ Вход: <b>{entry}</b> · ⌛ Экспирация: <b>{expiry}</b>"\n        )\n    await message.answer("\\n\\n".join(lines), reply_markup=kb_miniapp())\n'''
+          if old not in text:
+              if 'tz = await get_user_timezone(message.from_user.id)' not in text:
+                  raise SystemExit('VIP handler marker not found')
+          else:
+              text = text.replace(old, new)
+
+          path.write_text(text)
+          PY
+
+      - name: Verify Python syntax
+        run: python -m py_compile bot/main.py backend/services/scanner.py
+
+      - name: Commit bot timezone fix
+        shell: bash
+        run: |
+          if git diff --quiet -- bot/main.py; then
+            echo 'No bot timezone changes needed'
+            exit 0
+          fi
+          git config user.name 'AlphaPulse Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add bot/main.py
+          git commit -m 'Show every bot signal in user phone timezone'
+          git push origin main
