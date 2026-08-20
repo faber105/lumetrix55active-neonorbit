@@ -49,3 +49,4 @@ jobs:
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'Choose only the best AUTO pair per scan'
           git push origin main
+# retrigger 2026-08-20T22:48+02:00
