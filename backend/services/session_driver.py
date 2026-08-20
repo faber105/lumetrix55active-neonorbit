@@ -12,7 +12,10 @@ from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.session_engine import session_tick
 
-TICK_MIN_INTERVAL_SECONDS = 2.0
+# The Mini App polls active AUTO state roughly every 750 ms. Keep the DB claim
+# interval aligned with that cadence so the very first poll after Pocket reports
+# a CLOSED deal can settle it and immediately continue into the next market scan.
+TICK_MIN_INTERVAL_SECONDS = 0.7
 
 
 def _display_asset(asset: str) -> str:
@@ -23,15 +26,8 @@ def _display_asset(asset: str) -> str:
 
 
 async def _refresh_live_otc_universe() -> dict:
-    """Populate the scanner from Pocket's current DEMO asset/payout snapshot.
-
-    Every live OTC instrument is still discovered and exposed to the UI, but
-    expensive candle/indicator analysis is scoped to instruments that are open
-    and already satisfy the session payout floor. There is no reason to fetch
-    205 candles for a pair that cannot be traded at >=92% anyway.
-    """
     try:
-        snapshot = await get_demo_account_snapshot(max_age=2.0)
+        snapshot = await get_demo_account_snapshot(max_age=1.0)
     except Exception:
         set_auto_scan_scope([], len(OTC_ASSETS))
         return {"discovered": len(OTC_ASSETS), "eligible": None}
@@ -66,7 +62,7 @@ async def claim_session_tick(min_interval_seconds: float = TICK_MIN_INTERVAL_SEC
     if tid <= 0:
         return None
     now = utcnow()
-    cutoff = now - timedelta(seconds=max(1.0, float(min_interval_seconds)))
+    cutoff = now - timedelta(seconds=max(0.5, float(min_interval_seconds)))
     async with AsyncSessionLocal() as db:
         claimed = (
             await db.execute(
