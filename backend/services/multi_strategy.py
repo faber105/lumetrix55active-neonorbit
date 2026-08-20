@@ -3,13 +3,19 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import Iterable
 
-from backend.services import session_engine
+from backend.services import auto_trade, session_engine
 from backend.services.preload_next import preload_cycle as _base_preload_cycle
 from backend.services.signal_engine import SMART_EXECUTION_STRATEGIES, signal_engine
 
 _SELECTED_SCAN_STRATEGIES: ContextVar[tuple[str, ...] | None] = ContextVar(
     "auto_selected_scan_strategies", default=None
 )
+
+# Serverless/Pocket connection setup can easily consume more than the old 1.5s
+# grace period. Keep a small but practical window so a prepared AUTO entry,
+# especially a martingale recovery entry, is not discarded only because the
+# request reached the broker a couple of seconds after the candle boundary.
+auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 4.0)
 
 
 def split_strategy_key(value: object) -> list[str]:
@@ -29,7 +35,6 @@ def split_strategy_key(value: object) -> list[str]:
 def _execution_strategies(selected: Iterable[str]) -> tuple[str, ...]:
     items = tuple(dict.fromkeys(str(item) for item in selected if item))
     if "smart_confluence" in items:
-        # Smart Confluence already means the whole smart execution pool.
         return tuple(SMART_EXECUTION_STRATEGIES)
     return items
 
@@ -92,6 +97,7 @@ def _validate_config(config: dict) -> dict:
 _ORIGINAL_SCAN_STRATEGY = signal_engine.scan_strategy_candidates
 _ORIGINAL_SCAN_BEST = signal_engine.scan_best_candidates
 _ORIGINAL_SESSION_TICK = session_engine.session_tick
+_ORIGINAL_SETTLE = session_engine._settle
 _ORIGINAL_EVENT = session_engine._event
 
 
@@ -134,10 +140,39 @@ async def _event(session_id, stage, message, payload=None):
     await _ORIGINAL_EVENT(session_id, stage, message, payload)
 
 
-# Install once at module import. start_session resolves _validate_config from the
-# session_engine module at call time, so this also covers /api/auto/start.
+async def _settle(session):
+    """After a confirmed LOSS, arm martingale immediately and persist its stake."""
+    previous_level = int(session.get("current_level") or 0)
+    settled = await _ORIGINAL_SETTLE(session)
+    if not settled or str(settled.get("status")) != "ACTIVE":
+        return settled
+
+    level = int(settled.get("current_level") or 0)
+    if str(settled.get("mode")) != "count" or level <= previous_level or level <= 0:
+        return settled
+
+    # Use the minimum accepted payout to calculate a conservative recovery stake.
+    # When the actual next pair is selected the core engine recalculates against
+    # that pair's real payout before sending the order.
+    amount = round(float(session_engine._next_amount(settled, session_engine.MIN_AUTO_PAYOUT)), 2)
+    await session_engine.update_auto_trade_control(amount=amount, max_open_positions=1)
+    message = f"Догон {level}/{settled.get('max_martingale')} подготовлен · следующая ставка {amount:.2f}"
+    await session_engine._update(int(settled["id"]), stage="MARTINGALE", last_message=message)
+    await session_engine.update_trade_runtime(stage="MARTINGALE", amount=amount, message=message)
+    await _ORIGINAL_EVENT(
+        int(settled["id"]),
+        "MARTINGALE_READY",
+        message,
+        {"level": level, "amount": amount, "series_loss": float(settled.get("current_series_loss") or 0)},
+    )
+    settled["stage"] = "MARTINGALE"
+    settled["last_message"] = message
+    return settled
+
+
 session_engine._validate_config = _validate_config
 session_engine._event = _event
+session_engine._settle = _settle
 signal_engine.scan_strategy_candidates = _scan_strategy_candidates
 signal_engine.scan_best_candidates = _scan_best_candidates
 
