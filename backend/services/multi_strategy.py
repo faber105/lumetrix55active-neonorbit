@@ -4,7 +4,7 @@ from contextvars import ContextVar
 from typing import Iterable
 
 from backend.services import auto_trade, session_engine
-from backend.services.preload_next import preload_cycle as _base_preload_cycle
+from backend.services.preload_guard import preload_cycle as _base_preload_cycle
 from backend.services.signal_engine import SMART_EXECUTION_STRATEGIES, signal_engine
 
 _SELECTED_SCAN_STRATEGIES: ContextVar[tuple[str, ...] | None] = ContextVar(
@@ -151,9 +151,6 @@ async def _settle(session):
     if str(settled.get("mode")) != "count" or level <= previous_level or level <= 0:
         return settled
 
-    # Use the minimum accepted payout to calculate a conservative recovery stake.
-    # When the actual next pair is selected the core engine recalculates against
-    # that pair's real payout before sending the order.
     amount = round(float(session_engine._next_amount(settled, session_engine.MIN_AUTO_PAYOUT)), 2)
     await session_engine.update_auto_trade_control(amount=amount, max_open_positions=1)
     message = f"Догон {level}/{settled.get('max_martingale')} подготовлен · следующая ставка {amount:.2f}"
