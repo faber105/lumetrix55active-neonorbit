@@ -111,6 +111,22 @@ if os.getenv("DATABASE_URL", "").strip() and not os.getenv("TELEGRAM_BOT_TOKEN",
         # the exception type and never secret values.
         print(f"AlphaPulse runtime secret bootstrap failed: {type(exc).__name__}")
 
+# Keep Telegram webhook/API/Mini App traffic on the canonical production project.
+# The old bot code had alphapulse-otc.vercel.app as its fallback, which caused
+# /start updates to be delivered to the retired deployment when BACKEND_URL was
+# absent or stale.
+production_host = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+if production_host:
+    production_base_url = (
+        production_host
+        if production_host.startswith(("http://", "https://"))
+        else f"https://{production_host}"
+    )
+else:
+    production_base_url = "https://alphapulse-runtime-staging.vercel.app"
+os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
+os.environ["MINI_APP_URL"] = production_base_url.rstrip("/")
+
 # Use the minimal read-only Socket.IO transport for Pocket market data. It sends
 # the captured browser auth frame unchanged and never exposes trading methods to
 # AlphaPulse's market-data service.
