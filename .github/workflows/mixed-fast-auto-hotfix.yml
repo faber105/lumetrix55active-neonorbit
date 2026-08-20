@@ -1,0 +1,78 @@
+name: Mixed Fast AUTO Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mixed-fast-auto-hotfix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mixed-fast-auto-hotfix
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch fast mixed AUTO flow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('backend/services/session_engine.py')
+          s = p.read_text()
+          s = s.replace('COUNT_MIN_CONFIDENCE = 74.0\n', 'COUNT_MIN_CONFIDENCE = 70.0\nCOUNT_CONFIRM_CONFIDENCE = 68.0\n')
+          s = s.replace('PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}\n', 'PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}\nCOUNT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}\n')
+          s = s.replace('strategy = str(config.get("strategy") or "trend_pulse")', 'strategy = str(config.get("strategy") or ("smart_confluence" if str(config.get("mode") or "count").lower() == "count" else "trend_pulse"))')
+          s = s.replace('if strategy not in AUTO_STRATEGIES:\n            raise ValueError("Unknown AUTO strategy")', 'if strategy not in COUNT_STRATEGIES:\n            raise ValueError("Unknown AUTO strategy")')
+
+          old = '''    if session["mode"] == "profit" and strategy == "smart_confluence":\n        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)\n        threshold = PROFIT_MIN_CONFIDENCE\n    else:\n        candidates = await signal_engine.scan_strategy_candidates(timeframe, all_assets, strategy)\n        threshold = PROFIT_MIN_CONFIDENCE if session["mode"] == "profit" else COUNT_MIN_CONFIDENCE\n\n    confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]\n'''
+          new = '''    # Fast COUNT mode (15s/1m/3m) uses a mixed strategy pool. We first\n    # rank the strongest setups across all smart strategies, then re-check only\n    # the selected pair/strategy before scheduling the exact candle-boundary entry.\n    # This avoids waiting for one rare strategy while still requiring confirmation.\n    mixed_count = session["mode"] == "count"\n    if mixed_count:\n        candidates = await signal_engine.scan_best_candidates(timeframe, all_assets)\n        threshold = COUNT_MIN_CONFIDENCE\n        strategy = "smart_confluence"\n    elif session["mode"] == "profit" and strategy == "smart_confluence":\n        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)\n        threshold = PROFIT_MIN_CONFIDENCE\n    else:\n        candidates = await signal_engine.scan_strategy_candidates(timeframe, all_assets, strategy)\n        threshold = PROFIT_MIN_CONFIDENCE\n\n    confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]\n'''
+          if old not in s:
+              raise SystemExit('scan block not found')
+          s = s.replace(old, new)
+
+          old2 = '''    signal = None\n    payout = None\n    for candidate in tradable_candidates:\n        stored, duplicate = await save_signal(candidate, is_vip=False)\n        if duplicate:\n            continue\n        signal = stored\n        payout = _payout(snapshot, signal["asset"])\n        break\n'''
+          new2 = '''    signal = None\n    payout = None\n    confirmed_candidate = None\n    for candidate in tradable_candidates:\n        candidate_to_save = candidate\n        if mixed_count:\n            # Second-pass confirmation is intentionally only one asset, so it is\n            # quick even when the first market scan covered 100+ OTC instruments.\n            try:\n                recheck = await signal_engine.evaluate_asset(\n                    str(candidate.get("asset") or ""), timeframe, str(candidate.get("strategy") or "")\n                )\n            except Exception:\n                recheck = None\n            same_direction = bool(recheck and recheck.get("direction") == candidate.get("direction"))\n            strong_enough = bool(recheck and float(recheck.get("confidence") or 0) >= COUNT_CONFIRM_CONFIDENCE)\n            if not (same_direction and strong_enough):\n                continue\n            candidate_to_save = recheck\n            confirmed_candidate = recheck\n\n        stored, duplicate = await save_signal(candidate_to_save, is_vip=False)\n        if duplicate:\n            continue\n        signal = stored\n        payout = _payout(snapshot, signal["asset"])\n        break\n'''
+          if old2 not in s:
+              raise SystemExit('candidate block not found')
+          s = s.replace(old2, new2)
+
+          s = s.replace('label = "Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy)', 'label = "Mixed Smart Confluence" if mixed_count else ("Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy))')
+          s = s.replace('message="Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден",', 'message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),')
+          s = s.replace('{"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(all_assets)},', '{"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(all_assets), "mixed": mixed_count, "confirmed": True},')
+          p.write_text(s)
+
+          p = Path('miniapp/src/App.jsx')
+          s = p.read_text()
+          s = s.replace('const AUTO_STRATEGIES=[{id:"trend_pulse"', 'const AUTO_STRATEGIES=[{id:"smart_confluence",icon:"✦",name:"Mixed Smart",desc:"Быстрый поиск по всем стратегиям + повторное подтверждение перед входом",tone:"gold"},{id:"trend_pulse"')
+          s = s.replace('const[mode,setMode]=useState("count"),[strategy,setStrategy]=useState("trend_pulse")', 'const[mode,setMode]=useState("count"),[strategy,setStrategy]=useState("smart_confluence")')
+          s = s.replace('if(mode==="count"&&!AUTO_STRATEGIES.some(x=>x.id===strategy))setStrategy("trend_pulse")', 'if(mode==="count"&&strategy!=="smart_confluence")setStrategy("smart_confluence")')
+          s = s.replace('value={mode} onChange={v=>{setMode(v);if(v==="profit")setStrategy("smart_confluence")}}', 'value={mode} onChange={v=>{setMode(v);setStrategy("smart_confluence")}}')
+          p.write_text(s)
+          PY
+
+          python -m compileall -q backend
+          git diff --check
+          git status --short
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name 'AlphaPulse Hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/session_engine.py miniapp/src/App.jsx
+          git commit -m 'Use fast mixed confirmation for 15s-3m AUTO sessions'
+          git push origin HEAD:main
