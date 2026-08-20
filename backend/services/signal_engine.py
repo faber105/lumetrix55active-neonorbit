@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
+from backend.services.auto_scan_scope import get_auto_scan_scope
 from backend.services.online_ml import get_model
 from backend.services.pocketoption_otc import MarketDataUnavailable, OTC_ASSETS, TF_SECONDS, market_data
 from backend.services.strategies import (
@@ -20,10 +21,7 @@ from backend.services.strategies import (
 logger = logging.getLogger("alphapulse.engine")
 ENTRY_LEAD_SECONDS = max(2, min(12, int(os.getenv("ENTRY_LEAD_SECONDS", "4"))))
 SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
-# A full Pocket OTC universe is much larger than the original ten bootstrap
-# pairs. Eight parallel read-only candle requests keeps AUTO responsive without
-# allowing unbounded fan-out on Vercel.
-SCAN_CONCURRENCY = max(1, min(8, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "8"))))
+SCAN_CONCURRENCY = max(1, min(12, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "8"))))
 
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
@@ -82,10 +80,6 @@ class SignalEngine:
 
         server_ts = await market_data.server_time()
         seconds = int(TF_SECONDS[timeframe])
-        # Pocket orders can be opened at any second. Waiting for the next 1m/5m
-        # boundary made AUTO look frozen for up to the whole timeframe. A short
-        # lead keeps an exact scheduled entry while allowing the trade to open
-        # within a few seconds after the setup is found.
         entry_ts = server_ts + ENTRY_LEAD_SECONDS
         expiry_ts = entry_ts + seconds
         return {
@@ -138,6 +132,12 @@ class SignalEngine:
         return None if candidate is None else await self._candidate_dict(asset, "5m", candidate, candles, is_vip=True)
 
     async def _gather_candidates(self, assets: Iterable[str], evaluator) -> list[dict]:
+        requested = list(dict.fromkeys(str(asset) for asset in assets if asset))
+        eligible_scope, discovered_count = get_auto_scan_scope()
+        if eligible_scope and discovered_count and len(requested) >= discovered_count:
+            requested_set = set(requested)
+            requested = [asset for asset in eligible_scope if asset in requested_set]
+
         semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
 
         async def one(asset: str):
@@ -154,7 +154,7 @@ class SignalEngine:
                     logger.warning("Market scan failed %s: %s", asset, type(exc).__name__)
                 return None
 
-        tasks = [asyncio.create_task(one(asset)) for asset in assets]
+        tasks = [asyncio.create_task(one(asset)) for asset in requested]
         if not tasks:
             return []
         results = await asyncio.gather(*tasks)
