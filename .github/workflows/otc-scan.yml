@@ -32,7 +32,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then sleep 5; fi
+          # A Vercel Git production build takes roughly 45-60s. For push-triggered
+          # runs wait until the new backend is expected to be live, otherwise the
+          # scanner can hit the previous deployment and fail before the fix lands.
+          if [ "$EVENT_NAME" = "push" ]; then sleep 65; fi
           for i in $(seq 1 19); do
             START=$(date +%s)
             TOKEN_JSON=$(curl --fail --silent --show-error \
