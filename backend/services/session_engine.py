@@ -27,7 +27,9 @@ from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtim
 COUNT_TIMEFRAMES = {"15s", "1m", "3m"}
 PROFIT_TIMEFRAME = "5m"
 PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
-COUNT_MIN_CONFIDENCE = 74.0
+COUNT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
+COUNT_MIN_CONFIDENCE = 70.0
+COUNT_CONFIRM_CONFIDENCE = 68.0
 PROFIT_MIN_CONFIDENCE = 82.0
 MAX_SESSION_AMOUNT = 50000.0
 _SCHEMA_READY = False
@@ -196,7 +198,7 @@ async def session_state(*, refresh_balance=False):
 
 def _validate_config(config):
     mode = str(config.get("mode") or "count").lower()
-    strategy = str(config.get("strategy") or "trend_pulse")
+    strategy = str(config.get("strategy") or ("smart_confluence" if str(config.get("mode") or "count").lower() == "count" else "trend_pulse"))
     amount = round(float(config.get("amount") or 1), 2)
     max_martingale = int(config.get("max_martingale", 3))
     if amount < 1 or amount > MAX_SESSION_AMOUNT:
@@ -206,7 +208,7 @@ def _validate_config(config):
     if mode == "count":
         timeframe = str(config.get("timeframe") or "1m")
         target = int(config.get("target_wins") or 5)
-        if strategy not in AUTO_STRATEGIES:
+        if strategy not in COUNT_STRATEGIES:
             raise ValueError("Unknown AUTO strategy")
         if timeframe not in COUNT_TIMEFRAMES:
             raise ValueError("Count mode timeframe must be 15s, 1m or 3m")
@@ -483,16 +485,25 @@ async def session_tick():
     strategy = str(session["strategy"])
     timeframe = str(session["timeframe"])
 
-    if session["mode"] == "profit" and strategy == "smart_confluence":
+    # Fast COUNT mode (15s/1m/3m) uses a mixed strategy pool. We first
+    # rank the strongest setups across all smart strategies, then re-check only
+    # the selected pair/strategy before scheduling the exact candle-boundary entry.
+    # This avoids waiting for one rare strategy while still requiring confirmation.
+    mixed_count = session["mode"] == "count"
+    if mixed_count:
+        candidates = await signal_engine.scan_best_candidates(timeframe, all_assets)
+        threshold = COUNT_MIN_CONFIDENCE
+        strategy = "smart_confluence"
+    elif session["mode"] == "profit" and strategy == "smart_confluence":
         candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)
         threshold = PROFIT_MIN_CONFIDENCE
     else:
         candidates = await signal_engine.scan_strategy_candidates(timeframe, all_assets, strategy)
-        threshold = PROFIT_MIN_CONFIDENCE if session["mode"] == "profit" else COUNT_MIN_CONFIDENCE
+        threshold = PROFIT_MIN_CONFIDENCE
 
     confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]
     tradable_candidates = [candidate for candidate in confirmed if _tradable(snapshot, str(candidate.get("asset") or ""))]
-    label = "Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy)
+    label = "Mixed Smart Confluence" if mixed_count else ("Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy))
 
     telemetry = {
         "strategy": strategy,
@@ -525,8 +536,26 @@ async def session_tick():
 
     signal = None
     payout = None
+    confirmed_candidate = None
     for candidate in tradable_candidates:
-        stored, duplicate = await save_signal(candidate, is_vip=False)
+        candidate_to_save = candidate
+        if mixed_count:
+            # Second-pass confirmation is intentionally only one asset, so it is
+            # quick even when the first market scan covered 100+ OTC instruments.
+            try:
+                recheck = await signal_engine.evaluate_asset(
+                    str(candidate.get("asset") or ""), timeframe, str(candidate.get("strategy") or "")
+                )
+            except Exception:
+                recheck = None
+            same_direction = bool(recheck and recheck.get("direction") == candidate.get("direction"))
+            strong_enough = bool(recheck and float(recheck.get("confidence") or 0) >= COUNT_CONFIRM_CONFIDENCE)
+            if not (same_direction and strong_enough):
+                continue
+            candidate_to_save = recheck
+            confirmed_candidate = recheck
+
+        stored, duplicate = await save_signal(candidate_to_save, is_vip=False)
         if duplicate:
             continue
         signal = stored
@@ -553,7 +582,7 @@ async def session_tick():
     )
     await _event(
         int(session["id"]), "SIGNAL_FOUND", f"Найден сигнал {signal['pair']} {signal['direction']}",
-        {"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(all_assets)},
+        {"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(all_assets), "mixed": mixed_count, "confirmed": True},
     )
     await update_trade_runtime(
         stage="SIGNAL_FOUND", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
@@ -561,7 +590,7 @@ async def session_tick():
         entry_time=signal["entry_time"], expiry_time=signal["expiry_time"], amount=amount,
         scanned_assets=all_assets, scanned_count=len(all_assets), eligible_assets=eligible_assets,
         eligible_payouts=eligible_payouts, min_payout=MIN_AUTO_PAYOUT,
-        message="Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден",
+        message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),
     )
 
     trade = await maybe_execute_signal(signal)
