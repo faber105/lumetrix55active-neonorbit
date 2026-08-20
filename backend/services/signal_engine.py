@@ -17,6 +17,7 @@ from backend.services.strategies import (
 
 logger = logging.getLogger("alphapulse.engine")
 ENTRY_LEAD_SECONDS = int(os.getenv("ENTRY_LEAD_SECONDS", "6"))
+SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
 
 # Direct Pocket history accepts integer periods. These two periods are used by
 # the new signal/AUTO flows and are added to the shared timeframe registry.
@@ -74,7 +75,6 @@ class SignalEngine:
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_asset_composite(self, asset: str, timeframe: str) -> Optional[dict]:
-        # Main-page analysis may select any independently confirmed market setup.
         return await self._evaluate_asset_best(asset, timeframe, MANUAL_STRATEGIES)
 
     async def evaluate_vip_asset(self, asset: str) -> Optional[dict]:
@@ -99,13 +99,14 @@ class SignalEngine:
         return max(results, key=lambda x: float(x.get("confidence") or 0)) if results else None
 
     async def scan_best(self, timeframe: str, assets: Iterable[str]) -> Optional[dict]:
-        # Used by Smart Confluence profit mode: wider internal 5m arsenal.
+        # Smart profit mode uses the widest 5m arsenal. Each candidate must still
+        # independently satisfy its own full rule set before it can be selected.
         results = []
         for asset in assets:
             if asset not in OTC_ASSETS:
                 continue
             try:
-                candidate = await self._evaluate_asset_best(asset, timeframe, SMART_STRATEGIES)
+                candidate = await self._evaluate_asset_best(asset, timeframe, SMART_EXECUTION_STRATEGIES)
                 if candidate:
                     results.append(candidate)
             except MarketDataUnavailable:
