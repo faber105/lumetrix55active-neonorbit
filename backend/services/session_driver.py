@@ -90,6 +90,27 @@ async def claim_session_tick(min_interval_seconds: float = TICK_MIN_INTERVAL_SEC
     return int(claimed) if claimed is not None else None
 
 
+async def _reset_preload_after_open(session_id: int) -> None:
+    """The next open trade must start a fresh preload search later in its lifetime."""
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("""
+                UPDATE auto_preload_candidates
+                   SET signal_id=NULL,
+                       entry_time=NULL,
+                       expiry_time=NULL,
+                       amount=NULL,
+                       payout=NULL,
+                       opened_position_id=NULL,
+                       status='SEARCHING',
+                       updated_at=:now
+                 WHERE session_id=:sid
+            """), {"sid": int(session_id), "now": utcnow()})
+            await db.commit()
+    except Exception:
+        pass
+
+
 async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_SECONDS) -> dict:
     session_id = await claim_session_tick(min_interval_seconds)
     if session_id is None:
@@ -104,6 +125,8 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
 
     if preload and preload.get("block"):
         result = dict(preload)
+        if preload.get("status") == "OPEN" and preload.get("preloaded"):
+            await _reset_preload_after_open(session_id)
     else:
         result = await session_tick()
 
