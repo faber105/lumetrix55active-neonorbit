@@ -13,6 +13,8 @@ function range(values) {
   return [min - pad, max + pad];
 }
 
+const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+
 export default function CandleChart({ candles = [], entryPrice = null, currentPrice = null, height = 250 }) {
   const data = candles.slice(-40);
   const width = 720;
@@ -20,8 +22,8 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const values = data.flatMap((c) => [Number(c.high), Number(c.low)]).filter(Number.isFinite);
-  if (Number.isFinite(Number(entryPrice))) values.push(Number(entryPrice));
-  if (Number.isFinite(Number(currentPrice))) values.push(Number(currentPrice));
+  if (hasNumber(entryPrice)) values.push(Number(entryPrice));
+  if (hasNumber(currentPrice)) values.push(Number(currentPrice));
   const [min, max] = range(values);
   const y = (v) => pad.t + ((max - Number(v)) / (max - min)) * plotH;
   const step = data.length ? plotW / data.length : plotW;
@@ -83,13 +85,13 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
           const anchor = index === 0 ? "start" : index === data.length - 1 ? "end" : "middle";
           return <text key={`time-${index}`} x={x} y={height - 9} textAnchor={anchor} fill="#69758f" fontSize="10">{timeLabel(candle.time)}</text>;
         })}
-        {Number.isFinite(Number(entryPrice)) && (
+        {hasNumber(entryPrice) && (
           <g>
             <line x1={pad.l} x2={width - pad.r} y1={y(entryPrice)} y2={y(entryPrice)} stroke="#7c83ff" strokeWidth="1.5" strokeDasharray="5 5" />
             <text x={pad.l + 6} y={y(entryPrice) - 6} fill="#9da2ff" fontSize="11" fontWeight="700">ENTRY {fmt(entryPrice)}</text>
           </g>
         )}
-        {Number.isFinite(Number(currentPrice)) && (
+        {hasNumber(currentPrice) && (
           <g>
             <line x1={pad.l} x2={width - pad.r} y1={y(currentPrice)} y2={y(currentPrice)} stroke="#ffd166" strokeWidth="1.4" strokeDasharray="3 4" />
             <circle cx={width - pad.r - 2} cy={y(currentPrice)} r="4" fill="#ffd166" />
