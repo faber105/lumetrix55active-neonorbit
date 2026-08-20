@@ -123,11 +123,6 @@ def _deal_open_price(deal: dict) -> float | None:
 
 
 def _broker_outcome(deal: dict, fallback_direction: SignalDirection) -> tuple[SignalResult | None, float | None]:
-    """Return the outcome reported by Pocket, never from a separate market candle.
-
-    Prefer the broker's own open/close prices because those are the exact prices
-    used for the option. Text/bool/profit fields are fallbacks for payload variants.
-    """
     open_price = _deal_price(deal, close=False)
     close_price = _deal_price(deal, close=True)
     direction = _deal_direction(deal) or fallback_direction
@@ -166,15 +161,12 @@ def _broker_outcome(deal: dict, fallback_direction: SignalDirection) -> tuple[Si
             value = float(deal.get(key))
         except Exception:
             continue
-        # Pocket commonly reports 0 return on a losing binary option and a
-        # positive return on a win. Exact-price comparison above handles draws.
         if value > 0:
             return SignalResult.WIN, close_price
         if value < 0:
             return SignalResult.LOSS, close_price
         if value == 0:
             return SignalResult.LOSS, close_price
-
     return None, close_price
 
 
@@ -252,7 +244,6 @@ async def take_signal(telegram_id: int, signal_id: int) -> PaperPosition:
 async def sync_broker_positions(telegram_id: int) -> dict:
     if not ADMIN_ID or int(telegram_id) != ADMIN_ID:
         return {"supported": False, "seen": 0, "matched": 0, "created": 0}
-
     try:
         client = await market_data.connect()
         getter = getattr(client, "get_opened_deals", None)
@@ -276,7 +267,6 @@ async def sync_broker_positions(telegram_id: int) -> dict:
         open_time = _deal_open_time(deal) or now
         close_time = _deal_close_time(deal)
         entry_price = _deal_open_price(deal)
-
         async with AsyncSessionLocal() as db:
             signals = (
                 await db.execute(
@@ -348,7 +338,6 @@ async def sync_broker_positions(telegram_id: int) -> dict:
 
 
 async def _closed_broker_deals() -> dict[str, dict]:
-    """Load Pocket's actual recent closed-deal snapshot for AUTO reconciliation."""
     try:
         await market_data._refresh_private_ssid()
         if not market_data.configured:
@@ -384,7 +373,6 @@ async def reconcile_positions(limit: int = 100) -> dict:
     closed_deals = await _closed_broker_deals() if need_broker else {}
     closed = 0
     errors: list[dict] = []
-
     for position_id, source in due:
         try:
             async with AsyncSessionLocal() as db:
@@ -398,7 +386,6 @@ async def reconcile_positions(limit: int = 100) -> dict:
                     ).scalar_one_or_none()
                     if position is None:
                         continue
-
                     if position.source == "auto":
                         execution = (
                             await db.execute(
@@ -411,8 +398,6 @@ async def reconcile_positions(limit: int = 100) -> dict:
                         broker_id = str(execution.broker_order_id) if execution and execution.broker_order_id else None
                         deal = closed_deals.get(broker_id) if broker_id else None
                         if deal is None:
-                            # Never invent an AUTO result from a separate candle.
-                            # Keep it pending until Pocket reports the actual deal.
                             errors.append({"id": position_id, "type": "broker_result_pending"})
                             continue
                         result, broker_close = _broker_outcome(deal, position.direction)
@@ -430,8 +415,6 @@ async def reconcile_positions(limit: int = 100) -> dict:
                         closed += 1
                         continue
 
-                    # Manual/broker-tracked positions have no AlphaPulse order id;
-                    # for those only, retain market-boundary reconciliation.
                     close_price = await market_data.boundary_price(position.asset, position.expiry_time)
                     position.close_price = float(close_price)
                     delta = float(position.close_price) - float(position.entry_price)
