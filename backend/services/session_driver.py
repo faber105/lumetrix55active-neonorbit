@@ -10,6 +10,7 @@ from backend.services.auto_scan_scope import set_auto_scan_scope
 from backend.services.auto_trade import MIN_AUTO_PAYOUT, get_demo_account_snapshot
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
+from backend.services.preload_next import preload_cycle
 from backend.services.session_engine import session_tick
 
 # The Mini App polls active AUTO state roughly every 750 ms. Keep the DB claim
@@ -95,9 +96,21 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
         return {"status": "THROTTLED_OR_IDLE"}
 
     universe = await _refresh_live_otc_universe()
-    result = await session_tick()
+    preload = None
+    try:
+        preload = await preload_cycle()
+    except Exception as exc:
+        preload = {"status": "PRELOAD_ERROR", "error": type(exc).__name__, "block": False}
+
+    if preload and preload.get("block"):
+        result = dict(preload)
+    else:
+        result = await session_tick()
+
     if isinstance(result, dict):
         result.setdefault("session_id", session_id)
         result.setdefault("driver", "atomic-db-throttle")
         result.setdefault("otc_universe", universe)
+        if preload:
+            result.setdefault("preload", preload)
     return result
