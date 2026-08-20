@@ -1,7 +1,26 @@
 (() => {
+  const nativeFetch = window.fetch.bind(window);
   let stopped = false;
   let running = false;
   let timer = null;
+
+  // The React dashboard polls /api/auto/state frequently. That endpoint used to
+  // drive the full market scanner by default, so every UI refresh could block on
+  // dozens of OTC analyses. Force dashboard reads to be read-only; trading ticks
+  // run independently below.
+  window.fetch = (input, init = {}) => {
+    try {
+      const method = String(init?.method || "GET").toUpperCase();
+      const raw = typeof input === "string" ? input : input?.url;
+      if (method === "GET" && raw && raw.includes("/api/auto/state")) {
+        const url = new URL(raw, window.location.origin);
+        if (!url.searchParams.has("drive")) url.searchParams.set("drive", "false");
+        const next = raw.startsWith("http://") || raw.startsWith("https://") ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+        return nativeFetch(next, init);
+      }
+    } catch (_) {}
+    return nativeFetch(input, init);
+  };
 
   function getInitData() {
     const tg = window.Telegram?.WebApp;
@@ -26,7 +45,7 @@
 
     running = true;
     try {
-      await fetch("/api/auto/tick", {
+      await nativeFetch("/api/auto/tick", {
         method: "POST",
         headers: {
           "X-Telegram-Init-Data": initData,
@@ -37,7 +56,7 @@
         credentials: "same-origin",
       });
     } catch (_) {
-      // State polling stays independent; a failed tick is retried on the next cycle.
+      // A failed trading tick is retried, while dashboard reads remain responsive.
     } finally {
       running = false;
       schedule(document.hidden ? 1800 : 850);
