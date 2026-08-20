@@ -38,6 +38,23 @@ export function telegramHeaders(extra = {}) {
   };
 }
 
+const ISO_WITHOUT_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+const TIME_FIELD = /(?:_time|_at|time|date)$/i;
+
+function normalizeTimeValue(value, key = "") {
+  if (Array.isArray(value)) return value.map((item) => normalizeTimeValue(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalizeTimeValue(v, k)]));
+  }
+  if (typeof value === "string" && TIME_FIELD.test(key) && ISO_WITHOUT_ZONE.test(value)) {
+    // Backend timestamps are UTC. Appending Z prevents iOS/Safari from treating a
+    // timezone-less server value as device-local time. Date.toLocaleTimeString()
+    // in the UI then converts UTC to the user's actual device timezone.
+    return `${value}Z`;
+  }
+  return value;
+}
+
 export async function apiFetch(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
     ...options,
@@ -56,7 +73,7 @@ export async function apiFetch(path, options = {}) {
     error.body = body;
     throw error;
   }
-  return body;
+  return normalizeTimeValue(body);
 }
 
 export function postJson(path, payload = {}) {
