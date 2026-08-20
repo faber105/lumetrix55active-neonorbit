@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 
@@ -19,6 +19,7 @@ from backend.services.online_ml import get_model
 from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
 
 logger = logging.getLogger("alphapulse.reconciler")
+STALE_MARKET_DATA_AGE = timedelta(hours=4)
 
 
 def _now():
@@ -54,7 +55,6 @@ async def _update_performance(strategy: str, result: SignalResult) -> None:
 
 
 async def _train_once(signal_id: int, strategy: str, features_json: str, won: bool) -> bool:
-    """Atomically claim one signal for ML so overlapping scanner calls cannot double-train."""
     claimed_at = utcnow()
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -83,8 +83,34 @@ async def _train_once(signal_id: int, strategy: str, features_json: str, won: bo
         return False
 
 
+async def _close_irrecoverable_stale(signal_id: int) -> bool:
+    """Close old PENDING history as DRAW when Pocket no longer exposes its candle.
+
+    The rolling broker history is finite. Retrying an hours-old candle on every
+    five-second scanner tick cannot recover the data and needlessly delays AUTO.
+    DRAW is intentionally neutral and never trains the WIN/LOSS model.
+    """
+    current = _now()
+    async with AsyncSessionLocal() as db:
+        signal = (
+            await db.execute(
+                select(Signal)
+                .where(Signal.id == signal_id, Signal.result == SignalResult.PENDING)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+        if signal is None:
+            return False
+        if signal.expiry_time > current - STALE_MARKET_DATA_AGE:
+            return False
+        signal.result = SignalResult.DRAW
+        signal.closed_at = current
+        await db.commit()
+        logger.info("Closed stale unrecoverable signal %s as DRAW", signal_id)
+        return True
+
+
 async def reconcile_pending(limit: int = 100) -> dict:
-    """Resolve each signal from the exact candle it targeted, then train its strategy once."""
     async with AsyncSessionLocal() as db:
         ids = list(
             (
@@ -100,6 +126,7 @@ async def reconcile_pending(limit: int = 100) -> dict:
     entered = 0
     closed = 0
     trained = 0
+    stale_closed = 0
     errors: list[dict] = []
 
     for signal_id in ids:
@@ -145,8 +172,6 @@ async def reconcile_pending(limit: int = 100) -> dict:
                             "strategy": signal.strategy,
                             "features_json": signal.features_json,
                             "result": signal.result,
-                            "entry_price": float(candle_open),
-                            "close_price": float(candle_close),
                         }
 
             if closed_snapshot is not None:
@@ -164,6 +189,10 @@ async def reconcile_pending(limit: int = 100) -> dict:
                     await _update_performance(closed_snapshot["strategy"], result)
 
         except MarketDataUnavailable as exc:
+            if await _close_irrecoverable_stale(signal_id):
+                stale_closed += 1
+                closed += 1
+                continue
             logger.warning("Reconcile market data unavailable for signal %s: %s", signal_id, exc)
             errors.append({"id": signal_id, "type": "market_data"})
         except Exception as exc:
@@ -173,6 +202,7 @@ async def reconcile_pending(limit: int = 100) -> dict:
     return {
         "entered": entered,
         "closed": closed,
+        "stale_closed": stale_closed,
         "trained": trained,
         "pending_checked": len(ids),
         "errors": errors,
