@@ -20,6 +20,9 @@ logger = logging.getLogger("alphapulse.scanner")
 MIN_CONF = float(os.getenv("SIGNAL_MIN_CONFIDENCE", "72"))
 VIP_CONF = float(os.getenv("VIP_SIGNAL_MIN_CONFIDENCE", "80"))
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+HUNT_REGULAR = "HUNT_REGULAR"
+HUNT_VIP = "HUNT_VIP"
+HUNT_FOUND = "HUNT_FOUND"
 
 
 def format_signal(signal: dict) -> str:
@@ -93,6 +96,72 @@ async def _save(candidate: dict) -> tuple[dict, bool]:
         return out(row), duplicate
 
 
+async def _hunt_tick(bot: Bot, control, hunt_status: str, now) -> dict:
+    is_vip = hunt_status == HUNT_VIP
+    threshold = VIP_CONF if is_vip else MIN_CONF
+    candidate = await signal_engine.scan_strategy(
+        control.selected_timeframe,
+        list(OTC_ASSETS.keys()),
+        control.selected_strategy,
+    )
+    if not candidate or float(candidate.get("confidence") or 0) < threshold:
+        await update_control(
+            last_scan_at=now,
+            last_vip_at=now if is_vip else control.last_vip_at,
+            last_vip_status=hunt_status,
+            next_vip_at=now if is_vip else control.next_vip_at,
+        )
+        return {
+            "ok": True,
+            "scanner": "hunt",
+            "hunt_active": True,
+            "hunt_kind": "vip" if is_vip else "regular",
+            "strategy": control.selected_strategy,
+            "timeframe": control.selected_timeframe,
+            "threshold": threshold,
+            "status": "SEARCHING",
+            "published": 0,
+        }
+
+    signal, duplicate = await _save(candidate)
+    if duplicate:
+        await update_control(
+            last_scan_at=now,
+            last_vip_at=now if is_vip else control.last_vip_at,
+            last_vip_status=hunt_status,
+            next_vip_at=now if is_vip else control.next_vip_at,
+        )
+        return {
+            "ok": True,
+            "scanner": "hunt",
+            "hunt_active": True,
+            "hunt_kind": "vip" if is_vip else "regular",
+            "status": "DUPLICATE_WAITING_FOR_FRESH_SIGNAL",
+            "published": 0,
+            "signal_id": signal["id"],
+        }
+
+    trade = await maybe_execute_signal(signal)
+    info = await notify_signal(bot, signal)
+    await update_control(
+        last_scan_at=now,
+        last_vip_at=now if is_vip else control.last_vip_at,
+        last_vip_status=HUNT_FOUND,
+        next_vip_at=(now + timedelta(seconds=max(60, int(control.vip_interval_seconds or 300)))) if is_vip else control.next_vip_at,
+    )
+    return {
+        "ok": True,
+        "scanner": "hunt",
+        "hunt_active": False,
+        "hunt_kind": "vip" if is_vip else "regular",
+        "status": HUNT_FOUND,
+        "published": 1,
+        "signal": signal,
+        "auto_trade": trade,
+        **info,
+    }
+
+
 async def scan_tick(bot: Bot) -> dict:
     market_health = await market_data.health()
     if not market_health.get("configured"):
@@ -113,6 +182,14 @@ async def scan_tick(bot: Bot) -> dict:
         }
 
     now = utcnow()
+    hunt_status = str(control.last_vip_status or "")
+    if hunt_status in {HUNT_REGULAR, HUNT_VIP}:
+        result = await _hunt_tick(bot, control, hunt_status, now)
+        result["broker_sync"] = broker_sync
+        result["reconcile"] = reconciliation
+        result["positions"] = position_reconciliation
+        return result
+
     vip_due = bool(control.vip_enabled) and (
         control.next_vip_at is None or control.next_vip_at <= now
     )
