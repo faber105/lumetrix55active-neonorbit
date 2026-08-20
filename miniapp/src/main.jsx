@@ -4,6 +4,10 @@ import './index.css'
 import App from './App.jsx'
 import { installBrokerAutoLive } from './brokerAutoLive.js'
 
+const telegram = window.Telegram?.WebApp
+telegram?.ready?.()
+telegram?.expand?.()
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />

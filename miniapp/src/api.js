@@ -1,9 +1,37 @@
 export const API = window.location.origin;
-export const TG = window.Telegram?.WebApp;
-export const TG_ID = TG?.initDataUnsafe?.user?.id ?? null;
+
+export function getTelegramWebApp() {
+  return window.Telegram?.WebApp || null;
+}
+
+function launchInitData() {
+  const fromHash = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("tgWebAppData");
+  if (fromHash) return fromHash;
+  return new URLSearchParams(window.location.search).get("tgWebAppData") || "";
+}
+
+export function getTelegramInitData() {
+  return getTelegramWebApp()?.initData || launchInitData();
+}
+
+function getTelegramUserId() {
+  const direct = getTelegramWebApp()?.initDataUnsafe?.user?.id;
+  if (direct) return direct;
+  const initData = getTelegramInitData();
+  if (!initData) return null;
+  try {
+    const rawUser = new URLSearchParams(initData).get("user");
+    return rawUser ? JSON.parse(rawUser)?.id ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+export const TG = getTelegramWebApp();
+export const TG_ID = getTelegramUserId();
 
 export function telegramHeaders(extra = {}) {
-  const initData = TG?.initData || "";
+  const initData = getTelegramInitData();
   return {
     ...(initData ? { "X-Telegram-Init-Data": initData } : {}),
     ...extra,
