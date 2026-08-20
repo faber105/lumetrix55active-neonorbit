@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -7,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc, select
 
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal
-from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
+from backend.services.pocketoption_otc import MarketDataUnavailable, TF_SECONDS, market_data
 from backend.services.positions import reconcile_positions, serialize_position, sync_broker_positions, take_signal
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
@@ -71,11 +73,39 @@ async def position(
         payload = serialize_position(row)
 
     try:
-        candles = await market_data.get_candles(payload['asset'], payload['timeframe'], count)
+        candles, current_price = await asyncio.gather(
+            market_data.get_candles(payload['asset'], payload['timeframe'], count),
+            market_data.latest_price(payload['asset']),
+        )
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
 
-    current_price = float(candles[-1]['close']) if candles else payload['close_price'] or payload['entry_price']
+    current_price = float(current_price)
+    # Pocket history can return only completed higher-timeframe candles. Merge the
+    # freshest 1m price into the current selected-timeframe candle so the chart
+    # moves during the trade rather than jumping only after candle close.
+    period = int(TF_SECONDS.get(payload['timeframe'], 60))
+    now_ts = int(time.time())
+    bucket = now_ts - (now_ts % period)
+    if candles:
+        last = dict(candles[-1])
+        last_time = int(last.get('time') or 0)
+        if last_time == bucket:
+            last['close'] = current_price
+            last['high'] = max(float(last.get('high', current_price)), current_price)
+            last['low'] = min(float(last.get('low', current_price)), current_price)
+            candles[-1] = last
+        elif last_time < bucket:
+            open_price = float(last.get('close', current_price))
+            candles.append({
+                'time': bucket,
+                'open': open_price,
+                'high': max(open_price, current_price),
+                'low': min(open_price, current_price),
+                'close': current_price,
+            })
+            candles = candles[-count:]
+
     now = _now()
     expiry = datetime.fromisoformat(payload['expiry_time'].replace('Z', '+00:00')).replace(tzinfo=None)
     entry = float(payload['entry_price'])
