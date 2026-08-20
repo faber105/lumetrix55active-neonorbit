@@ -24,8 +24,10 @@ _trade_lock = asyncio.Lock()
 MIN_TRADE_AMOUNT = 1.0
 MAX_TRADE_AMOUNT = 50000.0
 MIN_AUTO_PAYOUT = float(os.getenv("AUTO_TRADE_MIN_PAYOUT", "92"))
-AUTO_DUE_WINDOW_SECONDS = max(8, min(30, int(os.getenv("AUTO_DUE_WINDOW_SECONDS", "20"))))
-ENTRY_GRACE_SECONDS = max(1.0, min(5.0, float(os.getenv("AUTO_ENTRY_GRACE_SECONDS", "3"))))
+# GitHub scanner runs every few seconds. Enter the blocking exact-entry path only
+# when the candle boundary is close enough to keep a Vercel request short.
+AUTO_DUE_WINDOW_SECONDS = max(5, min(10, int(os.getenv("AUTO_DUE_WINDOW_SECONDS", "7"))))
+ENTRY_GRACE_SECONDS = max(0.5, min(3.0, float(os.getenv("AUTO_ENTRY_GRACE_SECONDS", "1.5"))))
 _snapshot_cache: dict = {"at": 0.0, "data": None}
 
 
@@ -251,7 +253,7 @@ async def maybe_execute_signal(signal: dict) -> dict:
         pair=signal.get("pair"), asset=signal.get("asset"), strategy=signal.get("strategy"), timeframe=signal.get("timeframe"),
         payout_percent=payout, balance=snapshot.get("balance"), balance_is_demo=snapshot.get("balance_is_demo"),
         entry_time=_iso(entry), expiry_time=_iso(expiry), seconds_to_entry=max(0, round(seconds, 1)),
-        message="Сигнал найден — жду точное время входа",
+        message="Сигнал найден — жду открытие новой свечи",
     )
     if seconds > AUTO_DUE_WINDOW_SECONDS:
         return {"status": "SCHEDULED", "entry_time": _iso(entry), "seconds_to_entry": round(seconds, 1), "payout": payout}
@@ -281,10 +283,10 @@ async def process_pending_auto_trade() -> dict:
     entry = _to_utc_naive(signal["entry_time"])
     seconds = (entry - utcnow()).total_seconds()
     if seconds > AUTO_DUE_WINDOW_SECONDS:
-        await update_trade_runtime(stage="WAIT_ENTRY", seconds_to_entry=round(seconds, 1), message="Жду точное время входа")
+        await update_trade_runtime(stage="WAIT_ENTRY", seconds_to_entry=round(seconds, 1), message="Жду открытие новой свечи")
         return {"status": "WAIT_ENTRY", "seconds_to_entry": round(seconds, 1), "signal_id": int(signal_id)}
     if seconds < -ENTRY_GRACE_SECONDS:
-        await reset_trade_runtime("MISSED_ENTRY", "Точное время входа уже прошло — сигнал пропущен")
+        await reset_trade_runtime("MISSED_ENTRY", "Точное время новой свечи уже прошло — сигнал пропущен")
         return {"status": "MISSED_ENTRY", "signal_id": int(signal_id)}
     return await _execute_signal(signal, confirmed=False, exact_entry=True)
 
@@ -310,9 +312,7 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
         return {"status": "SKIPPED", "reason": "max_open_positions"}
 
     amount = float(control.amount or 1.0)
-    execution = await _claim(signal, amount)
-    if execution is None:
-        return {"status": "DUPLICATE"}
+    execution = None
 
     async with _trade_lock:
         client = None
@@ -322,49 +322,54 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                 raise MarketDataUnavailable("Pocket Option session is not configured")
             from pocketoptionapi_async import OrderDirection, OrderStatus
 
+            if exact_entry:
+                seconds = (entry - utcnow()).total_seconds()
+                if seconds > AUTO_DUE_WINDOW_SECONDS:
+                    await update_trade_runtime(stage="WAIT_ENTRY", seconds_to_entry=round(seconds, 1), message="Жду открытие новой свечи")
+                    return {"status": "WAIT_ENTRY", "seconds_to_entry": round(seconds, 1)}
+                if seconds < -ENTRY_GRACE_SECONDS:
+                    await reset_trade_runtime("MISSED_ENTRY", "Точное время входа пропущено")
+                    return {"status": "MISSED_ENTRY"}
+
             client = _build_trading_client()
             if not await asyncio.wait_for(client.connect(persistent=False), timeout=20):
                 raise RuntimeError("Pocket Option demo trading connection failed")
-            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=1.0), timeout=4)
+            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=4)
             payout = payout_for_asset(snapshot, signal["asset"])
             if payout is None or payout < MIN_AUTO_PAYOUT:
-                await _mark_execution(execution.id, "SKIPPED", "payout_below_threshold")
                 await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")
                 return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
 
             if exact_entry:
-                seconds = (entry - utcnow()).total_seconds()
-                if seconds < -ENTRY_GRACE_SECONDS:
-                    await _mark_execution(execution.id, "SKIPPED", "missed_entry")
-                    await reset_trade_runtime("MISSED_ENTRY", "Точное время входа пропущено")
-                    return {"status": "MISSED_ENTRY"}
-                if seconds > 1.1:
+                remaining = (entry - utcnow()).total_seconds()
+                if remaining > 0.35:
                     await update_trade_runtime(
                         stage="WAIT_ENTRY", payout_percent=payout, balance=snapshot.get("balance"),
-                        seconds_to_entry=round(seconds, 1), message="Подключён к Pocket · жду точное время входа",
+                        seconds_to_entry=round(remaining, 1), message="Pocket подключён · жду новую свечу",
                     )
-                    await asyncio.sleep(max(0.0, seconds - 0.9))
-                    near_snapshot = await client.account_snapshot(listen_seconds=0.3)
-                    near_payout = payout_for_asset(near_snapshot, signal["asset"])
-                    if near_payout is not None:
-                        payout = near_payout
-                        snapshot = near_snapshot
-                    if payout < MIN_AUTO_PAYOUT:
-                        await _mark_execution(execution.id, "SKIPPED", "payout_dropped_before_entry")
-                        await reset_trade_runtime("PAYOUT_TOO_LOW", f"Перед входом выплата упала до {payout:.1f}% — сигнал пропущен")
-                        return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
+                    await asyncio.sleep(max(0.0, remaining - 0.30))
                 remaining = (entry - utcnow()).total_seconds()
                 if remaining < -ENTRY_GRACE_SECONDS:
-                    await _mark_execution(execution.id, "SKIPPED", "missed_entry")
-                    await reset_trade_runtime("MISSED_ENTRY", "Pocket не успел к точному времени входа")
+                    await reset_trade_runtime("MISSED_ENTRY", "Pocket не успел к открытию новой свечи")
                     return {"status": "MISSED_ENTRY"}
                 await update_trade_runtime(
                     stage="OPENING", payout_percent=payout, balance=snapshot.get("balance"),
-                    seconds_to_entry=max(0, round(remaining, 2)), message="Pocket готов · ордер уйдёт точно во время входа",
+                    seconds_to_entry=max(0, round(remaining, 2)), message="Pocket готов · открываю на новой свече",
                 )
-                remaining = (entry - utcnow()).total_seconds()
                 if remaining > 0:
                     await asyncio.sleep(remaining)
+
+                # Never let a stopped session or switched execution mode open a
+                # trade after a wait. This also closes the stale scanner race.
+                guard = await _basic_guard(signal, confirmed=False)
+                if guard:
+                    return guard
+
+            # Claim only at the actual send point. Previously an invocation could
+            # claim EXECUTING, die while sleeping, and permanently block retries.
+            execution = await _claim(signal, amount)
+            if execution is None:
+                return {"status": "DUPLICATE"}
 
             duration = int((expiry - (entry if exact_entry else utcnow())).total_seconds())
             if duration < 5:
@@ -425,7 +430,8 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
-            await _mark_execution(execution.id, "FAILED", type(exc).__name__)
+            if execution is not None:
+                await _mark_execution(execution.id, "FAILED", type(exc).__name__)
             await update_trade_runtime(stage="FAILED", pending_signal_id=None, message=f"Ошибка открытия: {type(exc).__name__}")
             return {"status": "FAILED", "error": type(exc).__name__}
         finally:
