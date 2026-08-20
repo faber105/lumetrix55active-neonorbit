@@ -4,7 +4,7 @@
   let busy = false;
   let enabled = false;
   let lastState = null;
-  let timer = null;
+  let scheduled = false;
 
   const initData = () => {
     try {
@@ -56,7 +56,7 @@
 
   function description() {
     const { mode, timeframe } = modeInfo();
-    if (mode === 'profit') return 'ON: за 2 минуты до закрытия текущей 5m сделки бот начинает анализ, подтверждает следующий сетап и готовит вход ровно на следующую 5-минутку.';
+    if (mode === 'profit') return 'ON: за 2 минуты до закрытия текущей 5m сделки бот начинает анализ, подтверждает следующий сетап и готовит вход на следующую 5-минутку.';
     const tf = timeframe || 'выбранной';
     return `ON: пока текущая ${tf} сделка ещё открыта, бот заранее анализирует следующий вход и готовит его к следующей границе свечи.`;
   }
@@ -73,12 +73,12 @@
     if (!enabled) {
       status.className = 'ap-preload-status';
       status.textContent = 'OFF · обычный цикл: закрытие → новый анализ';
-    } else if (c?.status === 'OPENED') {
-      status.className = 'ap-preload-status ready';
-      status.textContent = 'Новый вход уже открыт на границе · фиксируется предыдущая сделка';
     } else if (c?.status === 'PREPARED') {
       status.className = 'ap-preload-status ready';
       status.textContent = `Следующий вход подготовлен${c.entry_time ? ` · ${new Date(c.entry_time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}` : ''}`;
+    } else if (c?.status === 'WAIT_CLOSE') {
+      status.className = 'ap-preload-status warn';
+      status.textContent = 'Сетап готов · жду результат текущей сделки';
     } else if (c?.status === 'SEARCHING') {
       status.className = 'ap-preload-status warn';
       status.textContent = 'Ранний анализ следующего входа активен';
@@ -101,7 +101,7 @@
     if (busy) return;
     busy = true;
     const sw = panel.querySelector('.ap-preload-switch');
-    sw.disabled = true;
+    if (sw) sw.disabled = true;
     try {
       lastState = await request('/api/auto-preload/state', {
         method: 'PATCH',
@@ -116,7 +116,7 @@
       if (status) status.textContent = `Ошибка: ${e.message}`;
     } finally {
       busy = false;
-      sw.disabled = false;
+      if (sw) sw.disabled = false;
     }
   }
 
@@ -140,7 +140,7 @@
         <div class="ap-preload-status"></div>`;
       const modeBlock = builder.firstElementChild;
       if (modeBlock?.nextSibling) builder.insertBefore(panel, modeBlock.nextSibling); else builder.prepend(panel);
-      panel.querySelector('.ap-preload-switch').addEventListener('click', () => toggle(panel));
+      panel.querySelector('.ap-preload-switch')?.addEventListener('click', () => toggle(panel));
     }
     render(panel);
   }
@@ -159,12 +159,26 @@
     if (b) b.textContent = enabled ? 'ON' : 'OFF';
   }
 
-  const observer = new MutationObserver(() => {
-    ensureControl();
-    render(document.getElementById(ID));
-    enhanceActiveKpi();
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
-  setTimeout(() => { ensureControl(); load(); }, 0);
-  timer = setInterval(load, 2500);
+  function scheduleEnsure() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      ensureControl();
+      render(document.getElementById(ID));
+      enhanceActiveKpi();
+    });
+  }
+
+  const rootObserver = new MutationObserver(scheduleEnsure);
+  const start = () => {
+    const root = document.getElementById('root');
+    if (root) rootObserver.observe(root, { childList: true, subtree: true });
+    scheduleEnsure();
+    load();
+    setInterval(load, 4000);
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
 })();
