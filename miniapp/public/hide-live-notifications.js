@@ -6,11 +6,16 @@
     for (const node of nodes) {
       if ((node.textContent || '').trim().toUpperCase() !== TARGET) continue;
 
-      const protectedBlock = node.closest('.live-session, .journal, .chart-card');
-      if (protectedBlock) {
-        const ownRow = node.parentElement;
-        if (ownRow && ownRow !== protectedBlock && !ownRow.querySelector('.balance-card,.session-kpis,.robot-status')) ownRow.remove();
-        else node.remove();
+      const liveSession = node.closest('.live-session');
+      if (liveSession) {
+        let block = node;
+        while (block.parentElement && block.parentElement !== liveSession) block = block.parentElement;
+        if (
+          block !== liveSession &&
+          !block.querySelector('.session-top,.balance-card,.session-kpis,.robot-status,.journal,.chart-card')
+        ) {
+          block.remove();
+        }
         continue;
       }
 
@@ -18,8 +23,7 @@
       if (!block) continue;
       const text = (block.textContent || '').toUpperCase();
       if (text.includes('ЖУРНАЛ СЕССИИ')) continue;
-      if (block.classList?.contains('live-session')) continue;
-      if (block.querySelector?.('.session-top,.balance-card,.session-kpis,.robot-status')) continue;
+      if (block.querySelector?.('.session-top,.balance-card,.session-kpis,.robot-status,.journal,.chart-card')) continue;
       block.remove();
     }
   }
