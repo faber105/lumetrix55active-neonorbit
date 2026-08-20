@@ -8,7 +8,7 @@ from sqlalchemy import desc, select
 
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal
 from backend.services.live_quotes import broker_live_chart
-from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
+from backend.services.pocketoption_otc import MarketDataUnavailable, TF_SECONDS, market_data
 from backend.services.positions import reconcile_positions, serialize_position, sync_broker_positions, take_signal
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
@@ -75,13 +75,16 @@ async def position(
         payload = serialize_position(row)
 
     chart_count = max(40, min(120, count))
-    source = 'broker-direct-1s'
+    timeframe = str(payload.get('timeframe') or '15s')
+    if timeframe not in TF_SECONDS:
+        timeframe = '15s'
+
     try:
-        candles, current_price = await broker_live_chart(payload['asset'], chart_count)
+        candles, current_price, source = await broker_live_chart(payload['asset'], timeframe, chart_count)
     except Exception:
-        source = 'broker-history-15s-fallback'
+        source = f'broker-history-{timeframe}-fallback'
         try:
-            candles = await market_data.get_candles(payload['asset'], '15s', chart_count)
+            candles = await market_data.get_candles(payload['asset'], timeframe, chart_count)
         except MarketDataUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         if not candles:
@@ -107,7 +110,8 @@ async def position(
         'floating_result': payload['result'] if payload['status'] == 'CLOSED' else floating,
         'seconds_to_expiry': max(0, int((expiry - now).total_seconds())),
         'server_time': datetime.now(timezone.utc).isoformat(),
-        'chart_timeframe': '15s',
+        'chart_timeframe': timeframe,
+        'chart_period_seconds': int(TF_SECONDS[timeframe]),
         'chart_source': source,
         'candles': candles,
     }
