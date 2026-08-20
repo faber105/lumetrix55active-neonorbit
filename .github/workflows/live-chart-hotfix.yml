@@ -1,0 +1,65 @@
+name: Live chart hotfix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/live-chart-hotfix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch realtime position chart
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('backend/services/pocketoption_otc.py')
+          s = p.read_text()
+          s = s.replace("TF_SECONDS = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600}", "TF_SECONDS = {'15s': 15, '1m': 60, '3m': 180, '5m': 300, '15m': 900, '1h': 3600}")
+          p.write_text(s)
+
+          p = Path('backend/routers/live.py')
+          s = p.read_text()
+          s = s.replace('from fastapi import APIRouter, Depends, HTTPException, Query', 'from fastapi import APIRouter, Depends, HTTPException, Query, Response')
+          s = s.replace("    count: int = Query(60, ge=20, le=120),\n    user: TelegramMiniAppUser = Depends(telegram_user),\n):", "    count: int = Query(60, ge=20, le=120),\n    response: Response = None,\n    user: TelegramMiniAppUser = Depends(telegram_user),\n):")
+          s = s.replace("    await reconcile_positions()\n    async with AsyncSessionLocal() as db:", "    if response is not None:\n        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'\n        response.headers['Pragma'] = 'no-cache'\n    await reconcile_positions()\n    async with AsyncSessionLocal() as db:", 1)
+          old = """    try:\n        candles, current_price = await asyncio.gather(\n            market_data.get_candles(payload['asset'], chart_tf, chart_count),\n            market_data.latest_price(payload['asset']),\n        )\n    except MarketDataUnavailable as exc:\n        raise HTTPException(503, str(exc)) from exc\n\n    current_price = float(current_price)\n"""
+          new = """    try:\n        # Use the freshest close from the same live 15s Pocket stream used by the chart.\n        # latest_price() is based on 1m history and can stay unchanged for a whole minute.\n        candles = await market_data.get_candles(payload['asset'], chart_tf, chart_count)\n    except MarketDataUnavailable as exc:\n        raise HTTPException(503, str(exc)) from exc\n\n    if not candles:\n        raise HTTPException(503, 'Pocket live chart returned no candles')\n    current_price = float(candles[-1]['close'])\n"""
+          if old not in s:
+              raise SystemExit('live.py target block not found')
+          s = s.replace(old, new)
+          p.write_text(s)
+
+          p = Path('miniapp/src/App.jsx')
+          s = p.read_text()
+          replacement = r'''function LiveChart({pair,timeframe,positionId}){const[market,setMarket]=useState(null),[detail,setDetail]=useState(null),[error,setError]=useState(""),[refreshing,setRefreshing]=useState(false);const load=useCallback(async(manual=false)=>{if(manual)setRefreshing(true);try{const stamp=Date.now();if(positionId){setDetail(await apiFetch(`/api/live/position/${positionId}?count=60&_=${stamp}`));setError("");return}setMarket(await apiFetch(`/api/market/candles?pair=${encodeURIComponent(pair)}&timeframe=${timeframe}&count=60&_=${stamp}`));setError("")}catch(e){setError(safeMessage(e))}finally{if(manual)setRefreshing(false)}},[pair,timeframe,positionId]);usePolling(()=>load(false),positionId?900:1800,Boolean(TG_ID));const candles=detail?.candles||market?.candles||[],current=detail?.current_price??market?.current_price,position=detail?.position;return <section className="glass chart-card"><div className="chart-head"><div><small>{position?"LIVE POSITION":"POCKET OPTION CHART"}</small><h3>{position?.pair||market?.pair||`${pair} OTC`}</h3></div><div className="chart-live-actions"><div><small>Сейчас</small><b>{price(current)}</b></div>{position&&<button className="refresh live-refresh" type="button" disabled={refreshing} onClick={()=>load(true)}>{refreshing?"…":"↻ Обновить"}</button>}</div></div><CandleChart candles={candles} entryPrice={position?.entry_price} currentPrice={current} height={260}/>{position&&<div className="live-metrics"><span><small>Направление</small><Direction value={position.direction}/></span><span><small>До закрытия</small><b>{Math.max(0,Number(detail?.seconds_to_expiry||0))}s</b></span><span><small>Состояние</small><Result value={position.status==="CLOSED"?position.result:detail?.floating_result}/></span></div>}{error&&<small className="inline-error">{error}</small>}</section>}'''
+          s2, n = re.subn(r'function LiveChart\(\{pair,timeframe,positionId\}\).*?\n\nfunction HomeTab', replacement + '\n\nfunction HomeTab', s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'App.jsx LiveChart replacement count={n}')
+          p.write_text(s2)
+
+          p = Path('miniapp/src/index.css')
+          s = p.read_text()
+          marker = '/* live-chart-hotfix */'
+          if marker not in s:
+              s += '''\n\n/* live-chart-hotfix */\n.chart-live-actions{display:flex;align-items:center;gap:10px;text-align:right}.chart-live-actions>div{display:flex;flex-direction:column;align-items:flex-end}.live-refresh{width:auto!important;min-width:92px;height:38px;padding:0 12px;font-size:12px;white-space:nowrap}.live-refresh:disabled{opacity:.6}@media(max-width:520px){.chart-head{align-items:flex-start;gap:8px}.chart-live-actions{gap:6px}.live-refresh{min-width:76px;padding:0 9px;font-size:11px}}\n'''
+          p.write_text(s)
+          PY
+      - name: Commit hotfix
+        run: |
+          git config user.name 'AlphaPulse Hotfix Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/pocketoption_otc.py backend/routers/live.py miniapp/src/App.jsx miniapp/src/index.css
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Keep open trade chart live and add refresh button'
+          git push
