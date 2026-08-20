@@ -47,9 +47,6 @@ function normalizeTimeValue(value, key = "") {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalizeTimeValue(v, k)]));
   }
   if (typeof value === "string" && TIME_FIELD.test(key) && ISO_WITHOUT_ZONE.test(value)) {
-    // Backend timestamps are UTC. Appending Z prevents iOS/Safari from treating a
-    // timezone-less server value as device-local time. Date.toLocaleTimeString()
-    // in the UI then converts UTC to the user's actual device timezone.
     return `${value}Z`;
   }
   return value;
@@ -90,4 +87,20 @@ export function patchJson(path, payload = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+let timezoneSyncPromise = null;
+export function syncDeviceTimezone() {
+  if (!TG_ID) return Promise.resolve(null);
+  if (timezoneSyncPromise) return timezoneSyncPromise;
+  let name = "";
+  try {
+    name = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {}
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  timezoneSyncPromise = postJson("/api/settings/timezone", {
+    name,
+    offset_minutes: offsetMinutes,
+  }).catch(() => null);
+  return timezoneSyncPromise;
 }
