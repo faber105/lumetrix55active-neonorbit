@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy import select
 
-from backend.models.db_models import AsyncSessionLocal, User, UserSettings, utcnow
+from backend.models.db_models import AsyncSessionLocal, MLState, User, UserSettings, utcnow
 from backend.services.control import get_control, update_control
 from backend.services.pocketoption_otc import MarketDataUnavailable, OTC_ASSETS, market_data
 from backend.services.positions import reconcile_positions, sync_broker_positions
@@ -21,13 +23,35 @@ from backend.services.trade_runtime import update_trade_runtime
 logger = logging.getLogger("alphapulse.scanner")
 VIP_MIN_CONFIDENCE = 82.0
 ADMIN_ID = os.environ.get("ADMIN_ID", "0")
+TZ_KEY_PREFIX = "__user_tz__:"
 
 
-def format_signal(signal: dict) -> str:
-    from datetime import datetime, timezone
+def _parse_signal_time(value: str) -> datetime:
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
-    entry = datetime.fromisoformat(signal["entry_time"].replace("Z", "+00:00")).astimezone(timezone.utc)
-    expiry = datetime.fromisoformat(signal["expiry_time"].replace("Z", "+00:00")).astimezone(timezone.utc)
+
+def _user_timezone(data: dict | None):
+    data = data or {}
+    name = str(data.get("name") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    try:
+        minutes = max(-840, min(840, int(data.get("offset_minutes") or 0)))
+    except Exception:
+        minutes = 0
+    return timezone(timedelta(minutes=minutes))
+
+
+def format_signal(signal: dict, timezone_data: dict | None = None) -> str:
+    user_tz = _user_timezone(timezone_data)
+    entry = _parse_signal_time(signal["entry_time"]).astimezone(user_tz)
+    expiry = _parse_signal_time(signal["expiry_time"]).astimezone(user_tz)
     arrow = "🟢 <b>CALL / ВВЕРХ</b>" if signal["direction"] == "BUY" else "🔴 <b>PUT / ВНИЗ</b>"
     confirmations = signal.get("confirmations") or []
     confirmations_text = "\n".join(f"• {item}" for item in confirmations[:5])
@@ -37,8 +61,8 @@ def format_signal(signal: dict) -> str:
         + f"Стратегия: <b>{signal.get('strategy_label', signal['strategy'])}</b>\n"
         + f"Направление: {arrow}\n"
         + "Таймфрейм: <b>5m</b>\n"
-        + f"⏰ Вход: <b>{entry:%H:%M:%S UTC}</b>\n"
-        + f"⌛ Экспирация: <b>{expiry:%H:%M:%S UTC}</b>\n"
+        + f"⏰ Вход: <b>{entry:%H:%M:%S}</b>\n"
+        + f"⌛ Экспирация: <b>{expiry:%H:%M:%S}</b>\n"
         + f"Уверенность: <b>{float(signal['confidence']):.1f}%</b>\n\n"
         + signal["reason"]
         + (f"\n\n<b>Подтверждения:</b>\n{confirmations_text}" if confirmations_text else "")
@@ -61,11 +85,32 @@ async def notify_signal(bot: Bot, signal: dict) -> dict:
                 .where(User.status == "VERIFIED")
             )
         ).all()
+        tz_keys = [f"{TZ_KEY_PREFIX}{int(user.telegram_id)}" for user, _ in rows]
+        timezone_rows = (
+            (
+                await db.execute(select(MLState).where(MLState.strategy.in_(tz_keys)))
+            ).scalars().all()
+            if tz_keys
+            else []
+        )
+
+    timezone_by_user: dict[int, dict] = {}
+    for state in timezone_rows:
+        try:
+            telegram_id = int(str(state.strategy).split(":", 1)[1])
+            timezone_by_user[telegram_id] = json.loads(state.payload or "{}")
+        except Exception:
+            continue
+
     for user, settings in rows:
         if not should_notify(settings, signal):
             continue
+        telegram_id = int(user.telegram_id)
         try:
-            await bot.send_message(int(user.telegram_id), format_signal(signal))
+            await bot.send_message(
+                telegram_id,
+                format_signal(signal, timezone_by_user.get(telegram_id)),
+            )
             notified += 1
         except Exception as exc:
             errors += 1
