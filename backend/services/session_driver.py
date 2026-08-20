@@ -6,6 +6,7 @@ from datetime import timedelta
 from sqlalchemy import text
 
 from backend.models.db_models import AsyncSessionLocal, utcnow
+from backend.services.auto_scan_scope import set_auto_scan_scope
 from backend.services.auto_trade import MIN_AUTO_PAYOUT, get_demo_account_snapshot
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
@@ -24,14 +25,15 @@ def _display_asset(asset: str) -> str:
 async def _refresh_live_otc_universe() -> dict:
     """Populate the scanner from Pocket's current DEMO asset/payout snapshot.
 
-    The original build shipped with ten hard-coded pairs. Pocket exposes a wider
-    OTC universe in its live account snapshot, so register every currently
-    visible *_otc symbol before each scanner cycle. This keeps the static ten as
-    a fallback when Pocket temporarily returns no asset list.
+    Every live OTC instrument is still discovered and exposed to the UI, but
+    expensive candle/indicator analysis is scoped to instruments that are open
+    and already satisfy the session payout floor. There is no reason to fetch
+    205 candles for a pair that cannot be traded at >=92% anyway.
     """
     try:
         snapshot = await get_demo_account_snapshot(max_age=2.0)
     except Exception:
+        set_auto_scan_scope([], len(OTC_ASSETS))
         return {"discovered": len(OTC_ASSETS), "eligible": None}
 
     payouts = snapshot.get("payouts", {}) or {}
@@ -41,15 +43,21 @@ async def _refresh_live_otc_universe() -> dict:
         if str(asset).lower().endswith("_otc"):
             OTC_ASSETS.setdefault(str(asset), _display_asset(str(asset)))
 
-    eligible = 0
+    eligible_assets: list[str] = []
     for asset in OTC_ASSETS:
         try:
             payout = float(payouts.get(asset))
         except (TypeError, ValueError):
             continue
         if payout >= MIN_AUTO_PAYOUT and available.get(asset, True) is not False:
-            eligible += 1
-    return {"discovered": len(OTC_ASSETS), "eligible": eligible}
+            eligible_assets.append(asset)
+
+    set_auto_scan_scope(eligible_assets, len(OTC_ASSETS))
+    return {
+        "discovered": len(OTC_ASSETS),
+        "eligible": len(eligible_assets),
+        "eligible_assets": eligible_assets,
+    }
 
 
 async def claim_session_tick(min_interval_seconds: float = TICK_MIN_INTERVAL_SECONDS) -> int | None:
