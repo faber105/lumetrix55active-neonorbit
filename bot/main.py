@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, types
@@ -16,6 +18,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, TelegramObject, Update, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+from backend.models.db_models import AsyncSessionLocal, MLState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alphapulse.bot")
@@ -80,6 +84,38 @@ async def create_user(telegram_id: int, username: str, full_name: str): return a
 async def set_status(telegram_id: int, status: str) -> bool:
     data = await api("POST", "/api/auth/status", json={"telegram_id": telegram_id, "status": status, "secret": ADMIN_SECRET})
     return bool(data and data.get("ok"))
+
+
+async def get_user_timezone(telegram_id: int):
+    try:
+        async with AsyncSessionLocal() as db:
+            state = await db.get(MLState, f"__user_tz__:{int(telegram_id)}")
+        payload = json.loads(state.payload or "{}") if state else {}
+    except Exception:
+        payload = {}
+    name = str(payload.get("name") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    try:
+        minutes = max(-840, min(840, int(payload.get("offset_minutes") or 0)))
+    except Exception:
+        minutes = 0
+    return timezone(timedelta(minutes=minutes))
+
+
+def local_signal_time(value: str | None, tz) -> str:
+    if not value:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%H:%M:%S")
+    except Exception:
+        return "—"
 
 async def verified_or_reply(message: types.Message) -> bool:
     user = await get_user(message.from_user.id)
@@ -194,7 +230,17 @@ async def vip_signals(message: types.Message):
     if not await verified_or_reply(message): return
     signals=await api("GET","/api/signals/vip?limit=5") or []
     if not signals: await message.answer("VIP сигналов пока нет.",reply_markup=kb_miniapp()); return
-    lines=["VIP Сигналы",""]+[f"{s['pair']} {s['timeframe']} | {'CALL' if s['direction']=='BUY' else 'PUT'} | {s['confidence']}%" for s in signals]; await message.answer("\n".join(lines),reply_markup=kb_miniapp())
+    tz = await get_user_timezone(message.from_user.id)
+    lines = ["🔥 <b>VIP Сигналы</b>", ""]
+    for s in signals:
+        direction = "CALL" if s.get("direction") == "BUY" else "PUT"
+        entry = local_signal_time(s.get("entry_time"), tz)
+        expiry = local_signal_time(s.get("expiry_time"), tz)
+        lines.append(
+            f"<b>{s.get('pair','—')}</b> · {s.get('timeframe','5m')} · {direction} · {s.get('confidence','—')}%\n"
+            f"⏰ Вход: <b>{entry}</b> · ⌛ Экспирация: <b>{expiry}</b>"
+        )
+    await message.answer("\n\n".join(lines), reply_markup=kb_miniapp())
 
 @dp.message(F.text == "Настройки")
 async def settings(message: types.Message):
