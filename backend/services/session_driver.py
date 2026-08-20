@@ -10,8 +10,7 @@ from backend.services.auto_scan_scope import set_auto_scan_scope
 from backend.services.auto_trade import MIN_AUTO_PAYOUT, get_demo_account_snapshot
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
-from backend.services.preload_next import preload_cycle
-from backend.services.session_engine import session_tick
+from backend.services.multi_strategy import preload_cycle, session_tick
 
 # The Mini App polls active AUTO state roughly every 750 ms. Keep the DB claim
 # interval aligned with that cadence so the very first poll after Pocket reports
