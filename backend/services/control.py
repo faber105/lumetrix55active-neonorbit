@@ -53,6 +53,7 @@ async def update_control(**changes) -> AdminControl:
             await db.flush()
 
         old_interval = int(control.vip_interval_seconds or 300)
+        old_vip_enabled = bool(control.vip_enabled)
         if "selected_strategy" in changes and changes["selected_strategy"] in VALID_STRATEGIES:
             control.selected_strategy = changes["selected_strategy"]
         if "selected_timeframe" in changes and changes["selected_timeframe"] in VALID_TIMEFRAMES:
@@ -71,7 +72,13 @@ async def update_control(**changes) -> AdminControl:
             control.last_scan_at = changes["last_scan_at"]
         if "next_vip_at" in changes:
             control.next_vip_at = changes["next_vip_at"]
+        elif bool(control.vip_enabled) and not old_vip_enabled:
+            # Enabling VIP from the admin panel should not wait for an old stale
+            # timestamp. The next scanner tick starts the VIP check immediately.
+            control.next_vip_at = utcnow()
         elif int(control.vip_interval_seconds or 300) != old_interval:
+            # A frequency change takes effect from now, not after the previous
+            # schedule finishes.
             control.next_vip_at = utcnow() + timedelta(seconds=int(control.vip_interval_seconds or 300))
 
         await db.commit()
