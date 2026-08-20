@@ -10,14 +10,8 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.models.db_models import (
-    AsyncSessionLocal,
-    AutoTradeControl,
-    PaperPosition,
-    Signal,
-    SignalDirection,
-    SignalResult,
-    TradeExecution,
-    utcnow,
+    AsyncSessionLocal, AutoTradeControl, PaperPosition, Signal, SignalDirection,
+    SignalResult, TradeExecution, utcnow,
 )
 from backend.services.control import admin_id
 from backend.services.pocket_demo_trading import DirectDemoTradingClient
@@ -70,14 +64,7 @@ async def get_auto_trade_control() -> AutoTradeControl | None:
     async with AsyncSessionLocal() as db:
         row = await db.get(AutoTradeControl, tid)
         if row is None:
-            row = AutoTradeControl(
-                telegram_id=tid,
-                enabled=False,
-                regular_enabled=True,
-                vip_enabled=True,
-                amount=1.0,
-                max_open_positions=1,
-            )
+            row = AutoTradeControl(telegram_id=tid, enabled=False, regular_enabled=True, vip_enabled=True, amount=1.0, max_open_positions=1)
             db.add(row)
             await db.commit()
             await db.refresh(row)
@@ -94,18 +81,18 @@ async def update_auto_trade_control(**changes) -> AutoTradeControl:
             row = AutoTradeControl(telegram_id=tid)
             db.add(row)
             await db.flush()
-        if "enabled" in changes and changes["enabled"] is not None:
+        if changes.get("enabled") is not None:
             row.enabled = bool(changes["enabled"])
-        if "regular_enabled" in changes and changes["regular_enabled"] is not None:
+        if changes.get("regular_enabled") is not None:
             row.regular_enabled = bool(changes["regular_enabled"])
-        if "vip_enabled" in changes and changes["vip_enabled"] is not None:
+        if changes.get("vip_enabled") is not None:
             row.vip_enabled = bool(changes["vip_enabled"])
-        if "amount" in changes and changes["amount"] is not None:
+        if changes.get("amount") is not None:
             amount = float(changes["amount"])
             if amount < MIN_TRADE_AMOUNT or amount > MAX_TRADE_AMOUNT:
                 raise ValueError(f"Trade amount must be between {MIN_TRADE_AMOUNT:g} and {MAX_TRADE_AMOUNT:g}")
             row.amount = round(amount, 2)
-        if "max_open_positions" in changes and changes["max_open_positions"] is not None:
+        if changes.get("max_open_positions") is not None:
             row.max_open_positions = max(1, min(10, int(changes["max_open_positions"])))
         await db.commit()
         await db.refresh(row)
@@ -114,13 +101,7 @@ async def update_auto_trade_control(**changes) -> AutoTradeControl:
 
 def serialize_auto_trade(control: AutoTradeControl | None) -> dict:
     if control is None:
-        return {
-            "auto_trade_enabled": False,
-            "auto_trade_regular": True,
-            "auto_trade_vip": True,
-            "trade_amount": 1.0,
-            "max_open_positions": 1,
-        }
+        return {"auto_trade_enabled": False, "auto_trade_regular": True, "auto_trade_vip": True, "trade_amount": 1.0, "max_open_positions": 1}
     return {
         "auto_trade_enabled": bool(control.enabled),
         "auto_trade_regular": bool(control.regular_enabled),
@@ -135,34 +116,19 @@ async def latest_execution() -> dict | None:
     if tid <= 0:
         return None
     async with AsyncSessionLocal() as db:
-        row = (
-            await db.execute(
-                select(TradeExecution)
-                .where(TradeExecution.telegram_id == tid)
-                .order_by(desc(TradeExecution.created_at))
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+        row = (await db.execute(select(TradeExecution).where(TradeExecution.telegram_id == tid).order_by(desc(TradeExecution.created_at)).limit(1))).scalar_one_or_none()
         position = await db.get(PaperPosition, row.position_id) if row and row.position_id else None
     if row is None:
         return None
-    display_status = row.status
-    if position is not None and position.status == "CLOSED":
-        display_status = position.result.value
+    display_status = position.result.value if position is not None and position.status == "CLOSED" else row.status
     return {
-        "signal_id": row.signal_id,
-        "position_id": row.position_id,
-        "broker_order_id": row.broker_order_id,
-        "amount": row.amount,
-        "status": display_status,
-        "error": row.error,
-        "created_at": row.created_at.isoformat() + "Z",
-        "updated_at": row.updated_at.isoformat() + "Z",
+        "signal_id": row.signal_id, "position_id": row.position_id, "broker_order_id": row.broker_order_id,
+        "amount": row.amount, "status": display_status, "error": row.error,
+        "created_at": row.created_at.isoformat() + "Z", "updated_at": row.updated_at.isoformat() + "Z",
     }
 
 
 def _build_trading_client():
-    # Real-account automatic execution is intentionally not implemented here.
     return DirectDemoTradingClient(market_data.ssid)
 
 
@@ -171,11 +137,9 @@ async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.
     cached = _snapshot_cache.get("data")
     if not force and cached and now_mono - float(_snapshot_cache.get("at") or 0) <= max_age:
         return dict(cached)
-
     await market_data._refresh_private_ssid()
     if not market_data.configured or not trading_is_demo():
         return {"balance": None, "balance_is_demo": None, "payouts": {}, "available_assets": {}}
-
     client = DirectDemoTradingClient(market_data.ssid)
     try:
         await asyncio.wait_for(client.connect(persistent=False), timeout=20)
@@ -192,7 +156,7 @@ async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.
 
 def payout_for_asset(snapshot: dict, asset: str) -> float | None:
     try:
-        value = snapshot.get("payouts", {}).get(asset)
+        value = (snapshot.get("payouts", {}) or {}).get(asset)
         return float(value) if value is not None else None
     except Exception:
         return None
@@ -202,17 +166,14 @@ async def eligible_auto_assets(assets: list[str], *, force: bool = False) -> tup
     snapshot = await get_demo_account_snapshot(force=force)
     payouts = snapshot.get("payouts", {}) or {}
     available = snapshot.get("available_assets", {}) or {}
-    eligible = []
+    eligible: list[str] = []
     for asset in assets:
         try:
             payout = float(payouts.get(asset))
         except (TypeError, ValueError):
             continue
-        if payout < MIN_AUTO_PAYOUT:
-            continue
-        if asset in available and available.get(asset) is False:
-            continue
-        eligible.append(asset)
+        if payout >= MIN_AUTO_PAYOUT and available.get(asset, True) is not False:
+            eligible.append(asset)
     return eligible, snapshot
 
 
@@ -220,12 +181,7 @@ async def _claim(signal: dict, amount: float) -> TradeExecution | None:
     tid = admin_id()
     if tid <= 0:
         return None
-    row = TradeExecution(
-        telegram_id=tid,
-        signal_id=int(signal["id"]),
-        amount=float(amount),
-        status="EXECUTING",
-    )
+    row = TradeExecution(telegram_id=tid, signal_id=int(signal["id"]), amount=float(amount), status="EXECUTING")
     async with AsyncSessionLocal() as db:
         db.add(row)
         try:
@@ -237,12 +193,12 @@ async def _claim(signal: dict, amount: float) -> TradeExecution | None:
             return None
 
 
-async def _mark_failed(execution_id: int, error: str) -> None:
+async def _mark_execution(execution_id: int, status: str, error: str | None = None) -> None:
     async with AsyncSessionLocal() as db:
         row = await db.get(TradeExecution, execution_id)
         if row is not None:
-            row.status = "FAILED"
-            row.error = str(error)[:128]
+            row.status = str(status)[:20]
+            row.error = str(error)[:128] if error else None
             await db.commit()
 
 
@@ -268,11 +224,9 @@ async def _basic_guard(signal: dict, *, confirmed: bool) -> dict | None:
 
 
 async def maybe_execute_signal(signal: dict) -> dict:
-    """Schedule a fresh signal for exact-time DEMO execution when AUTO is enabled."""
     guard = await _basic_guard(signal, confirmed=False)
     if guard:
         return guard
-
     entry = _to_utc_naive(signal["entry_time"])
     expiry = _to_utc_naive(signal["expiry_time"])
     now = utcnow()
@@ -283,35 +237,20 @@ async def maybe_execute_signal(signal: dict) -> dict:
     payout = payout_for_asset(snapshot, signal["asset"])
     if signal["asset"] not in eligible:
         await update_trade_runtime(
-            stage="PAYOUT_TOO_LOW",
-            pending_signal_id=None,
-            pair=signal.get("pair"),
-            asset=signal.get("asset"),
-            strategy=signal.get("strategy"),
-            timeframe=signal.get("timeframe"),
-            payout_percent=payout,
-            balance=snapshot.get("balance"),
-            balance_is_demo=snapshot.get("balance_is_demo"),
-            entry_time=_iso(entry),
-            expiry_time=_iso(expiry),
+            stage="PAYOUT_TOO_LOW", pending_signal_id=None, pair=signal.get("pair"), asset=signal.get("asset"),
+            strategy=signal.get("strategy"), timeframe=signal.get("timeframe"), payout_percent=payout,
+            balance=snapshot.get("balance"), balance_is_demo=snapshot.get("balance_is_demo"),
+            entry_time=_iso(entry), expiry_time=_iso(expiry),
             message=f"Выплата ниже {MIN_AUTO_PAYOUT:g}% или недоступна — продолжаю поиск",
         )
         return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
 
     seconds = (entry - now).total_seconds()
     await update_trade_runtime(
-        stage="WAIT_ENTRY" if seconds > 0 else "OPENING",
-        pending_signal_id=int(signal["id"]),
-        pair=signal.get("pair"),
-        asset=signal.get("asset"),
-        strategy=signal.get("strategy"),
-        timeframe=signal.get("timeframe"),
-        payout_percent=payout,
-        balance=snapshot.get("balance"),
-        balance_is_demo=snapshot.get("balance_is_demo"),
-        entry_time=_iso(entry),
-        expiry_time=_iso(expiry),
-        seconds_to_entry=max(0, round(seconds, 1)),
+        stage="WAIT_ENTRY" if seconds > 0 else "OPENING", pending_signal_id=int(signal["id"]),
+        pair=signal.get("pair"), asset=signal.get("asset"), strategy=signal.get("strategy"), timeframe=signal.get("timeframe"),
+        payout_percent=payout, balance=snapshot.get("balance"), balance_is_demo=snapshot.get("balance_is_demo"),
+        entry_time=_iso(entry), expiry_time=_iso(expiry), seconds_to_entry=max(0, round(seconds, 1)),
         message="Сигнал найден — жду точное время входа",
     )
     if seconds > AUTO_DUE_WINDOW_SECONDS:
@@ -320,7 +259,6 @@ async def maybe_execute_signal(signal: dict) -> dict:
 
 
 async def execute_confirmed_signal(signal: dict) -> dict:
-    """Explicit confirmation path; REAL automatic broker execution remains blocked."""
     return await _execute_signal(signal, confirmed=True, exact_entry=False)
 
 
@@ -329,12 +267,10 @@ async def process_pending_auto_trade() -> dict:
     signal_id = runtime.get("pending_signal_id")
     if not signal_id:
         return {"status": "IDLE"}
-
     control = await get_auto_trade_control()
     if control is None or not control.enabled or await get_execution_mode() != "auto":
         await reset_trade_runtime("IDLE", "Автоторговля выключена")
         return {"status": "DISABLED"}
-
     async with AsyncSessionLocal() as db:
         row = await db.get(Signal, int(signal_id))
         if row is None:
@@ -342,7 +278,6 @@ async def process_pending_auto_trade() -> dict:
             return {"status": "FAILED", "reason": "signal_not_found"}
         from backend.routers.signals import out
         signal = out(row)
-
     entry = _to_utc_naive(signal["entry_time"])
     seconds = (entry - utcnow()).total_seconds()
     if seconds > AUTO_DUE_WINDOW_SECONDS:
@@ -358,52 +293,49 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
     guard = await _basic_guard(signal, confirmed=confirmed)
     if guard:
         return guard
-
     tid = admin_id()
     control = await get_auto_trade_control()
     assert control is not None
     entry = _to_utc_naive(signal["entry_time"])
     expiry = _to_utc_naive(signal["expiry_time"])
-    now = utcnow()
-    if expiry <= now:
+    if expiry <= utcnow():
         await reset_trade_runtime("MISSED_ENTRY", "Сигнал истёк до открытия")
         return {"status": "SKIPPED", "reason": "expired"}
 
     async with AsyncSessionLocal() as db:
-        open_count = int((await db.execute(
-            select(func.count()).select_from(PaperPosition).where(
-                PaperPosition.telegram_id == tid,
-                PaperPosition.source == "auto",
-                PaperPosition.status == "OPEN",
-            )
-        )).scalar_one() or 0)
+        open_count = int((await db.execute(select(func.count()).select_from(PaperPosition).where(
+            PaperPosition.telegram_id == tid, PaperPosition.source == "auto", PaperPosition.status == "OPEN",
+        ))).scalar_one() or 0)
     if open_count >= int(control.max_open_positions or 1):
         return {"status": "SKIPPED", "reason": "max_open_positions"}
 
+    amount = float(control.amount or 1.0)
+    execution = await _claim(signal, amount)
+    if execution is None:
+        return {"status": "DUPLICATE"}
+
     async with _trade_lock:
         client = None
-        execution = None
         try:
             await market_data._refresh_private_ssid()
             if not market_data.configured:
                 raise MarketDataUnavailable("Pocket Option session is not configured")
-
             from pocketoptionapi_async import OrderDirection, OrderStatus
 
             client = _build_trading_client()
-            connected = await asyncio.wait_for(client.connect(persistent=False), timeout=20)
-            if not connected:
+            if not await asyncio.wait_for(client.connect(persistent=False), timeout=20):
                 raise RuntimeError("Pocket Option demo trading connection failed")
-
             snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=1.0), timeout=4)
             payout = payout_for_asset(snapshot, signal["asset"])
             if payout is None or payout < MIN_AUTO_PAYOUT:
+                await _mark_execution(execution.id, "SKIPPED", "payout_below_threshold")
                 await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")
                 return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
 
             if exact_entry:
                 seconds = (entry - utcnow()).total_seconds()
                 if seconds < -ENTRY_GRACE_SECONDS:
+                    await _mark_execution(execution.id, "SKIPPED", "missed_entry")
                     await reset_trade_runtime("MISSED_ENTRY", "Точное время входа пропущено")
                     return {"status": "MISSED_ENTRY"}
                 if seconds > 1.1:
@@ -412,39 +344,37 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                         seconds_to_entry=round(seconds, 1), message="Подключён к Pocket · жду точное время входа",
                     )
                     await asyncio.sleep(max(0.0, seconds - 0.9))
-                    near_snapshot = await client.account_snapshot(listen_seconds=0.35)
+                    near_snapshot = await client.account_snapshot(listen_seconds=0.3)
                     near_payout = payout_for_asset(near_snapshot, signal["asset"])
                     if near_payout is not None:
                         payout = near_payout
                         snapshot = near_snapshot
                     if payout < MIN_AUTO_PAYOUT:
+                        await _mark_execution(execution.id, "SKIPPED", "payout_dropped_before_entry")
                         await reset_trade_runtime("PAYOUT_TOO_LOW", f"Перед входом выплата упала до {payout:.1f}% — сигнал пропущен")
                         return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
                 remaining = (entry - utcnow()).total_seconds()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                if (utcnow() - entry).total_seconds() > ENTRY_GRACE_SECONDS:
+                if remaining < -ENTRY_GRACE_SECONDS:
+                    await _mark_execution(execution.id, "SKIPPED", "missed_entry")
                     await reset_trade_runtime("MISSED_ENTRY", "Pocket не успел к точному времени входа")
                     return {"status": "MISSED_ENTRY"}
+                await update_trade_runtime(
+                    stage="OPENING", payout_percent=payout, balance=snapshot.get("balance"),
+                    seconds_to_entry=max(0, round(remaining, 2)), message="Pocket готов · ордер уйдёт точно во время входа",
+                )
+                remaining = (entry - utcnow()).total_seconds()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
 
             duration = int((expiry - (entry if exact_entry else utcnow())).total_seconds())
             if duration < 5:
+                await _mark_execution(execution.id, "SKIPPED", "expired")
                 return {"status": "SKIPPED", "reason": "expired"}
+            if not exact_entry:
+                await update_trade_runtime(stage="OPENING", message="Отправляю подтверждённый DEMO ордер")
 
-            amount = float(control.amount or 1.0)
-            execution = await _claim(signal, amount)
-            if execution is None:
-                return {"status": "DUPLICATE"}
-
-            await update_trade_runtime(
-                stage="OPENING", payout_percent=payout, balance=snapshot.get("balance"),
-                seconds_to_entry=0, message="Точное время наступило · отправляю ордер Pocket",
-            )
             direction = OrderDirection.CALL if signal["direction"] == "BUY" else OrderDirection.PUT
-            result = await asyncio.wait_for(
-                client.place_order(asset=signal["asset"], amount=amount, direction=direction, duration=duration),
-                timeout=20,
-            )
+            result = await asyncio.wait_for(client.place_order(asset=signal["asset"], amount=amount, direction=direction, duration=duration), timeout=20)
             status_value = getattr(result.status, "value", str(result.status)).lower()
             if result.status == OrderStatus.CANCELLED or result.error_message:
                 raise RuntimeError(result.error_message or "Pocket Option cancelled the order")
@@ -461,19 +391,9 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
 
             async with AsyncSessionLocal() as db:
                 position = PaperPosition(
-                    telegram_id=tid,
-                    signal_id=int(signal["id"]),
-                    source="auto",
-                    pair=signal["pair"],
-                    asset=signal["asset"],
-                    timeframe=signal["timeframe"],
-                    strategy=signal["strategy"],
-                    direction=SignalDirection(signal["direction"]),
-                    status="OPEN",
-                    entry_price=entry_price,
-                    entry_time=placed_at,
-                    expiry_time=position_expiry,
-                    result=SignalResult.PENDING,
+                    telegram_id=tid, signal_id=int(signal["id"]), source="auto", pair=signal["pair"], asset=signal["asset"],
+                    timeframe=signal["timeframe"], strategy=signal["strategy"], direction=SignalDirection(signal["direction"]),
+                    status="OPEN", entry_price=entry_price, entry_time=placed_at, expiry_time=position_expiry, result=SignalResult.PENDING,
                 )
                 db.add(position)
                 await db.flush()
@@ -492,21 +412,20 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             except Exception:
                 balance = snapshot.get("balance")
             await update_trade_runtime(
-                stage="OPEN", pending_signal_id=None, pair=signal["pair"], asset=signal["asset"],
-                strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout,
-                balance=balance, balance_is_demo=True, entry_time=_iso(placed_at), expiry_time=_iso(position_expiry),
-                position_id=position.id, broker_order_id=str(result.order_id), amount=amount,
-                message="DEMO сделка открыта · Live отслеживание активно",
+                stage="OPEN", pending_signal_id=None, position_id=position.id, broker_order_id=str(result.order_id),
+                pair=signal["pair"], asset=signal["asset"], strategy=signal["strategy"], timeframe=signal["timeframe"],
+                payout_percent=payout, balance=balance, balance_is_demo=True, entry_time=_iso(placed_at), expiry_time=_iso(position_expiry),
+                seconds_to_entry=0, amount=amount, message="DEMO сделка открыта · Live отслеживание активно",
             )
             logger.warning("Admin demo trade opened signal=%s asset=%s exact_entry=%s", signal["id"], signal["asset"], exact_entry)
             return {
-                "status": "OPEN", "position_id": position.id, "amount": amount, "account": "demo",
-                "confirmed": confirmed, "payout": payout, "balance": balance, "entry_time": _iso(placed_at),
+                "status": "OPEN", "position_id": position.id, "amount": amount, "account": "demo", "confirmed": confirmed,
+                "payout": payout, "balance": balance, "entry_time": _iso(placed_at), "scheduled_entry_time": _iso(entry),
+                "entry_delay_ms": round((placed_at - entry).total_seconds() * 1000) if exact_entry else None,
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
-            if execution is not None:
-                await _mark_failed(execution.id, type(exc).__name__)
+            await _mark_execution(execution.id, "FAILED", type(exc).__name__)
             await update_trade_runtime(stage="FAILED", pending_signal_id=None, message=f"Ошибка открытия: {type(exc).__name__}")
             return {"status": "FAILED", "error": type(exc).__name__}
         finally:

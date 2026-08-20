@@ -9,6 +9,8 @@ RUNTIME_KEY = "__auto_trade_runtime__"
 DEFAULT_RUNTIME = {
     "stage": "IDLE",
     "pending_signal_id": None,
+    "position_id": None,
+    "broker_order_id": None,
     "pair": None,
     "asset": None,
     "strategy": None,
@@ -18,6 +20,10 @@ DEFAULT_RUNTIME = {
     "balance_is_demo": None,
     "entry_time": None,
     "expiry_time": None,
+    "seconds_to_entry": None,
+    "amount": None,
+    "result": None,
+    "close_price": None,
     "message": None,
 }
 
@@ -59,15 +65,7 @@ async def update_trade_runtime(**changes) -> dict:
 
 
 async def reset_trade_runtime(stage: str = "IDLE", message: str | None = None) -> dict:
-    return await update_trade_runtime(
-        stage=stage,
-        pending_signal_id=None,
-        pair=None,
-        asset=None,
-        strategy=None,
-        timeframe=None,
-        payout_percent=None,
-        entry_time=None,
-        expiry_time=None,
-        message=message,
-    )
+    cleared = {key: value for key, value in DEFAULT_RUNTIME.items()}
+    cleared["stage"] = stage
+    cleared["message"] = message
+    return await update_trade_runtime(**cleared)

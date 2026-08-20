@@ -38,7 +38,7 @@ jobs:
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: python -c "from api.main import app; assert app.title == 'AlphaPulse API'; print('FastAPI import OK')"
 
-      - name: Verify guarded trade primitives
+      - name: Verify guarded trade primitives and Pocket telemetry parser
         env:
           ADMIN_ID: '8535011479'
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
@@ -55,14 +55,20 @@ jobs:
           assert MIN_AUTO_PAYOUT == 92.0
           assert VALID_EXECUTION_MODES == {'auto', 'confirm'}
           assert VALID_TRADE_MODES == {'demo', 'real'}
-          assert callable(maybe_execute_signal)
-          assert callable(process_pending_auto_trade)
-          assert callable(execute_confirmed_signal)
+          assert callable(maybe_execute_signal) and callable(process_pending_auto_trade) and callable(execute_confirmed_signal)
           assert DirectDemoTradingClient.__name__ == 'DirectDemoTradingClient'
-          assert issubclass(TelemetryPocketOptionClient, object)
+          client = TelemetryPocketOptionClient('test', is_demo=True)
+          client._capture_telemetry('successupdateBalance', {'balance': '1234.56', 'isDemo': 1})
+          row = [1, 'EURUSD_otc', 'EUR/USD OTC', 'currency', 0, 92, 0, 0, 0, 0, 0, 0, 0, 0, True, [60]]
+          client._capture_telemetry('updateAssets', [row])
+          snap = client.snapshot()
+          assert snap['balance'] == 1234.56
+          assert snap['balance_is_demo'] is True
+          assert snap['payouts']['EURUSD_otc'] == 92.0
+          assert snap['available_assets']['EURUSD_otc'] is True
           assert AutoTradeControl.__tablename__ == 'auto_trade_control'
           assert TradeExecution.__tablename__ == 'trade_executions'
-          print('Trade timing/payout guardrails OK')
+          print('Trade timing/payout telemetry guardrails OK')
           PY
 
       - uses: actions/setup-node@v4
