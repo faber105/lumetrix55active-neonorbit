@@ -69,9 +69,16 @@ def format_signal(signal: dict, timezone_data: dict | None = None) -> str:
     )
 
 
-def should_notify(settings: UserSettings, signal: dict) -> bool:
-    del signal
-    return bool(settings.vip_enabled)
+def should_notify(settings: UserSettings | None, signal: dict) -> bool:
+    # Verified users used to disappear from notifications completely if their
+    # user_settings row had never been created, because notify_signal used an
+    # inner JOIN. Missing settings now mean the documented default: VIP enabled.
+    if settings is None:
+        return True
+    if not bool(settings.vip_enabled):
+        return False
+    mode = str(settings.signal_mode or "all").lower()
+    return mode in {"all", "vip", "mixed"}
 
 
 async def notify_signal(bot: Bot, signal: dict) -> dict:
@@ -81,7 +88,7 @@ async def notify_signal(bot: Bot, signal: dict) -> dict:
         rows = (
             await db.execute(
                 select(User, UserSettings)
-                .join(UserSettings, UserSettings.telegram_id == User.telegram_id)
+                .outerjoin(UserSettings, UserSettings.telegram_id == User.telegram_id)
                 .where(User.status == "VERIFIED")
             )
         ).all()
@@ -102,6 +109,7 @@ async def notify_signal(bot: Bot, signal: dict) -> dict:
         except Exception:
             continue
 
+    delivered_ids: set[int] = set()
     for user, settings in rows:
         if not should_notify(settings, signal):
             continue
@@ -110,7 +118,9 @@ async def notify_signal(bot: Bot, signal: dict) -> dict:
             await bot.send_message(
                 telegram_id,
                 format_signal(signal, timezone_by_user.get(telegram_id)),
+                parse_mode="HTML",
             )
+            delivered_ids.add(telegram_id)
             notified += 1
         except Exception as exc:
             errors += 1
@@ -119,6 +129,26 @@ async def notify_signal(bot: Bot, signal: dict) -> dict:
                 user.telegram_id,
                 type(exc).__name__,
             )
+
+    # The owner must always receive VIP diagnostics/signals even if the admin
+    # account predates the users/user_settings rows. This also makes the admin
+    # VIP test button useful for verifying delivery end-to-end.
+    try:
+        admin_id = int(ADMIN_ID or 0)
+    except Exception:
+        admin_id = 0
+    if admin_id > 0 and admin_id not in delivered_ids:
+        try:
+            await bot.send_message(
+                admin_id,
+                format_signal(signal, timezone_by_user.get(admin_id)),
+                parse_mode="HTML",
+            )
+            notified += 1
+        except Exception as exc:
+            errors += 1
+            logger.warning("VIP notification failed for admin: %s", type(exc).__name__)
+
     return {"notified": notified, "notification_errors": errors}
 
 
