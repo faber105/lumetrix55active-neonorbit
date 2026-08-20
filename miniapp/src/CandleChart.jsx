@@ -9,13 +9,14 @@ function range(values) {
     min -= pad;
     max += pad;
   }
-  return [min, max];
+  const pad = Math.max((max - min) * 0.08, Math.abs(max) * 0.00001, 0.000001);
+  return [min - pad, max + pad];
 }
 
-export default function CandleChart({ candles = [], entryPrice = null, currentPrice = null, height = 240 }) {
+export default function CandleChart({ candles = [], entryPrice = null, currentPrice = null, height = 250 }) {
   const data = candles.slice(-40);
   const width = 720;
-  const pad = { l: 18, r: 70, t: 18, b: 26 };
+  const pad = { l: 18, r: 78, t: 18, b: 34 };
   const plotW = width - pad.l - pad.r;
   const plotH = height - pad.t - pad.b;
   const values = data.flatMap((c) => [Number(c.high), Number(c.low)]).filter(Number.isFinite);
@@ -29,6 +30,11 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
     const n = Number(v);
     if (!Number.isFinite(n)) return "—";
     return Math.abs(n) >= 100 ? n.toFixed(3) : n.toFixed(5);
+  };
+  const timeLabel = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "";
+    return new Date(n * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
   if (!data.length) {
@@ -45,6 +51,8 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
       </g>
     );
   });
+
+  const timeIndexes = [...new Set([0, Math.floor((data.length - 1) / 2), data.length - 1])];
 
   return (
     <div className="chart-shell">
@@ -68,6 +76,13 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
             </g>
           );
         })}
+        {timeIndexes.map((index) => {
+          const candle = data[index];
+          if (!candle) return null;
+          const x = pad.l + index * step + step / 2;
+          const anchor = index === 0 ? "start" : index === data.length - 1 ? "end" : "middle";
+          return <text key={`time-${index}`} x={x} y={height - 9} textAnchor={anchor} fill="#69758f" fontSize="10">{timeLabel(candle.time)}</text>;
+        })}
         {Number.isFinite(Number(entryPrice)) && (
           <g>
             <line x1={pad.l} x2={width - pad.r} y1={y(entryPrice)} y2={y(entryPrice)} stroke="#7c83ff" strokeWidth="1.5" strokeDasharray="5 5" />
@@ -76,8 +91,9 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
         )}
         {Number.isFinite(Number(currentPrice)) && (
           <g>
-            <line x1={pad.l} x2={width - pad.r} y1={y(currentPrice)} y2={y(currentPrice)} stroke="#ffd166" strokeWidth="1.2" strokeDasharray="3 4" />
-            <rect x={width - pad.r + 3} y={y(currentPrice) - 10} width="64" height="20" rx="7" fill="#ffd166" />
+            <line x1={pad.l} x2={width - pad.r} y1={y(currentPrice)} y2={y(currentPrice)} stroke="#ffd166" strokeWidth="1.4" strokeDasharray="3 4" />
+            <circle cx={width - pad.r - 2} cy={y(currentPrice)} r="4" fill="#ffd166" />
+            <rect x={width - pad.r + 3} y={y(currentPrice) - 10} width="70" height="20" rx="7" fill="#ffd166" />
             <text x={width - pad.r + 8} y={y(currentPrice) + 4} fill="#161923" fontSize="10" fontWeight="800">{fmt(currentPrice)}</text>
           </g>
         )}
