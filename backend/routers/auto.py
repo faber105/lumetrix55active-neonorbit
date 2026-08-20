@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -24,6 +25,10 @@ class StartSessionRequest(BaseModel):
     amount: float = 1.0
     max_martingale: int = 3
     max_failed_series: int = 1
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _next_bet_amount(session: dict, legs: list[dict], runtime: dict) -> float:
@@ -87,16 +92,51 @@ def _decorate_live_state(payload: dict) -> dict:
     if amount_line not in base_message:
         session["last_message"] = f"{base_message} · {amount_line}"
 
-    notifications = []
-    if runtime.get("message"):
-        notifications.append({"stage": runtime.get("stage") or stage, "message": runtime.get("message"), "created_at": runtime.get("updated_at")})
-    for event in events[:8]:
-        notifications.append({
-            "stage": event.get("stage"),
-            "message": event.get("message"),
-            "created_at": event.get("created_at"),
+    live_events = []
+    now = _now_iso()
+    runtime_message = str(runtime.get("message") or "").strip()
+    if runtime_message:
+        live_events.append({
+            "id": f"runtime-{stage}",
+            "stage": runtime.get("stage") or stage,
+            "message": runtime_message,
+            "created_at": runtime.get("updated_at") or now,
+            "payload": {"live": True},
         })
-    payload["screen_notifications"] = notifications[:8]
+    live_events.append({
+        "id": f"bet-{stage}-{session.get('current_level', 0)}",
+        "stage": "BET",
+        "message": amount_line,
+        "created_at": now,
+        "payload": {
+            "current_bet": session.get("current_bet_amount"),
+            "next_bet": session.get("next_bet_amount"),
+            "level": session.get("current_level"),
+        },
+    })
+    if stage in {"SCANNING", "MARTINGALE"}:
+        live_events.append({
+            "id": f"scan-{stage}",
+            "stage": "ANALYSIS",
+            "message": "Анализ рынка активен · следующий сетап ищется сразу после закрытия предыдущей сделки",
+            "created_at": now,
+            "payload": {"live": True},
+        })
+
+    merged = live_events + events
+    seen = set()
+    output = []
+    for event in merged:
+        key = (str(event.get("stage")), str(event.get("message")))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(event)
+        if len(output) >= 12:
+            break
+
+    payload["events"] = output
+    payload["screen_notifications"] = output[:8]
     payload["session"] = session
     return payload
 
@@ -120,7 +160,6 @@ async def state(
 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
-    """Drive one throttled AUTO iteration while the Mini App is open."""
     return await drive_session_tick()
 
 
