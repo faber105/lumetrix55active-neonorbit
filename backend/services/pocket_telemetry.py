@@ -17,6 +17,22 @@ def _percent(value: Any) -> float | None:
     return round(number, 2)
 
 
+def _display_otc_symbol(symbol: str) -> str:
+    raw = str(symbol or "").strip()
+    base = raw[:-4] if raw.lower().endswith("_otc") else raw
+    upper = base.upper()
+    # Most Pocket OTC FX/crypto symbols are compact BASEQUOTE codes.
+    # Produce a readable pair where that is unambiguous; keep broker names for
+    # stock/index-style OTC instruments.
+    known_quotes = ("USDT", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
+    for quote in known_quotes:
+        if upper.endswith(quote) and len(upper) > len(quote):
+            left = upper[:-len(quote)]
+            if 2 <= len(left) <= 6:
+                return f"{left}/{quote} OTC"
+    return f"{upper} OTC"
+
+
 class TelemetryPocketOptionClient(DirectPocketOptionClient):
     """Direct Pocket client that also records broker balance and live asset payouts.
 
@@ -65,9 +81,19 @@ class TelemetryPocketOptionClient(DirectPocketOptionClient):
                     available[symbol] = value.strip().lower() not in {"", "0", "false", "off", "closed"}
                 else:
                     available[symbol] = bool(value)
+
             if payouts:
                 self.payouts = payouts
                 self.available_assets = available
+
+                # AUTO must scan the complete live OTC universe, not the ten
+                # bootstrap FX pairs. OTC_ASSETS is intentionally a mutable
+                # registry shared by the signal/session engines in this process.
+                from backend.services.pocketoption_otc import OTC_ASSETS
+                for symbol in payouts:
+                    if symbol.lower().endswith("_otc"):
+                        OTC_ASSETS.setdefault(symbol, _display_otc_symbol(symbol))
+
                 self._telemetry_updated_at = time.time()
 
     async def _recv_packet(self, timeout: float):
