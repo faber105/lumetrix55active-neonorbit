@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import './mobile.css'
 import App from './App.jsx'
+import SessionEnhancer from './SessionEnhancer.jsx'
 
 const telegram = window.Telegram?.WebApp
 const rootStyle = document.documentElement.style
@@ -60,11 +61,11 @@ window.visualViewport?.addEventListener?.('resize', syncTelegramViewport)
 window.addEventListener('resize', syncTelegramViewport, { passive: true })
 window.addEventListener('orientationchange', syncTelegramViewport, { passive: true })
 
-// Some Telegram/iOS versions only honor fullscreen reliably after the first user gesture.
 document.addEventListener('pointerdown', requestImmersiveTelegramMode, { once: true, passive: true })
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
+    <SessionEnhancer />
   </StrictMode>,
 )
