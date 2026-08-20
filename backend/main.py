@@ -13,6 +13,8 @@ from backend.services.pocketoption_otc import market_data
 from backend.services.scanner import scan_tick
 from backend.services.session_engine import ensure_schema
 from backend.services.preload_next import ensure_preload_schema
+# Force the bot to call the same live production backend instead of any stale env URL.
+os.environ['BACKEND_URL']='https://alphapulse-runtime-staging.vercel.app'
 logging.basicConfig(level=logging.INFO);logger=logging.getLogger('alphapulse');TELEGRAM_ENABLED=bool(os.getenv('TELEGRAM_BOT_TOKEN','').strip())
 if TELEGRAM_ENABLED:
     from bot.main import bot, configure_webhook, feed_update, valid_secret
