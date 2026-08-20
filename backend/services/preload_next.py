@@ -7,8 +7,8 @@ from sqlalchemy import text
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, utcnow
 from backend.services.auto_trade import (
     MIN_AUTO_PAYOUT,
+    execute_confirmed_signal,
     get_demo_account_snapshot,
-    maybe_execute_signal,
     update_auto_trade_control,
 )
 from backend.services.control import admin_id
@@ -34,7 +34,6 @@ from backend.services.signal_store import save_signal
 from backend.services.trade_runtime import update_trade_runtime
 
 _PRELOAD_SCHEMA_READY = False
-DUE_WINDOW_SECONDS = 7.0
 ENTRY_TOLERANCE_SECONDS = 3.0
 
 
@@ -115,14 +114,13 @@ async def set_preload_enabled(enabled: bool) -> bool:
                  WHERE session_id IN (
                     SELECT id FROM auto_trade_sessions
                      WHERE telegram_id=:tid AND status='ACTIVE'
-                 ) AND status IN ('SEARCHING','PREPARED')
+                 ) AND status IN ('SEARCHING','PREPARED','WAIT_CLOSE')
             """), {"tid": tid, "now": utcnow()})
         await db.commit()
-    if not enabled:
-        try:
-            await update_auto_trade_control(max_open_positions=1)
-        except Exception:
-            pass
+    try:
+        await update_auto_trade_control(max_open_positions=1)
+    except Exception:
+        pass
     return bool(enabled)
 
 
@@ -162,15 +160,16 @@ async def _candidate(session_id: int) -> dict | None:
 
 async def _save_candidate(session_id: int, **values) -> None:
     await ensure_preload_schema()
+    old = await _candidate(int(session_id))
     payload = {
         "sid": int(session_id),
-        "signal": values.get("signal_id"),
-        "entry": values.get("entry_time"),
-        "expiry": values.get("expiry_time"),
-        "amount": values.get("amount"),
-        "payout": values.get("payout"),
-        "position": values.get("opened_position_id"),
-        "status": str(values.get("status") or "SEARCHING"),
+        "signal": values.get("signal_id", old.get("signal_id") if old else None),
+        "entry": values.get("entry_time", old.get("entry_time") if old else None),
+        "expiry": values.get("expiry_time", old.get("expiry_time") if old else None),
+        "amount": values.get("amount", old.get("amount") if old else None),
+        "payout": values.get("payout", old.get("payout") if old else None),
+        "position": values.get("opened_position_id", old.get("opened_position_id") if old else None),
+        "status": str(values.get("status") or (old.get("status") if old else "SEARCHING")),
         "now": utcnow(),
     }
     async with AsyncSessionLocal() as db:
@@ -198,54 +197,7 @@ def _lead_seconds(session: dict) -> float:
 
 
 def _retry_seconds(session: dict) -> float:
-    return {"15s": 1.5, "1m": 3.0, "3m": 5.0, "5m": 6.0}.get(str(session.get("timeframe")), 5.0)
-
-
-async def _current_leg(session: dict) -> dict | None:
-    position_id = session.get("active_position_id")
-    if not position_id:
-        return None
-    async with AsyncSessionLocal() as db:
-        row = (await db.execute(text("""
-            SELECT * FROM auto_trade_legs
-             WHERE session_id=:sid AND position_id=:pid
-             ORDER BY id DESC LIMIT 1
-        """), {"sid": int(session["id"]), "pid": int(position_id)})).mappings().first()
-    return dict(row) if row else None
-
-
-async def _safe_to_preopen(session: dict) -> bool:
-    leg = await _current_leg(session)
-    if not leg:
-        return False
-    wins = int(session.get("wins") or 0)
-    level = int(session.get("current_level") or 0)
-    max_level = int(session.get("max_martingale") or 0)
-    if str(session.get("mode")) == "count":
-        if wins + 1 >= int(session.get("target_wins") or 1):
-            return False
-        if level >= max_level:
-            return False
-        return True
-
-    amount = float(leg.get("amount") or 0)
-    payout = float(leg.get("payout") or MIN_AUTO_PAYOUT)
-    possible_win = amount * payout / 100.0
-    if float(session.get("profit") or 0) + possible_win >= float(session.get("target_profit") or 0):
-        return False
-    if level >= max_level and int(session.get("failed_series") or 0) + 1 >= int(session.get("max_failed_series") or 1):
-        return False
-    return True
-
-
-async def _mark_searching(session: dict) -> None:
-    existing = await _candidate(int(session["id"]))
-    now = utcnow()
-    if existing and str(existing.get("status")) == "SEARCHING" and existing.get("updated_at"):
-        age = (now - _to_naive_utc(existing["updated_at"])).total_seconds()
-        if age < _retry_seconds(session):
-            return
-    await _save_candidate(int(session["id"]), status="SEARCHING")
+    return {"15s": 1.0, "1m": 2.5, "3m": 4.0, "5m": 6.0}.get(str(session.get("timeframe")), 4.0)
 
 
 async def _prepare(session: dict, position: PaperPosition) -> dict | None:
@@ -253,18 +205,16 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
     remaining = (expiry - utcnow()).total_seconds()
     if remaining <= 0 or remaining > _lead_seconds(session):
         return None
-    if not await _safe_to_preopen(session):
-        return {"status": "SAFETY_WAIT", "seconds_to_expiry": round(remaining, 1)}
 
     existing = await _candidate(int(session["id"]))
-    if existing and str(existing.get("status")) in {"PREPARED", "OPENED", "PROMOTED"}:
+    if existing and str(existing.get("status")) in {"PREPARED", "WAIT_CLOSE", "CONSUMED"}:
         return {"status": str(existing.get("status")), "signal_id": existing.get("signal_id")}
     if existing and str(existing.get("status")) == "SEARCHING" and existing.get("updated_at"):
         age = (utcnow() - _to_naive_utc(existing["updated_at"])).total_seconds()
         if age < _retry_seconds(session):
             return {"status": "SEARCHING", "seconds_to_expiry": round(remaining, 1)}
 
-    await _mark_searching(session)
+    await _save_candidate(int(session["id"]), signal_id=None, entry_time=None, expiry_time=None, amount=None, payout=None, opened_position_id=None, status="SEARCHING")
     snapshot = await get_demo_account_snapshot()
     all_assets = list(OTC_ASSETS.keys())
     timeframe = str(session.get("timeframe") or "5m")
@@ -317,13 +267,11 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
         payout = _payout(snapshot, stored["asset"])
         if payout is None or payout < MIN_AUTO_PAYOUT:
             continue
-        amount = float(_next_amount(session, payout))
         await _save_candidate(
             int(session["id"]),
             signal_id=int(stored["id"]),
             entry_time=candidate_entry,
             expiry_time=_to_naive_utc(stored["expiry_time"]),
-            amount=amount,
             payout=payout,
             status="PREPARED",
         )
@@ -335,19 +283,12 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
             int(session["id"]),
             "PRE_ANALYSIS_READY",
             f"Следующий вход подготовлен {stored['pair']} {stored['direction']}",
-            {"signal_id": int(stored["id"]), "entry_time": _iso(candidate_entry), "amount": amount, "payout": payout},
+            {"signal_id": int(stored["id"]), "entry_time": _iso(candidate_entry), "payout": payout},
         )
         await update_trade_runtime(
             stage="PRE_ANALYSIS_READY",
-            pair=stored["pair"],
-            asset=stored["asset"],
-            strategy=stored["strategy"],
-            timeframe=stored["timeframe"],
-            payout_percent=payout,
-            balance=snapshot.get("balance"),
-            entry_time=stored["entry_time"],
-            expiry_time=stored["expiry_time"],
-            amount=amount,
+            pair=stored["pair"], asset=stored["asset"], strategy=stored["strategy"], timeframe=stored["timeframe"],
+            payout_percent=payout, balance=snapshot.get("balance"), entry_time=stored["entry_time"], expiry_time=stored["expiry_time"],
             message="Текущая сделка ещё открыта · следующий сетап уже подтверждён",
         )
         return {"status": "PREPARED", "signal_id": int(stored["id"]), "entry_time": _iso(candidate_entry)}
@@ -359,99 +300,64 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
     return {"status": "SEARCHING", "seconds_to_expiry": round(remaining, 1)}
 
 
-async def _open_prepared(session: dict, candidate: dict) -> dict | None:
-    if str(candidate.get("status")) != "PREPARED" or not candidate.get("signal_id") or not candidate.get("entry_time"):
+async def _consume_when_closed(session: dict, candidate: dict) -> dict | None:
+    if str(candidate.get("status")) not in {"PREPARED", "WAIT_CLOSE"} or not candidate.get("signal_id"):
         return None
-    entry = _to_naive_utc(candidate["entry_time"])
-    seconds = (entry - utcnow()).total_seconds()
-    if seconds > DUE_WINDOW_SECONDS:
-        return None
-    if seconds < -ENTRY_TOLERANCE_SECONDS:
-        await _save_candidate(int(session["id"]), status="CANCELLED")
-        return {"status": "MISSED_PRELOAD"}
-
-    signal = await _load_signal(int(candidate["signal_id"]))
-    if not signal:
-        await _save_candidate(int(session["id"]), status="CANCELLED")
-        return {"status": "PRELOAD_SIGNAL_MISSING"}
-
-    amount = float(candidate.get("amount") or session.get("base_amount") or 1)
-    await update_auto_trade_control(amount=amount, max_open_positions=2)
-    trade = await maybe_execute_signal(signal)
-    if trade.get("status") == "OPEN":
-        await _save_candidate(
-            int(session["id"]),
-            signal_id=int(candidate["signal_id"]),
-            entry_time=entry,
-            expiry_time=_to_naive_utc(candidate.get("expiry_time") or signal["expiry_time"]),
-            amount=amount,
-            payout=float(candidate.get("payout") or trade.get("payout") or MIN_AUTO_PAYOUT),
-            opened_position_id=int(trade["position_id"]),
-            status="OPENED",
-        )
-        await _update(
-            int(session["id"]),
-            last_message=f"Новая сделка открыта на границе свечи · фиксирую результат предыдущей",
-        )
-        return {"status": "PRELOAD_OPENED", "position_id": int(trade["position_id"]), "trade": trade}
-    if trade.get("status") not in {"SCHEDULED", "WAIT_ENTRY", "OPENING"}:
-        await _save_candidate(int(session["id"]), status="CANCELLED")
-        await update_auto_trade_control(max_open_positions=1)
-    return {"status": str(trade.get("status") or "PRELOAD_WAIT"), "trade": trade}
-
-
-async def _promote_opened(session: dict, candidate: dict) -> dict | None:
-    if str(candidate.get("status")) != "OPENED" or not candidate.get("opened_position_id"):
+    entry = _to_naive_utc(candidate.get("entry_time"))
+    if (entry - utcnow()).total_seconds() > 0.35:
         return None
 
     await reconcile_positions()
     current = await _active()
     if not current:
-        await update_auto_trade_control(max_open_positions=1)
-        return {"status": "PRELOAD_ORPHANED"}
-
+        return {"status": "IDLE", "block": True}
     if current.get("active_position_id"):
         current = await _settle(current)
 
     if current.get("status") != "ACTIVE":
-        await _save_candidate(int(session["id"]), status="ORPHANED")
-        await update_auto_trade_control(max_open_positions=1)
-        await _event(int(session["id"]), "PRELOAD_ORPHANED", "Предзагруженная сделка уже открыта, но сессия завершилась предыдущим результатом", {"position_id": candidate.get("opened_position_id")})
-        return {"status": "PRELOAD_ORPHANED", "position_id": candidate.get("opened_position_id")}
+        await _save_candidate(int(session["id"]), status="CANCELLED")
+        return {"status": str(current.get("status") or "STOPPED"), "block": True, "preload_cancelled": "session_finished"}
 
     if current.get("active_position_id"):
-        return {
-            "status": "PRELOAD_OVERLAP_WAIT",
-            "position_id": current.get("active_position_id"),
-            "next_position_id": int(candidate["opened_position_id"]),
-        }
+        await _save_candidate(int(session["id"]), status="WAIT_CLOSE")
+        await _update(
+            int(session["id"]),
+            last_message="Следующий сетап готов · жду фактический результат Pocket, чтобы рассчитать точную следующую ставку",
+        )
+        return {"status": "PRELOAD_WAIT_CLOSE", "block": True, "position_id": current.get("active_position_id")}
 
     signal = await _load_signal(int(candidate["signal_id"]))
     if not signal:
-        await _save_candidate(int(session["id"]), status="ORPHANED")
-        await update_auto_trade_control(max_open_positions=1)
-        return {"status": "PRELOAD_SIGNAL_MISSING"}
+        await _save_candidate(int(session["id"]), status="CANCELLED")
+        return {"status": "PRELOAD_SIGNAL_MISSING", "block": True}
 
-    trade = {"position_id": int(candidate["opened_position_id"])}
-    amount = float(candidate.get("amount") or current.get("base_amount") or 1)
     payout = float(candidate.get("payout") or MIN_AUTO_PAYOUT)
-    await _register_open(current, signal, trade, amount, payout)
-    await _save_candidate(
-        int(session["id"]),
-        signal_id=int(candidate["signal_id"]),
-        entry_time=_to_naive_utc(candidate["entry_time"]),
-        expiry_time=_to_naive_utc(candidate["expiry_time"]),
-        amount=amount,
-        payout=payout,
-        opened_position_id=int(candidate["opened_position_id"]),
-        status="PROMOTED",
+    amount = float(_next_amount(current, payout))
+    await update_auto_trade_control(amount=amount, max_open_positions=1)
+    await update_trade_runtime(
+        stage="OPENING", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
+        strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout,
+        entry_time=signal["entry_time"], expiry_time=signal["expiry_time"], amount=amount,
+        message="Преданализ готов · результат прошлой сделки зафиксирован · открываю сразу",
     )
-    await update_auto_trade_control(max_open_positions=1)
-    return {"status": "OPEN", "position_id": int(candidate["opened_position_id"]), "preloaded": True}
+    trade = await execute_confirmed_signal(signal)
+    if trade.get("status") == "OPEN":
+        await _register_open(current, signal, trade, amount, trade.get("payout") or payout)
+        await _save_candidate(int(session["id"]), amount=amount, opened_position_id=int(trade["position_id"]), status="CONSUMED")
+        await _event(
+            int(session["id"]),
+            "PRELOAD_OPEN",
+            f"Предварительно найденный сетап открыт сразу после закрытия предыдущей сделки · {signal['pair']}",
+            {"signal_id": int(signal["id"]), "position_id": int(trade["position_id"]), "amount": amount, "payout": payout},
+        )
+        return {"status": "OPEN", "block": True, "preloaded": True, "trade": trade}
+
+    await _save_candidate(int(session["id"]), status="CANCELLED")
+    return {"status": str(trade.get("status") or "PRELOAD_FAILED"), "block": True, "trade": trade}
 
 
 async def preload_cycle() -> dict | None:
-    """Run before the normal session tick. Return block=True when normal tick must not run."""
+    """Run before normal session_tick. It only pre-analyzes; stake is decided after actual WIN/LOSS."""
     if not await get_preload_enabled():
         return None
     session = await _active()
@@ -459,10 +365,10 @@ async def preload_cycle() -> dict | None:
         return None
 
     candidate = await _candidate(int(session["id"]))
-    if candidate and str(candidate.get("status")) == "OPENED":
-        result = await _promote_opened(session, candidate)
-        if result:
-            return {**result, "block": True}
+    if candidate and str(candidate.get("status")) in {"PREPARED", "WAIT_CLOSE"}:
+        consumed = await _consume_when_closed(session, candidate)
+        if consumed:
+            return consumed
 
     position_id = session.get("active_position_id")
     if not position_id:
@@ -473,9 +379,4 @@ async def preload_cycle() -> dict | None:
         return None
 
     prepared = await _prepare(session, position)
-    candidate = await _candidate(int(session["id"]))
-    if candidate and str(candidate.get("status")) == "PREPARED":
-        opened = await _open_prepared(session, candidate)
-        if opened and opened.get("status") == "PRELOAD_OPENED":
-            return {**opened, "block": True, "preparation": prepared}
     return {"status": "PRELOAD_ACTIVE", "block": False, "preparation": prepared}
