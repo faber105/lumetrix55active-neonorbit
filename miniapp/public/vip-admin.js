@@ -3,13 +3,12 @@
   const STYLE_ID = 'vip-admin-control-style';
   let busy = false;
   let pollTimer = null;
+  let intervalDirty = false;
 
   const initData = () => {
     try {
       return window.Telegram?.WebApp?.initData || new URLSearchParams(location.hash.replace(/^#/, '')).get('tgWebAppData') || new URLSearchParams(location.search).get('tgWebAppData') || '';
-    } catch {
-      return '';
-    }
+    } catch { return ''; }
   };
 
   const request = async (path, options = {}) => {
@@ -22,7 +21,7 @@
     return body;
   };
 
-  const patch = (payload) => request('/api/admin/state', {
+  const patch = payload => request('/api/admin/state', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -42,12 +41,10 @@
       #${PANEL_ID} .vip-toggle span{width:22px;height:22px;border-radius:50%;background:white;display:block;transition:.18s;transform:translateX(0)}
       #${PANEL_ID} .vip-toggle.on{background:#7c83ff}
       #${PANEL_ID} .vip-toggle.on span{transform:translateX(20px)}
-      #${PANEL_ID} .vip-frequency{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}
+      #${PANEL_ID} .vip-frequency{display:grid;grid-template-columns:1fr;gap:8px}
       #${PANEL_ID} label{display:grid;gap:6px;font-size:12px;opacity:.9}
-      #${PANEL_ID} select{width:100%;background:#111725;color:#fff;border:1px solid rgba(255,255,255,.11);border-radius:12px;padding:11px 12px;font-size:14px}
-      #${PANEL_ID} .vip-save,#${PANEL_ID} .vip-now{border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer}
-      #${PANEL_ID} .vip-save{background:#7c83ff;color:white}
-      #${PANEL_ID} .vip-now{background:rgba(255,255,255,.08);color:white;width:100%}
+      #${PANEL_ID} select{width:100%;min-height:46px;background:#111725;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:11px 12px;font-size:14px;-webkit-appearance:menulist;appearance:auto}
+      #${PANEL_ID} .vip-now{border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;background:rgba(255,255,255,.08);color:white;width:100%}
       #${PANEL_ID} .vip-meta{display:grid;grid-template-columns:1fr 1fr;gap:8px}
       #${PANEL_ID} .vip-meta div{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px;display:grid;gap:3px}
       #${PANEL_ID} .vip-meta small{opacity:.55;font-size:10px}
@@ -65,6 +62,47 @@
     return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
+  function render(panel, state, { forceInterval = false } = {}) {
+    if (!panel || !state) return;
+    const toggle = panel.querySelector('.vip-toggle');
+    const select = panel.querySelector('.vip-interval');
+    toggle.classList.toggle('on', Boolean(state.vip_enabled));
+    toggle.setAttribute('aria-pressed', state.vip_enabled ? 'true' : 'false');
+
+    const userChoosing = intervalDirty || document.activeElement === select;
+    if (forceInterval || !userChoosing) {
+      const seconds = String(Number(state.vip_interval_seconds || 300));
+      if ([...select.options].some(o => o.value === seconds)) select.value = seconds;
+    }
+    panel.querySelector('.vip-status').textContent = state.last_vip_status || 'ОЖИДАНИЕ';
+    panel.querySelector('.vip-next').textContent = formatTime(state.next_vip_at);
+  }
+
+  async function saveInterval(panel) {
+    if (busy) return;
+    const select = panel.querySelector('.vip-interval');
+    const feedback = panel.querySelector('.vip-feedback');
+    const seconds = Number(select.value);
+    if (!Number.isFinite(seconds)) return;
+    busy = true;
+    intervalDirty = true;
+    select.disabled = true;
+    feedback.textContent = 'Сохраняю частоту…';
+    try {
+      const state = await patch({ vip_interval_seconds: seconds });
+      intervalDirty = false;
+      render(panel, state, { forceInterval: true });
+      feedback.textContent = `Частота сохранена: ${select.options[select.selectedIndex]?.text || `${seconds} сек.`}`;
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (e) {
+      feedback.textContent = `Ошибка: ${e.message}`;
+    } finally {
+      intervalDirty = false;
+      busy = false;
+      select.disabled = false;
+    }
+  }
+
   function createPanel(host) {
     if (document.getElementById(PANEL_ID)) return document.getElementById(PANEL_ID);
     addStyle();
@@ -77,7 +115,7 @@
         <button type="button" class="vip-toggle" aria-label="Включить VIP сигналы"><span></span></button>
       </div>
       <div class="vip-frequency">
-        <label>Частота проверки
+        <label>Частота VIP уведомлений / проверки
           <select class="vip-interval">
             <option value="60">каждую 1 минуту</option>
             <option value="180">каждые 3 минуты</option>
@@ -88,23 +126,30 @@
             <option value="3600">каждый час</option>
           </select>
         </label>
-        <button type="button" class="vip-save">Сохранить</button>
       </div>
       <div class="vip-meta">
         <div><small>ПОСЛЕДНИЙ СТАТУС</small><b class="vip-status">—</b></div>
         <div><small>СЛЕДУЮЩАЯ ПРОВЕРКА</small><b class="vip-next">—</b></div>
       </div>
       <button type="button" class="vip-now">Проверить VIP сигнал сейчас</button>
-      <div class="vip-feedback" aria-live="polite"></div>
-      <div class="vip-note">VIP работает на 5m. Бот проверяет рынок с выбранной частотой, публикует только подтверждённый сигнал и отправляет Telegram-уведомление пользователям с включённым VIP.</div>
+      <div class="vip-feedback" aria-live="polite">Выбери частоту — она сохранится автоматически.</div>
+      <div class="vip-note">VIP работает на 5m. Выбранный интервал сохраняется сразу и применяется к следующей проверке и Telegram-уведомлению.</div>
     `;
     host.insertAdjacentElement('afterend', panel);
 
     const toggle = panel.querySelector('.vip-toggle');
     const select = panel.querySelector('.vip-interval');
-    const save = panel.querySelector('.vip-save');
     const now = panel.querySelector('.vip-now');
     const feedback = panel.querySelector('.vip-feedback');
+
+    select.addEventListener('focus', () => { intervalDirty = true; });
+    select.addEventListener('pointerdown', () => { intervalDirty = true; });
+    select.addEventListener('touchstart', () => { intervalDirty = true; }, { passive: true });
+    select.addEventListener('input', () => { intervalDirty = true; });
+    select.addEventListener('change', () => saveInterval(panel));
+    select.addEventListener('blur', () => {
+      setTimeout(() => { if (!busy) intervalDirty = false; }, 500);
+    });
 
     toggle.addEventListener('click', async () => {
       if (busy) return;
@@ -121,25 +166,6 @@
       } finally {
         busy = false;
         toggle.disabled = false;
-      }
-    });
-
-    save.addEventListener('click', async () => {
-      if (busy) return;
-      busy = true;
-      save.disabled = true;
-      select.disabled = true;
-      feedback.textContent = 'Сохраняю частоту…';
-      try {
-        const state = await patch({ vip_interval_seconds: Number(select.value) });
-        render(panel, state);
-        feedback.textContent = 'Частота VIP обновлена.';
-      } catch (e) {
-        feedback.textContent = `Ошибка: ${e.message}`;
-      } finally {
-        busy = false;
-        save.disabled = false;
-        select.disabled = false;
       }
     });
 
@@ -165,28 +191,13 @@
         now.disabled = false;
       }
     });
-
     return panel;
-  }
-
-  function render(panel, state) {
-    if (!panel || !state) return;
-    const toggle = panel.querySelector('.vip-toggle');
-    const select = panel.querySelector('.vip-interval');
-    toggle.classList.toggle('on', Boolean(state.vip_enabled));
-    toggle.setAttribute('aria-pressed', state.vip_enabled ? 'true' : 'false');
-    const seconds = String(Number(state.vip_interval_seconds || 300));
-    if ([...select.options].some(o => o.value === seconds)) select.value = seconds;
-    panel.querySelector('.vip-status').textContent = state.last_vip_status || 'ОЖИДАНИЕ';
-    panel.querySelector('.vip-next').textContent = formatTime(state.next_vip_at);
   }
 
   async function refreshPanel() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel || busy) return;
-    try {
-      render(panel, await request('/api/admin/state'));
-    } catch {}
+    try { render(panel, await request('/api/admin/state')); } catch {}
   }
 
   function ensurePanel() {
