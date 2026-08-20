@@ -21,7 +21,7 @@ from backend.services.strategies import (
 logger = logging.getLogger("alphapulse.engine")
 ENTRY_LEAD_SECONDS = max(2, min(12, int(os.getenv("ENTRY_LEAD_SECONDS", "4"))))
 SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
-SCAN_CONCURRENCY = max(1, min(12, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "8"))))
+SCAN_CONCURRENCY = max(1, min(8, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "4"))))
 
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
