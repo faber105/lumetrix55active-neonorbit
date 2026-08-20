@@ -25,10 +25,7 @@ class TakeRequest(BaseModel):
 
 
 @router.post('/take')
-async def take(
-    data: TakeRequest,
-    user: TelegramMiniAppUser = Depends(telegram_user),
-):
+async def take(data: TakeRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
     try:
         position = await take_signal(user.id, data.signal_id)
     except ValueError as exc:
@@ -40,9 +37,7 @@ async def take(
 
 @router.get('/active')
 async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
-    # For the admin's connected Pocket session, passively detect a deal opened
-    # manually in Pocket and attach it to the matching recent AlphaPulse signal.
-    broker_sync = await sync_broker_positions(user.id)
+    await sync_broker_positions(user.id)
     await reconcile_positions()
     async with AsyncSessionLocal() as db:
         rows = (
@@ -53,16 +48,13 @@ async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
                 .limit(20)
             )
         ).scalars().all()
-        payload = [serialize_position(row) for row in rows]
-    # Keep the existing array API for Mini App compatibility. The sync status is
-    # intentionally not exposed because deal counts are account-private.
-    return payload
+        return [serialize_position(row) for row in rows]
 
 
 @router.get('/position/{position_id}')
 async def position(
     position_id: int,
-    count: int = Query(50, ge=20, le=120),
+    count: int = Query(60, ge=20, le=120),
     user: TelegramMiniAppUser = Depends(telegram_user),
 ):
     await reconcile_positions()
@@ -72,29 +64,33 @@ async def position(
             raise HTTPException(404, 'Position not found')
         payload = serialize_position(row)
 
+    # The old chart requested the trade timeframe itself. On a 5m trade that
+    # meant almost the entire live position was represented by one synthetic
+    # candle. Use Pocket's 15s stream for the open-trade chart so the movement
+    # shown in Mini App follows the same market continuously during the deal.
+    chart_tf = '15s'
+    chart_count = max(40, min(120, count))
     try:
         candles, current_price = await asyncio.gather(
-            market_data.get_candles(payload['asset'], payload['timeframe'], count),
+            market_data.get_candles(payload['asset'], chart_tf, chart_count),
             market_data.latest_price(payload['asset']),
         )
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
 
     current_price = float(current_price)
-    # Pocket history can return only completed higher-timeframe candles. Merge the
-    # freshest 1m price into the current selected-timeframe candle so the chart
-    # moves during the trade rather than jumping only after candle close.
-    period = int(TF_SECONDS.get(payload['timeframe'], 60))
+    period = int(TF_SECONDS.get(chart_tf, 15))
     now_ts = int(time.time())
     bucket = now_ts - (now_ts % period)
+
     if candles:
-        last = dict(candles[-1])
+        candles = [dict(c) for c in candles]
+        last = candles[-1]
         last_time = int(last.get('time') or 0)
         if last_time == bucket:
             last['close'] = current_price
             last['high'] = max(float(last.get('high', current_price)), current_price)
             last['low'] = min(float(last.get('low', current_price)), current_price)
-            candles[-1] = last
         elif last_time < bucket:
             open_price = float(last.get('close', current_price))
             candles.append({
@@ -104,7 +100,7 @@ async def position(
                 'low': min(open_price, current_price),
                 'close': current_price,
             })
-            candles = candles[-count:]
+        candles = candles[-chart_count:]
 
     now = _now()
     expiry = datetime.fromisoformat(payload['expiry_time'].replace('Z', '+00:00')).replace(tzinfo=None)
@@ -124,15 +120,13 @@ async def position(
         'floating_result': payload['result'] if payload['status'] == 'CLOSED' else floating,
         'seconds_to_expiry': max(0, int((expiry - now).total_seconds())),
         'server_time': datetime.now(timezone.utc).isoformat(),
+        'chart_timeframe': chart_tf,
         'candles': candles,
     }
 
 
 @router.get('/feed')
-async def feed(
-    kind: str = Query('all', pattern='^(all|regular|vip)$'),
-    limit: int = Query(30, ge=1, le=100),
-):
+async def feed(kind: str = Query('all', pattern='^(all|regular|vip)$'), limit: int = Query(30, ge=1, le=100)):
     async with AsyncSessionLocal() as db:
         query = select(Signal).order_by(desc(Signal.created_at)).limit(limit)
         if kind == 'vip':
