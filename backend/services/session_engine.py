@@ -502,7 +502,17 @@ async def session_tick():
         threshold = PROFIT_MIN_CONFIDENCE
 
     confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]
-    tradable_candidates = [candidate for candidate in confirmed if _tradable(snapshot, str(candidate.get("asset") or ""))]
+    # One scan -> one order candidate. Rank all tradable setups explicitly so
+    # scanner return order can never behave like a queue. Confidence wins;
+    # live payout is only a tie-breaker.
+    tradable_candidates = sorted(
+        [candidate for candidate in confirmed if _tradable(snapshot, str(candidate.get("asset") or ""))],
+        key=lambda candidate: (
+            float(candidate.get("confidence") or 0),
+            float(_payout(snapshot, str(candidate.get("asset") or "")) or 0),
+        ),
+        reverse=True,
+    )
     label = "Mixed Smart Confluence" if mixed_count else ("Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy))
 
     telemetry = {
@@ -537,6 +547,9 @@ async def session_tick():
     signal = None
     payout = None
     confirmed_candidate = None
+    # We may fall through only when a stronger candidate fails the mandatory
+    # second-pass confirmation/duplicate guard. Once one valid candidate is
+    # accepted, the loop breaks and no other pair is queued for this cycle.
     for candidate in tradable_candidates:
         candidate_to_save = candidate
         if mixed_count:

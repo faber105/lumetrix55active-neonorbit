@@ -231,12 +231,20 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
         candidates = await signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, all_assets, strategy)
         threshold = PROFIT_MIN_CONFIDENCE
 
-    confirmed = [
-        item for item in candidates
-        if float(item.get("confidence") or 0) >= threshold
-        and _tradable(snapshot, str(item.get("asset") or ""))
-    ]
+    confirmed = sorted(
+        [
+            item for item in candidates
+            if float(item.get("confidence") or 0) >= threshold
+            and _tradable(snapshot, str(item.get("asset") or ""))
+        ],
+        key=lambda item: (
+            float(item.get("confidence") or 0),
+            float(_payout(snapshot, str(item.get("asset") or "")) or 0),
+        ),
+        reverse=True,
+    )
 
+    # Pre-analysis also prepares exactly one best pair; alternatives are never queued.
     for candidate in confirmed:
         chosen = candidate
         if mixed_count:
