@@ -2,20 +2,15 @@
   const TARGET = 'ЖИВЫЕ УВЕДОМЛЕНИЯ';
 
   function removeLiveNotifications() {
-    const nodes = document.querySelectorAll('small,h1,h2,h3,h4,div,span');
+    const nodes = document.querySelectorAll('small,h1,h2,h3,h4,strong');
     for (const node of nodes) {
       if ((node.textContent || '').trim().toUpperCase() !== TARGET) continue;
 
-      // Never remove the active-session information card or the session journal.
-      // They may contain injected/live text, but they are independent UI blocks.
       const protectedBlock = node.closest('.live-session, .journal, .chart-card');
       if (protectedBlock) {
         const ownRow = node.parentElement;
-        if (ownRow && ownRow !== protectedBlock && !ownRow.querySelector('.balance-card,.session-kpis,.robot-status')) {
-          ownRow.remove();
-        } else {
-          node.remove();
-        }
+        if (ownRow && ownRow !== protectedBlock && !ownRow.querySelector('.balance-card,.session-kpis,.robot-status')) ownRow.remove();
+        else node.remove();
         continue;
       }
 
@@ -29,8 +24,13 @@
     }
   }
 
-  const observer = new MutationObserver(removeLiveNotifications);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  document.addEventListener('DOMContentLoaded', removeLiveNotifications, { once: true });
-  setTimeout(removeLiveNotifications, 0);
+  const run = () => {
+    removeLiveNotifications();
+    setTimeout(removeLiveNotifications, 350);
+    setTimeout(removeLiveNotifications, 1200);
+    setTimeout(removeLiveNotifications, 3000);
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, { once: true });
+  else run();
 })();
