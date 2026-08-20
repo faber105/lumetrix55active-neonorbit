@@ -29,13 +29,6 @@ TF_SECONDS.setdefault("3m", 180)
 
 
 def _next_candle_boundary(server_ts: int, timeframe: str) -> int:
-    """Return the next exact candle-open timestamp for the selected timeframe.
-
-    Signals must never say e.g. 16:44:38 for a 5m entry. They are prepared in
-    advance and become actionable only on a real candle boundary. If analysis
-    completes too close to the boundary to notify/connect safely, skip one
-    boundary rather than opening late.
-    """
     seconds = int(TF_SECONDS[timeframe])
     entry = ((int(server_ts) // seconds) + 1) * seconds
     if entry - int(server_ts) < MIN_ENTRY_NOTICE_SECONDS:
@@ -139,6 +132,12 @@ class SignalEngine:
     async def evaluate_vip_asset(self, asset: str) -> Optional[dict]:
         candles = await market_data.get_candles(asset, "5m", CANDLE_LOOKBACK)
         candidate = evaluate("vip_confluence", candles)
+        # VIP used to produce nothing whenever the dedicated confluence strategy
+        # returned None, even if another strong smart 5m setup was present. Keep
+        # VIP Confluence as first priority, then use the strongest confirmed 5m
+        # smart setup. The global VIP confidence gate still filters weak entries.
+        if candidate is None:
+            candidate = evaluate_best(candles, SMART_STRATEGIES)
         return None if candidate is None else await self._candidate_dict(asset, "5m", candidate, candles, is_vip=True)
 
     async def _gather_candidates(self, assets: Iterable[str], evaluator) -> list[dict]:
