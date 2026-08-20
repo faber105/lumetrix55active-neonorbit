@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from backend.services.session_driver import drive_session_tick
 from backend.services.session_engine import session_history, session_state, start_session, stop_session
+from backend.services.trade_mode import set_execution_mode
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
@@ -56,6 +57,10 @@ async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admi
 
 @router.post("/stop")
 async def stop(_: TelegramMiniAppUser = Depends(admin_user)):
+    # Block broker execution first. A scanner tick already running on another
+    # serverless instance may finish its analysis after the user pressed Stop;
+    # CONFIRM mode prevents that stale tick from sending a new automatic order.
+    await set_execution_mode("confirm")
     return await stop_session("USER_STOP")
 
 
