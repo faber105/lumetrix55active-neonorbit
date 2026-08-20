@@ -19,8 +19,6 @@ logger = logging.getLogger("alphapulse.engine")
 ENTRY_LEAD_SECONDS = int(os.getenv("ENTRY_LEAD_SECONDS", "6"))
 SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
 
-# Direct Pocket history accepts integer periods. These two periods are used by
-# the new signal/AUTO flows and are added to the shared timeframe registry.
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
 
@@ -82,8 +80,9 @@ class SignalEngine:
         candidate = evaluate("vip_confluence", candles)
         return None if candidate is None else await self._candidate_dict(asset, "5m", candidate, candles, is_vip=True)
 
-    async def scan_strategy(self, timeframe: str, assets: Iterable[str], strategy: str) -> Optional[dict]:
-        results = []
+    async def scan_strategy_candidates(self, timeframe: str, assets: Iterable[str], strategy: str) -> list[dict]:
+        """Analyze every supplied OTC pair and return all confirmed candidates."""
+        results: list[dict] = []
         for asset in assets:
             if asset not in OTC_ASSETS:
                 continue
@@ -96,12 +95,15 @@ class SignalEngine:
                     raise
             except Exception as exc:
                 logger.warning("Strategy scan failed %s/%s/%s: %s", strategy, asset, timeframe, type(exc).__name__)
-        return max(results, key=lambda x: float(x.get("confidence") or 0)) if results else None
+        return sorted(results, key=lambda x: float(x.get("confidence") or 0), reverse=True)
 
-    async def scan_best(self, timeframe: str, assets: Iterable[str]) -> Optional[dict]:
-        # Smart profit mode uses the widest 5m arsenal. Each candidate must still
-        # independently satisfy its own full rule set before it can be selected.
-        results = []
+    async def scan_strategy(self, timeframe: str, assets: Iterable[str], strategy: str) -> Optional[dict]:
+        results = await self.scan_strategy_candidates(timeframe, assets, strategy)
+        return results[0] if results else None
+
+    async def scan_best_candidates(self, timeframe: str, assets: Iterable[str]) -> list[dict]:
+        """Analyze every supplied OTC pair using the full Smart 5m arsenal."""
+        results: list[dict] = []
         for asset in assets:
             if asset not in OTC_ASSETS:
                 continue
@@ -113,7 +115,11 @@ class SignalEngine:
                 raise
             except Exception as exc:
                 logger.warning("Smart scan failed %s/%s: %s", asset, timeframe, type(exc).__name__)
-        return max(results, key=lambda x: float(x.get("confidence") or 0)) if results else None
+        return sorted(results, key=lambda x: float(x.get("confidence") or 0), reverse=True)
+
+    async def scan_best(self, timeframe: str, assets: Iterable[str]) -> Optional[dict]:
+        results = await self.scan_best_candidates(timeframe, assets)
+        return results[0] if results else None
 
     async def scan_vip(self, assets: Iterable[str]) -> Optional[dict]:
         results = []
