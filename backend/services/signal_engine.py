@@ -19,13 +19,28 @@ from backend.services.strategies import (
 )
 
 logger = logging.getLogger("alphapulse.engine")
-ENTRY_LEAD_SECONDS = max(2, min(12, int(os.getenv("ENTRY_LEAD_SECONDS", "4"))))
+MIN_ENTRY_NOTICE_SECONDS = max(3, min(15, int(os.getenv("MIN_ENTRY_NOTICE_SECONDS", "6"))))
 SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
 SCAN_CONCURRENCY = max(1, min(8, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "4"))))
 CANDLE_LOOKBACK = max(100, min(140, int(os.getenv("SIGNAL_CANDLE_LOOKBACK", "110"))))
 
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
+
+
+def _next_candle_boundary(server_ts: int, timeframe: str) -> int:
+    """Return the next exact candle-open timestamp for the selected timeframe.
+
+    Signals must never say e.g. 16:44:38 for a 5m entry. They are prepared in
+    advance and become actionable only on a real candle boundary. If analysis
+    completes too close to the boundary to notify/connect safely, skip one
+    boundary rather than opening late.
+    """
+    seconds = int(TF_SECONDS[timeframe])
+    entry = ((int(server_ts) // seconds) + 1) * seconds
+    if entry - int(server_ts) < MIN_ENTRY_NOTICE_SECONDS:
+        entry += seconds
+    return entry
 
 
 def _fallback_bias(candles: list) -> StrategyCandidate:
@@ -75,7 +90,7 @@ class SignalEngine:
 
         server_ts = await market_data.server_time()
         seconds = int(TF_SECONDS[timeframe])
-        entry_ts = server_ts + ENTRY_LEAD_SECONDS
+        entry_ts = _next_candle_boundary(server_ts, timeframe)
         expiry_ts = entry_ts + seconds
         return {
             "pair": OTC_ASSETS[asset],
