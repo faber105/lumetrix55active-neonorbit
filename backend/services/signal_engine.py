@@ -22,18 +22,13 @@ logger = logging.getLogger("alphapulse.engine")
 ENTRY_LEAD_SECONDS = max(2, min(12, int(os.getenv("ENTRY_LEAD_SECONDS", "4"))))
 SMART_EXECUTION_STRATEGIES = tuple(SMART_STRATEGIES) + ("vip_confluence",)
 SCAN_CONCURRENCY = max(1, min(8, int(os.getenv("SIGNAL_SCAN_CONCURRENCY", "4"))))
+CANDLE_LOOKBACK = max(100, min(140, int(os.getenv("SIGNAL_CANDLE_LOOKBACK", "110"))))
 
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
 
 
 def _fallback_bias(candles: list) -> StrategyCandidate:
-    """Always return a conservative directional bias for the manual Home button.
-
-    This is deliberately labelled as a market-bias setup rather than pretending a
-    strict strategy fired. It keeps the Home action responsive while preserving
-    the stronger confirmation thresholds used by AUTO and VIP execution.
-    """
     closes = [float(c["close"]) for c in candles]
     opens = [float(c["open"]) for c in candles]
     recent = closes[-12:]
@@ -106,28 +101,28 @@ class SignalEngine:
     async def evaluate_asset(self, asset: str, timeframe: str, strategy: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, 205)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate(strategy, candles)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def _evaluate_asset_best(self, asset: str, timeframe: str, strategies: Iterable[str]) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, 205)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate_best(candles, strategies)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_asset_composite(self, asset: str, timeframe: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, 205)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate_best(candles, MANUAL_STRATEGIES)
         if candidate is None:
             candidate = _fallback_bias(candles)
         return await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_vip_asset(self, asset: str) -> Optional[dict]:
-        candles = await market_data.get_candles(asset, "5m", 205)
+        candles = await market_data.get_candles(asset, "5m", CANDLE_LOOKBACK)
         candidate = evaluate("vip_confluence", candles)
         return None if candidate is None else await self._candidate_dict(asset, "5m", candidate, candles, is_vip=True)
 
