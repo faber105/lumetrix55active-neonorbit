@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 
@@ -38,6 +38,9 @@ async def take(data: TakeRequest, user: TelegramMiniAppUser = Depends(telegram_u
 @router.get('/active')
 async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
     await sync_broker_positions(user.id)
+    if response is not None:
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
     await reconcile_positions()
     async with AsyncSessionLocal() as db:
         rows = (
@@ -55,6 +58,7 @@ async def active(user: TelegramMiniAppUser = Depends(telegram_user)):
 async def position(
     position_id: int,
     count: int = Query(60, ge=20, le=120),
+    response: Response = None,
     user: TelegramMiniAppUser = Depends(telegram_user),
 ):
     await reconcile_positions()
@@ -71,14 +75,15 @@ async def position(
     chart_tf = '15s'
     chart_count = max(40, min(120, count))
     try:
-        candles, current_price = await asyncio.gather(
-            market_data.get_candles(payload['asset'], chart_tf, chart_count),
-            market_data.latest_price(payload['asset']),
-        )
+        # Use the freshest close from the same live 15s Pocket stream used by the chart.
+        # latest_price() is based on 1m history and can stay unchanged for a whole minute.
+        candles = await market_data.get_candles(payload['asset'], chart_tf, chart_count)
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
 
-    current_price = float(current_price)
+    if not candles:
+        raise HTTPException(503, 'Pocket live chart returned no candles')
+    current_price = float(candles[-1]['close'])
     period = int(TF_SECONDS.get(chart_tf, 15))
     now_ts = int(time.time())
     bucket = now_ts - (now_ts % period)

@@ -28,7 +28,7 @@ OTC_ASSETS: Dict[str, str] = {
     'GBPJPY_otc': 'GBP/JPY OTC',
 }
 DISPLAY_TO_ASSET = {v.replace(' OTC', ''): k for k, v in OTC_ASSETS.items()}
-TF_SECONDS = {'1m': 60, '5m': 300, '15m': 900, '1h': 3600}
+TF_SECONDS = {'15s': 15, '1m': 60, '3m': 180, '5m': 300, '15m': 900, '1h': 3600}
 PRIVATE_SSID_KEY = '__runtime_pocket__'
 
 
