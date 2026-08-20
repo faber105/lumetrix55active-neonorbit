@@ -38,22 +38,27 @@ jobs:
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: python -c "from api.main import app; assert app.title == 'AlphaPulse API'; print('FastAPI import OK')"
 
-      - name: Verify guarded auto trade primitives
+      - name: Verify guarded trade primitives
         env:
           ADMIN_ID: '8535011479'
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: |
           python - <<'PY'
           from backend.models.db_models import AutoTradeControl, TradeExecution
-          from backend.services.auto_trade import serialize_auto_trade
+          from backend.services.auto_trade import execute_confirmed_signal, maybe_execute_signal, serialize_auto_trade
+          from backend.services.trade_mode import VALID_EXECUTION_MODES, VALID_TRADE_MODES
           from pocketoptionapi_async import AsyncPocketOptionClient
           state = serialize_auto_trade(None)
           assert state['auto_trade_enabled'] is False
           assert state['trade_amount'] == 1.0
+          assert VALID_EXECUTION_MODES == {'auto', 'confirm'}
+          assert VALID_TRADE_MODES == {'demo', 'real'}
+          assert callable(maybe_execute_signal)
+          assert callable(execute_confirmed_signal)
           assert hasattr(AsyncPocketOptionClient, 'place_order')
           assert AutoTradeControl.__tablename__ == 'auto_trade_control'
           assert TradeExecution.__tablename__ == 'trade_executions'
-          print('Auto trade guardrails OK')
+          print('Trade guardrails OK')
           PY
 
       - uses: actions/setup-node@v4
@@ -70,12 +75,14 @@ jobs:
         working-directory: miniapp
         run: npm run build
 
-      - name: Verify Mini App admin controls
+      - name: Verify Mini App information architecture
         working-directory: miniapp
         run: |
-          grep -R -q 'Авто-сделки Pocket' dist/assets/*.js
-          grep -R -q 'VIP сейчас' dist/assets/*.js
-          echo 'Mini App controls OK'
+          grep -R -q 'Сканировать рынок' dist/assets/*.js
+          grep -R -q 'Статистика' dist/assets/*.js
+          grep -R -q 'Запустить тестовую DEMO автосделку' dist/assets/*.js
+          grep -R -q 'CONFIRM' dist/assets/*.js
+          echo 'Mini App flows OK'
 
       - name: Verify stale Telegram asset recovery
         env:

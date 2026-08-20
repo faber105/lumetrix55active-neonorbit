@@ -1,4 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services.pocketoption_otc import (
     DISPLAY_TO_ASSET,
@@ -8,6 +12,7 @@ from backend.services.pocketoption_otc import (
     market_data,
 )
 from backend.services.strategies import indicator_snapshot
+from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
 
@@ -24,7 +29,6 @@ async def health():
 
 @router.get('/diagnostics')
 async def diagnostics():
-    """Non-secret end-to-end market-data check for production verification."""
     state = await market_data.health()
     result = {
         'configured': state.get('configured', False),
@@ -52,8 +56,35 @@ async def diagnostics():
         return result
 
 
+@router.get('/candles')
+async def candles(
+    pair: str = Query(...),
+    timeframe: str = Query('1m'),
+    count: int = Query(60, ge=20, le=120),
+    _: TelegramMiniAppUser = Depends(telegram_user),
+):
+    asset = DISPLAY_TO_ASSET.get(pair.replace(' OTC', '').strip())
+    if not asset:
+        raise HTTPException(400, 'Unsupported OTC pair')
+    if timeframe not in TF_SECONDS:
+        raise HTTPException(400, 'Unsupported timeframe')
+    try:
+        rows = await market_data.get_candles(asset, timeframe, count)
+        current_price = await market_data.latest_price(asset)
+    except MarketDataUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {
+        'pair': OTC_ASSETS[asset],
+        'asset': asset,
+        'timeframe': timeframe,
+        'current_price': float(current_price),
+        'server_time': datetime.now(timezone.utc).isoformat(),
+        'candles': rows,
+    }
+
+
 @router.get('/analysis')
-async def analysis(pair: str = Query(...)):
+async def analysis(pair: str = Query(...), _: TelegramMiniAppUser = Depends(telegram_user)):
     asset = DISPLAY_TO_ASSET.get(pair.replace(' OTC', '').strip())
     if not asset:
         raise HTTPException(400, 'Unsupported OTC pair')
@@ -79,7 +110,7 @@ async def analysis(pair: str = Query(...)):
 
 
 @router.get('/price/{asset}')
-async def price(asset: str):
+async def price(asset: str, _: TelegramMiniAppUser = Depends(telegram_user)):
     if asset not in OTC_ASSETS:
         raise HTTPException(404, 'Unknown OTC asset')
     try:

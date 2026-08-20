@@ -43,6 +43,7 @@ def out(signal):
         'confidence': signal.confidence,
         'model_probability': signal.model_probability,
         'is_vip': signal.is_vip,
+        'source': 'vip' if signal.is_vip else 'scanner',
         'reason': signal.reason,
         'indicators': {'RSI': signal.rsi, 'EMA': signal.ema_signal, 'MACD': signal.macd_signal},
         'analysis_price': signal.analysis_price,
@@ -101,27 +102,53 @@ async def save_candidate(db, candidate):
 
 class AnalyzeRequest(BaseModel):
     pair: str
-    timeframe: str = '5m'
+    timeframe: str = '1m'
+    strategy: str = 'ema_trend'
+    min_confidence: float = Field(0.0, ge=0, le=99)
     user_id: Optional[int] = None
 
 
 @router.post('/analyze')
-async def analyze(req: AnalyzeRequest, db: AsyncSession = Depends(get_db)):
+async def analyze(
+    req: AnalyzeRequest,
+    _: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
     asset = DISPLAY_TO_ASSET.get(req.pair.replace(' OTC', '').strip())
     if not asset:
         raise HTTPException(400, 'Unsupported OTC pair')
     if req.timeframe not in TF_SECONDS:
         raise HTTPException(400, 'Unsupported timeframe')
+    if req.strategy not in STRATEGIES:
+        raise HTTPException(400, 'Unknown strategy')
     try:
-        candidate = await signal_engine.evaluate_asset_best(asset, req.timeframe)
+        candidate = await signal_engine.evaluate_asset(asset, req.timeframe, req.strategy)
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     if not candidate:
-        return {'error': 'No confirmed strategy setup right now. Try another pair or timeframe.'}
-    signal, _ = await save_candidate(db, candidate)
-    data = out(signal)
-    data['indicators'] = candidate.get('indicators', {})
-    return data
+        return {
+            'status': 'NO_SIGNAL',
+            'signal': None,
+            'pair': OTC_ASSETS[asset],
+            'strategy': req.strategy,
+            'timeframe': req.timeframe,
+            'reason': 'Условия выбранной стратегии сейчас не подтверждены.',
+        }
+    if float(candidate.get('confidence') or 0) < req.min_confidence:
+        return {
+            'status': 'NO_SIGNAL',
+            'signal': None,
+            'pair': OTC_ASSETS[asset],
+            'strategy': req.strategy,
+            'timeframe': req.timeframe,
+            'confidence': candidate.get('confidence'),
+            'reason': 'Ситуация есть, но качество ниже минимального порога.',
+        }
+    signal, duplicate = await save_candidate(db, candidate)
+    payload = out(signal)
+    payload['source'] = 'manual'
+    payload['indicators'] = candidate.get('indicators', {})
+    return {'status': 'SIGNAL', 'signal': payload, 'duplicate': duplicate}
 
 
 class StrategyScanRequest(BaseModel):
@@ -133,10 +160,9 @@ class StrategyScanRequest(BaseModel):
 @router.post('/scan-strategy')
 async def scan_strategy(
     req: StrategyScanRequest,
-    user: TelegramMiniAppUser = Depends(telegram_user),
+    _: TelegramMiniAppUser = Depends(telegram_user),
     db: AsyncSession = Depends(get_db),
 ):
-    del user
     if req.strategy not in STRATEGIES:
         raise HTTPException(400, 'Unknown strategy')
     if req.timeframe not in TF_SECONDS:
@@ -150,9 +176,17 @@ async def scan_strategy(
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     if not candidate or float(candidate.get('confidence') or 0) < req.min_confidence:
-        return {'status': 'NO_SIGNAL', 'signal': None}
+        return {
+            'status': 'NO_SIGNAL',
+            'signal': None,
+            'strategy': req.strategy,
+            'timeframe': req.timeframe,
+            'threshold': req.min_confidence,
+        }
     signal, duplicate = await save_candidate(db, candidate)
-    return {'status': 'SIGNAL', 'signal': out(signal), 'duplicate': duplicate}
+    payload = out(signal)
+    payload['source'] = 'vip' if payload['is_vip'] else 'scanner'
+    return {'status': 'SIGNAL', 'signal': payload, 'duplicate': duplicate}
 
 
 class ScanRequest(BaseModel):
@@ -162,7 +196,11 @@ class ScanRequest(BaseModel):
 
 
 @router.post('/scan-best')
-async def scan_best(req: ScanRequest, db: AsyncSession = Depends(get_db)):
+async def scan_best(
+    req: ScanRequest,
+    _: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
     assets = [asset for asset in req.assets if asset in OTC_ASSETS]
     try:
         candidate = await signal_engine.scan_best(req.timeframe, assets)
@@ -214,9 +252,7 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
 
                 performance = (
                     await db.execute(
-                        select(StrategyPerformance).where(
-                            StrategyPerformance.strategy == signal.strategy
-                        )
+                        select(StrategyPerformance).where(StrategyPerformance.strategy == signal.strategy)
                     )
                 ).scalar_one_or_none()
                 if performance is None:
@@ -261,9 +297,7 @@ async def reconcile(db: AsyncSession = Depends(get_db)):
 
 @router.get('/history')
 async def history(limit: int = Query(30, ge=1, le=200), db: AsyncSession = Depends(get_db)):
-    rows = (
-        await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(limit))
-    ).scalars().all()
+    rows = (await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(limit))).scalars().all()
     return [out(signal) for signal in rows]
 
 

@@ -18,7 +18,7 @@ from backend.models.db_models import (
 )
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire_auth, market_data
-from backend.services.trade_mode import get_trade_account_mode
+from backend.services.trade_mode import get_execution_mode, get_trade_account_mode
 
 logger = logging.getLogger("alphapulse.auto_trade")
 _trade_lock = asyncio.Lock()
@@ -222,13 +222,22 @@ async def _mark_failed(execution_id: int, error: str) -> None:
 
 
 async def maybe_execute_signal(signal: dict) -> dict:
-    """Open one demo broker order for a newly published signal when admin enabled it.
+    """Execute a freshly published signal only when AUTO mode is enabled."""
+    if await get_execution_mode() != "auto":
+        return {"status": "CONFIRMATION_REQUIRED", "execution_mode": "confirm"}
+    return await _execute_signal(signal, confirmed=False)
 
-    A database claim is written before any broker call, so overlapping scanner
-    invocations cannot place the same signal twice. Auto trading is OFF by default.
-    Real-account mode never sends an automatic broker order; it requires the user
-    to confirm the trade manually in Pocket Option.
+
+async def execute_confirmed_signal(signal: dict) -> dict:
+    """Execute after an explicit admin confirmation.
+
+    This still goes through account, idempotency, amount and position-limit checks.
+    Real-account orders are intentionally never sent by this backend.
     """
+    return await _execute_signal(signal, confirmed=True)
+
+
+async def _execute_signal(signal: dict, *, confirmed: bool) -> dict:
     tid = admin_id()
     control = await get_auto_trade_control()
     if tid <= 0 or control is None or not control.enabled:
@@ -246,7 +255,7 @@ async def maybe_execute_signal(signal: dict) -> dict:
         return {
             "status": "REAL_CONFIRMATION_REQUIRED",
             "account": "real",
-            "reason": "manual_confirmation_required",
+            "reason": "open_manually_in_pocket",
         }
     if connected_account != "demo":
         return {
@@ -254,6 +263,8 @@ async def maybe_execute_signal(signal: dict) -> dict:
             "account": connected_account,
             "selected_account": selected_account,
         }
+    if not confirmed and await get_execution_mode() != "auto":
+        return {"status": "CONFIRMATION_REQUIRED", "execution_mode": "confirm"}
 
     now = utcnow()
     expiry = _to_utc_naive(signal["expiry_time"])
@@ -347,15 +358,17 @@ async def maybe_execute_signal(signal: dict) -> dict:
                 await db.refresh(position)
 
             logger.warning(
-                "Admin demo auto trade opened signal=%s asset=%s",
+                "Admin demo trade opened signal=%s asset=%s confirmed=%s",
                 signal["id"],
                 signal["asset"],
+                confirmed,
             )
             return {
                 "status": "OPEN",
                 "position_id": position.id,
                 "amount": amount,
                 "account": "demo",
+                "confirmed": confirmed,
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
