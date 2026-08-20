@@ -140,4 +140,17 @@ def _make_direct_market_client(self):
 
 _po_service.PocketOptionOTCService._make_client = _make_direct_market_client
 
+# Demo order execution uses the same direct Socket.IO authentication path that is
+# already proven in Vercel for market data. The wrapper itself is hard-coded to
+# demo mode, waits for successopenOrder and never retries an uncertain order.
+from backend.services import auto_trade as _auto_trade
+from backend.services.pocket_demo_trading import DirectDemoTradingClient
+
+
+def _make_direct_demo_trading_client():
+    return DirectDemoTradingClient(_po_service.market_data.ssid)
+
+
+_auto_trade._build_trading_client = _make_direct_demo_trading_client
+
 from backend.main import app
