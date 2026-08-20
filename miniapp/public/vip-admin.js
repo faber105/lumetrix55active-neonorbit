@@ -147,15 +147,17 @@
       if (busy) return;
       busy = true;
       now.disabled = true;
-      feedback.textContent = 'Сканирую VIP рынок…';
+      feedback.textContent = 'Сканирую реальный VIP 5m рынок…';
       try {
-        const result = await request('/api/admin/vip-now', { method: 'POST' });
+        const result = await request('/api/home/vip-scan-now', { method: 'POST' });
         const state = await request('/api/admin/state');
         render(panel, state);
         const notified = Number(result?.notified || 0);
         feedback.textContent = result?.status === 'SIGNAL'
           ? `VIP сигнал найден. Уведомлений отправлено: ${notified}.`
-          : (result?.status === 'SEARCHING' ? 'Подтверждённого VIP входа пока нет, поиск продолжен.' : `VIP: ${result?.status || 'готово'}`);
+          : (result?.status === 'DUPLICATE'
+              ? 'Такой VIP сигнал уже опубликован для этой 5m свечи.'
+              : 'Подтверждённого VIP входа пока нет. Следующая проверка запланирована.');
       } catch (e) {
         feedback.textContent = `Ошибка VIP: ${e.message}`;
       } finally {
