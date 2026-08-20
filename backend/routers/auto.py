@@ -24,9 +24,20 @@ class StartSessionRequest(BaseModel):
 @router.get("/state")
 async def state(
     refresh: bool = Query(False),
+    drive: bool = Query(True),
     _: TelegramMiniAppUser = Depends(admin_user),
 ):
-    return await session_state(refresh_balance=refresh)
+    tick_result = None
+    if drive:
+        try:
+            tick_result = await drive_session_tick()
+        except Exception as exc:
+            # The UI must keep receiving the persisted session even when Pocket
+            # is temporarily reconnecting. The next poll retries automatically.
+            tick_result = {"status": "ERROR", "error": type(exc).__name__}
+    payload = await session_state(refresh_balance=refresh)
+    payload["driver"] = tick_result
+    return payload
 
 
 @router.post("/tick")
