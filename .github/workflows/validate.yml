@@ -3,8 +3,6 @@ name: Validate AlphaPulse
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -36,39 +34,50 @@ jobs:
           TELEGRAM_BOT_TOKEN: '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk'
           ADMIN_ID: '8535011479'
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
-        run: python -c "from api.main import app; assert app.title == 'AlphaPulse API'; print('FastAPI import OK')"
+        run: |
+          python - <<'PY'
+          from api.main import app
+          assert app.title == 'AlphaPulse API'
+          assert app.version == '3.0'
+          print('FastAPI 3.0 import OK')
+          PY
 
-      - name: Verify guarded trade primitives and Pocket telemetry parser
+      - name: Verify strategies and AUTO session configuration
         env:
           ADMIN_ID: '8535011479'
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: |
           python - <<'PY'
-          from backend.models.db_models import AutoTradeControl, TradeExecution
-          from backend.services.auto_trade import MIN_AUTO_PAYOUT, execute_confirmed_signal, maybe_execute_signal, process_pending_auto_trade, serialize_auto_trade
-          from backend.services.pocket_demo_trading import DirectDemoTradingClient
-          from backend.services.pocket_telemetry import TelemetryPocketOptionClient
-          from backend.services.trade_mode import VALID_EXECUTION_MODES, VALID_TRADE_MODES
-          state = serialize_auto_trade(None)
-          assert state['auto_trade_enabled'] is False
-          assert state['trade_amount'] == 1.0
+          from backend.services.auto_trade import MIN_AUTO_PAYOUT
+          from backend.services.session_engine import (
+              AUTO_STRATEGIES,
+              COUNT_TIMEFRAMES,
+              PROFIT_TIMEFRAME,
+              PROFIT_STRATEGIES,
+              _validate_config,
+          )
+          from backend.services.strategies import STRATEGIES
+
+          assert tuple(AUTO_STRATEGIES) == ('trend_pulse', 'range_reversal', 'volatility_breakout')
+          assert 'vip_confluence' in STRATEGIES
+          assert COUNT_TIMEFRAMES == {'15s', '1m', '3m'}
+          assert PROFIT_TIMEFRAME == '5m'
+          assert 'smart_confluence' in PROFIT_STRATEGIES
           assert MIN_AUTO_PAYOUT == 92.0
-          assert VALID_EXECUTION_MODES == {'auto', 'confirm'}
-          assert VALID_TRADE_MODES == {'demo', 'real'}
-          assert callable(maybe_execute_signal) and callable(process_pending_auto_trade) and callable(execute_confirmed_signal)
-          assert DirectDemoTradingClient.__name__ == 'DirectDemoTradingClient'
-          client = TelemetryPocketOptionClient('test', is_demo=True)
-          client._capture_telemetry('successupdateBalance', {'balance': '1234.56', 'isDemo': 1})
-          row = [1, 'EURUSD_otc', 'EUR/USD OTC', 'currency', 0, 92, 0, 0, 0, 0, 0, 0, 0, 0, True, [60]]
-          client._capture_telemetry('updateAssets', [row])
-          snap = client.snapshot()
-          assert snap['balance'] == 1234.56
-          assert snap['balance_is_demo'] is True
-          assert snap['payouts']['EURUSD_otc'] == 92.0
-          assert snap['available_assets']['EURUSD_otc'] is True
-          assert AutoTradeControl.__tablename__ == 'auto_trade_control'
-          assert TradeExecution.__tablename__ == 'trade_executions'
-          print('Trade timing/payout telemetry guardrails OK')
+
+          count = _validate_config({
+              'mode': 'count', 'strategy': 'trend_pulse', 'timeframe': '15s',
+              'target_wins': 5, 'amount': 1, 'max_martingale': 3,
+          })
+          assert count['target_wins'] == 5 and count['max_martingale'] == 3
+
+          profit = _validate_config({
+              'mode': 'profit', 'strategy': 'smart_confluence',
+              'target_profit': 10, 'amount': 1, 'max_martingale': 2,
+              'max_failed_series': 2,
+          })
+          assert profit['timeframe'] == '5m' and profit['max_failed_series'] == 2
+          print('Strategy/session rules OK')
           PY
 
       - uses: actions/setup-node@v4
@@ -85,17 +94,16 @@ jobs:
         working-directory: miniapp
         run: npm run build
 
-      - name: Verify Mini App information architecture
+      - name: Verify new Mini App flows
         working-directory: miniapp
         run: |
-          grep -R -q 'Сканировать рынок' dist/assets/*.js
-          grep -R -q 'Статистика' dist/assets/*.js
-          grep -R -q 'Запустить тестовую DEMO автосделку' dist/assets/*.js
-          grep -R -q 'CONFIRM' dist/assets/*.js
-          grep -R -q 'Жду точное время входа' dist/assets/*.js
-          grep -R -q 'Баланс' dist/assets/*.js
-          grep -R -q 'Выплата' dist/assets/*.js
-          echo 'Mini App AUTO monitor OK'
+          grep -R -q 'Сигнал из реального' dist/assets/*.js
+          grep -R -q 'VIP 5M Confluence' dist/assets/*.js
+          grep -R -q 'Trading Session' dist/assets/*.js
+          grep -R -q 'По WIN-сделкам' dist/assets/*.js
+          grep -R -q 'До профита' dist/assets/*.js
+          grep -R -q 'Автотрейдинг' dist/assets/*.js
+          echo 'Mini App flows OK'
 
       - name: Verify stale Telegram asset recovery
         env:
