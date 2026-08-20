@@ -18,6 +18,7 @@ from backend.models.db_models import (
 )
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire_auth, market_data
+from backend.services.trade_mode import get_trade_account_mode
 
 logger = logging.getLogger("alphapulse.auto_trade")
 _trade_lock = asyncio.Lock()
@@ -221,10 +222,12 @@ async def _mark_failed(execution_id: int, error: str) -> None:
 
 
 async def maybe_execute_signal(signal: dict) -> dict:
-    """Open one broker order for a newly published signal when admin enabled it.
+    """Open one demo broker order for a newly published signal when admin enabled it.
 
     A database claim is written before any broker call, so overlapping scanner
     invocations cannot place the same signal twice. Auto trading is OFF by default.
+    Real-account mode never sends an automatic broker order; it requires the user
+    to confirm the trade manually in Pocket Option.
     """
     tid = admin_id()
     control = await get_auto_trade_control()
@@ -236,6 +239,21 @@ async def maybe_execute_signal(signal: dict) -> dict:
         return {"status": "SKIPPED", "reason": "vip_disabled"}
     if not is_vip and not control.regular_enabled:
         return {"status": "SKIPPED", "reason": "regular_disabled"}
+
+    selected_account = await get_trade_account_mode()
+    connected_account = "demo" if trading_is_demo() else "real"
+    if selected_account == "real":
+        return {
+            "status": "REAL_CONFIRMATION_REQUIRED",
+            "account": "real",
+            "reason": "manual_confirmation_required",
+        }
+    if connected_account != "demo":
+        return {
+            "status": "ACCOUNT_MISMATCH",
+            "account": connected_account,
+            "selected_account": selected_account,
+        }
 
     now = utcnow()
     expiry = _to_utc_naive(signal["expiry_time"])
@@ -328,18 +346,16 @@ async def maybe_execute_signal(signal: dict) -> dict:
                 await db.commit()
                 await db.refresh(position)
 
-            is_demo = trading_is_demo()
             logger.warning(
-                "Admin auto trade opened signal=%s asset=%s demo=%s",
+                "Admin demo auto trade opened signal=%s asset=%s",
                 signal["id"],
                 signal["asset"],
-                is_demo,
             )
             return {
                 "status": "OPEN",
                 "position_id": position.id,
                 "amount": amount,
-                "account": "demo" if is_demo else "real",
+                "account": "demo",
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
