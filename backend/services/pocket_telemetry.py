@@ -21,9 +21,14 @@ def _display_otc_symbol(symbol: str) -> str:
     raw = str(symbol or "").strip()
     base = raw[:-4] if raw.lower().endswith("_otc") else raw
     upper = base.upper()
-    # Most Pocket OTC FX/crypto symbols are compact BASEQUOTE codes.
-    # Produce a readable pair where that is unambiguous; keep broker names for
-    # stock/index-style OTC instruments.
+
+    # Broker crypto symbols commonly arrive as ADA-USD / SOL-USD. Keep the
+    # human label clean instead of producing ADA-/USD.
+    if "-" in upper:
+        left, right = upper.split("-", 1)
+        if left and right:
+            return f"{left}/{right} OTC"
+
     known_quotes = ("USDT", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD")
     for quote in known_quotes:
         if upper.endswith(quote) and len(upper) > len(quote):
@@ -86,9 +91,6 @@ class TelemetryPocketOptionClient(DirectPocketOptionClient):
                 self.payouts = payouts
                 self.available_assets = available
 
-                # AUTO must scan the complete live OTC universe, not the ten
-                # bootstrap FX pairs. OTC_ASSETS is intentionally a mutable
-                # registry shared by the signal/session engines in this process.
                 from backend.services.pocketoption_otc import OTC_ASSETS
                 for symbol in payouts:
                     if symbol.lower().endswith("_otc"):
