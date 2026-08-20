@@ -92,6 +92,7 @@ def _validate_config(config: dict) -> dict:
 _ORIGINAL_SCAN_STRATEGY = signal_engine.scan_strategy_candidates
 _ORIGINAL_SCAN_BEST = signal_engine.scan_best_candidates
 _ORIGINAL_SESSION_TICK = session_engine.session_tick
+_ORIGINAL_EVENT = session_engine._event
 
 
 async def _scan_strategy_candidates(timeframe: str, assets, strategy: str) -> list[dict]:
@@ -118,9 +119,25 @@ async def _scan_best_candidates(timeframe: str, assets) -> list[dict]:
     return sorted(results, key=lambda item: float(item.get("confidence") or 0), reverse=True)
 
 
+async def _event(session_id, stage, message, payload=None):
+    """Make the session journal explicit about the setup chosen for entry."""
+    if str(stage) == "SIGNAL_FOUND":
+        text = str(message or "")
+        if text.startswith("Найден сигнал "):
+            selected = text[len("Найден сигнал "):].strip()
+            message = f"Из найденных сетапов выбрана лучшая пара: {selected}"
+        elif text:
+            message = f"Выбрана лучшая пара для входа: {text}"
+        data = dict(payload or {})
+        data["selected_best"] = True
+        payload = data
+    await _ORIGINAL_EVENT(session_id, stage, message, payload)
+
+
 # Install once at module import. start_session resolves _validate_config from the
 # session_engine module at call time, so this also covers /api/auto/start.
 session_engine._validate_config = _validate_config
+session_engine._event = _event
 signal_engine.scan_strategy_candidates = _scan_strategy_candidates
 signal_engine.scan_best_candidates = _scan_best_candidates
 
