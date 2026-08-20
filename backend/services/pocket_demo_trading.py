@@ -4,24 +4,26 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pocketoptionapi_async.models import OrderResult, OrderStatus
 
-from backend.services.pocket_direct import DirectPocketOptionClient
+from backend.services.pocket_telemetry import TelemetryPocketOptionClient
 
 
 class DirectDemoTradingClient:
-    """Demo-only Pocket order client using AlphaPulse's proven direct Socket.IO handshake.
+    """Demo-only Pocket order client using AlphaPulse's direct Socket.IO handshake.
 
-    This wrapper intentionally refuses non-demo operation. It sends exactly one
-    openOrder request and requires a broker successopenOrder confirmation; it never
-    assumes a trade was opened after a timeout and never retries an uncertain order.
+    It refuses non-demo operation, exposes read-only balance/payout telemetry, sends
+    exactly one openOrder and requires `successopenOrder`. An uncertain order is
+    never retried, which protects against duplicate broker positions.
     """
 
     def __init__(self, ssid: str):
-        self._client = DirectPocketOptionClient(ssid, is_demo=True)
+        self._client = TelemetryPocketOptionClient(ssid, is_demo=True)
+        self.last_open_payload: Any = None
+        self.last_open_price: float | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -34,6 +36,9 @@ class DirectDemoTradingClient:
     async def disconnect(self) -> None:
         await self._client.disconnect()
 
+    async def account_snapshot(self, listen_seconds: float = 1.2) -> dict:
+        return await self._client.refresh_telemetry(listen_seconds=listen_seconds)
+
     @staticmethod
     def _error_text(payload: Any) -> str:
         if isinstance(payload, dict):
@@ -44,22 +49,38 @@ class DirectDemoTradingClient:
         return "Pocket Option rejected demo order"
 
     @staticmethod
-    def _order_id(payload: Any, fallback: str) -> str:
-        candidates: list[Any] = []
+    def _nested_dicts(payload: Any) -> list[dict]:
+        rows: list[dict] = []
         if isinstance(payload, dict):
-            candidates.append(payload)
+            rows.append(payload)
             for key in ("deal", "data", "order"):
                 nested = payload.get(key)
                 if isinstance(nested, dict):
-                    candidates.append(nested)
+                    rows.append(nested)
         elif isinstance(payload, list):
-            candidates.extend(row for row in payload if isinstance(row, dict))
-        for row in candidates:
+            rows.extend(row for row in payload if isinstance(row, dict))
+        return rows
+
+    @classmethod
+    def _order_id(cls, payload: Any, fallback: str) -> str:
+        for row in cls._nested_dicts(payload):
             for key in ("id", "uuid", "dealId", "deal_id", "orderId", "order_id", "ticket"):
                 value = row.get(key)
                 if value not in (None, ""):
                     return str(value)
         return fallback
+
+    @classmethod
+    def _open_price(cls, payload: Any) -> float | None:
+        for row in cls._nested_dicts(payload):
+            for key in ("openPrice", "open_price", "price", "entryPrice", "entry_price"):
+                try:
+                    value = float(row.get(key))
+                    if value > 0:
+                        return value
+                except Exception:
+                    continue
+        return None
 
     async def place_order(self, *, asset: str, amount: float, direction, duration: int) -> OrderResult:
         if not self._client.is_demo:
@@ -91,7 +112,7 @@ class DirectDemoTradingClient:
                 "time": int(duration),
             },
         ]
-        placed_at = datetime.now()
+        placed_at = datetime.now(timezone.utc)
         deadline = time.monotonic() + 12.0
 
         async with self._client._lock:
@@ -108,6 +129,8 @@ class DirectDemoTradingClient:
                 if event == "failopenOrder":
                     raise RuntimeError(self._error_text(payload))
                 if event == "successopenOrder":
+                    self.last_open_payload = payload
+                    self.last_open_price = self._open_price(payload)
                     return OrderResult(
                         order_id=self._order_id(payload, request_id),
                         asset=str(asset),
@@ -120,7 +143,4 @@ class DirectDemoTradingClient:
                         error_message=None,
                     )
 
-        # Important: never retry an order when the broker response is uncertain.
-        # The scanner may publish another signal later, but this signal remains
-        # failed/unknown rather than risking a duplicate order.
         raise RuntimeError("Pocket Option did not confirm demo order")

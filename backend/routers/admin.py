@@ -9,8 +9,10 @@ from sqlalchemy import desc, func, select
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal, utcnow
 from backend.routers.signals import out, save_candidate
 from backend.services.auto_trade import (
+    MIN_AUTO_PAYOUT,
     execute_confirmed_signal,
     get_auto_trade_control,
+    get_demo_account_snapshot,
     latest_execution,
     maybe_execute_signal,
     serialize_auto_trade,
@@ -33,6 +35,7 @@ from backend.services.trade_mode import (
     set_execution_mode,
     set_trade_account_mode,
 )
+from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
@@ -82,11 +85,8 @@ async def _scan_and_publish(*, vip: bool) -> dict:
                 last_scan_at=now,
             )
         return {
-            "status": "NO_SIGNAL",
-            "vip": vip,
-            "strategy": control.selected_strategy,
-            "timeframe": control.selected_timeframe,
-            "threshold": threshold,
+            "status": "NO_SIGNAL", "vip": vip, "strategy": control.selected_strategy,
+            "timeframe": control.selected_timeframe, "threshold": threshold,
             "auto_trade": {"status": "NO_SIGNAL"},
         }
 
@@ -110,14 +110,9 @@ async def _scan_and_publish(*, vip: bool) -> dict:
         )
     else:
         await update_control(last_scan_at=now)
-
     return {
-        "status": "SIGNAL",
-        "vip": bool(signal.get("is_vip")),
-        "duplicate": duplicate,
-        "signal": signal,
-        "auto_trade": trade,
-        **notification,
+        "status": "SIGNAL", "vip": bool(signal.get("is_vip")), "duplicate": duplicate,
+        "signal": signal, "auto_trade": trade, **notification,
     }
 
 
@@ -137,8 +132,14 @@ async def _start_hunt(*, vip: bool) -> dict:
 
     result = await _scan_and_publish(vip=vip)
     if result.get("status") == "SIGNAL" and not result.get("duplicate"):
-        await update_control(last_vip_status=HUNT_FOUND, last_scan_at=utcnow())
-        result["hunt"] = {"active": False, "kind": "vip" if vip else "regular", "status": HUNT_FOUND}
+        auto = await get_auto_trade_control()
+        auto_active = bool(auto and auto.enabled and await get_execution_mode() == "auto")
+        await update_control(last_vip_status=hunt_status if auto_active else HUNT_FOUND, last_scan_at=utcnow())
+        result["hunt"] = {
+            "active": auto_active,
+            "kind": "vip" if vip else "regular",
+            "status": hunt_status if auto_active else HUNT_FOUND,
+        }
         return result
 
     now = utcnow()
@@ -147,11 +148,8 @@ async def _start_hunt(*, vip: bool) -> dict:
         keep["next_vip_at"] = now
     await update_control(**keep)
     return {
-        "status": "SEARCHING",
-        "vip": vip,
-        "strategy": control.selected_strategy,
-        "timeframe": control.selected_timeframe,
-        "threshold": VIP_CONFIDENCE if vip else REGULAR_CONFIDENCE,
+        "status": "SEARCHING", "vip": vip, "strategy": control.selected_strategy,
+        "timeframe": control.selected_timeframe, "threshold": VIP_CONFIDENCE if vip else REGULAR_CONFIDENCE,
         "hunt": {"active": True, "kind": "vip" if vip else "regular", "status": hunt_status},
         "auto_trade": {"status": "WAITING_FOR_SIGNAL"},
     }
@@ -163,46 +161,53 @@ async def _state_payload() -> dict:
     market = await market_data.health()
     account_mode = await get_trade_account_mode()
     execution_mode = await get_execution_mode()
+    runtime = await get_trade_runtime()
     async with AsyncSessionLocal() as db:
-        latest = (
-            await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(1))
-        ).scalar_one_or_none()
-        open_positions = int(
-            (
-                await db.execute(
-                    select(func.count()).select_from(PaperPosition).where(PaperPosition.status == "OPEN")
-                )
-            ).scalar_one()
-            or 0
-        )
+        latest = (await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(1))).scalar_one_or_none()
+        open_positions = int((await db.execute(
+            select(func.count()).select_from(PaperPosition).where(PaperPosition.status == "OPEN")
+        )).scalar_one() or 0)
+
     payload = serialize_control(control)
     payload.update(serialize_auto_trade(auto_control))
     connected_account = "demo" if trading_is_demo() else "real"
     hunt_status = str(control.last_vip_status or "") if control else ""
-    payload.update(
-        {
-            "market": market,
-            "open_positions": open_positions,
-            "latest_signal": out(latest) if latest else None,
-            "latest_execution": await latest_execution(),
-            "trade_account": connected_account,
-            "trade_account_mode": account_mode,
-            "account_matches_mode": connected_account == account_mode,
-            "execution_mode": execution_mode,
-            "regular_confidence": REGULAR_CONFIDENCE,
-            "vip_confidence": VIP_CONFIDENCE,
-            "hunt": {
-                "active": hunt_status in {HUNT_REGULAR, HUNT_VIP},
-                "kind": "vip" if hunt_status == HUNT_VIP else ("regular" if hunt_status == HUNT_REGULAR else None),
-                "status": hunt_status or None,
-                "last_scan_at": control.last_scan_at.isoformat() + "Z" if control and control.last_scan_at else None,
-            },
-        }
-    )
+
+    snapshot = {}
+    if connected_account == "demo":
+        try:
+            snapshot = await get_demo_account_snapshot(max_age=12)
+        except Exception:
+            snapshot = {}
+    payouts = snapshot.get("payouts", {}) or {}
+    otc_payouts = {asset: payouts.get(asset) for asset in OTC_ASSETS if payouts.get(asset) is not None}
+    balance = snapshot.get("balance") if snapshot.get("balance") is not None else runtime.get("balance")
+
+    payload.update({
+        "market": market,
+        "open_positions": open_positions,
+        "latest_signal": out(latest) if latest else None,
+        "latest_execution": await latest_execution(),
+        "trade_account": connected_account,
+        "trade_account_mode": account_mode,
+        "account_matches_mode": connected_account == account_mode,
+        "execution_mode": execution_mode,
+        "regular_confidence": REGULAR_CONFIDENCE,
+        "vip_confidence": VIP_CONFIDENCE,
+        "min_auto_payout": MIN_AUTO_PAYOUT,
+        "pocket_balance": balance,
+        "pocket_balance_is_demo": snapshot.get("balance_is_demo", runtime.get("balance_is_demo")),
+        "payouts": otc_payouts,
+        "auto_runtime": runtime,
+        "hunt": {
+            "active": hunt_status in {HUNT_REGULAR, HUNT_VIP},
+            "kind": "vip" if hunt_status == HUNT_VIP else ("regular" if hunt_status == HUNT_REGULAR else None),
+            "status": hunt_status or None,
+            "last_scan_at": control.last_scan_at.isoformat() + "Z" if control and control.last_scan_at else None,
+        },
+    })
     payload["vip_seconds_remaining"] = (
-        max(0, int((control.next_vip_at - utcnow()).total_seconds()))
-        if control and control.next_vip_at
-        else None
+        max(0, int((control.next_vip_at - utcnow()).total_seconds())) if control and control.next_vip_at else None
     )
     return payload
 
@@ -224,6 +229,7 @@ async def patch_state(data: ControlPatch, _: TelegramMiniAppUser = Depends(admin
     if "trade_amount" in changes and not (1.0 <= float(changes["trade_amount"]) <= 50000.0):
         raise HTTPException(400, "Trade amount must be between 1 and 50000")
 
+    requested_auto = changes.get("auto_trade_enabled")
     trade_account_mode = changes.pop("trade_account_mode", None)
     if trade_account_mode is not None:
         try:
@@ -231,7 +237,18 @@ async def patch_state(data: ControlPatch, _: TelegramMiniAppUser = Depends(admin
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    selected_account = await get_trade_account_mode()
     execution_mode = changes.pop("execution_mode", None)
+    if requested_auto is True:
+        if selected_account != "demo":
+            raise HTTPException(400, "AUTO broker execution is available only for DEMO account")
+        execution_mode = "auto"
+        changes["auto_trade_regular"] = True
+        changes["auto_trade_vip"] = True
+        changes["regular_enabled"] = True
+    elif requested_auto is False and execution_mode is None:
+        execution_mode = "confirm"
+
     if execution_mode is not None:
         try:
             await set_execution_mode(execution_mode)
@@ -253,6 +270,24 @@ async def patch_state(data: ControlPatch, _: TelegramMiniAppUser = Depends(admin
             await update_auto_trade_control(**auto_changes)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    if requested_auto is True:
+        now = utcnow()
+        await update_control(last_vip_status=HUNT_REGULAR, regular_enabled=True, last_scan_at=now)
+        try:
+            snapshot = await get_demo_account_snapshot(force=True)
+        except Exception:
+            snapshot = {}
+        await update_trade_runtime(
+            stage="SCANNING", pending_signal_id=None,
+            balance=snapshot.get("balance"), balance_is_demo=snapshot.get("balance_is_demo"),
+            min_payout=MIN_AUTO_PAYOUT,
+            message=f"AUTO включён · сканирую пары с выплатой ≥{MIN_AUTO_PAYOUT:g}%",
+        )
+    elif requested_auto is False:
+        await update_control(last_vip_status="HUNT_STOPPED", last_scan_at=utcnow())
+        await reset_trade_runtime("IDLE", "Автоторговля выключена")
+
     return await _state_payload()
 
 
@@ -268,7 +303,10 @@ async def vip_now(_: TelegramMiniAppUser = Depends(admin_user)):
 
 @router.post("/hunt-stop")
 async def hunt_stop(_: TelegramMiniAppUser = Depends(admin_user)):
+    await update_auto_trade_control(enabled=False)
+    await set_execution_mode("confirm")
     await update_control(last_vip_status="HUNT_STOPPED", last_scan_at=utcnow())
+    await reset_trade_runtime("IDLE", "Поиск остановлен")
     return {"status": "STOPPED"}
 
 
@@ -291,17 +329,14 @@ async def diagnostics(_: TelegramMiniAppUser = Depends(admin_user)):
     return {
         "market": state.get("market"),
         "scanner": {
-            "last_scan_at": state.get("last_scan_at"),
-            "hunt": state.get("hunt"),
-            "regular_enabled": state.get("regular_enabled"),
-            "vip_enabled": state.get("vip_enabled"),
+            "last_scan_at": state.get("last_scan_at"), "hunt": state.get("hunt"),
+            "regular_enabled": state.get("regular_enabled"), "vip_enabled": state.get("vip_enabled"),
         },
         "trading": {
-            "enabled": state.get("auto_trade_enabled"),
-            "execution_mode": state.get("execution_mode"),
-            "selected_account": state.get("trade_account_mode"),
-            "connected_account": state.get("trade_account"),
-            "account_matches_mode": state.get("account_matches_mode"),
+            "enabled": state.get("auto_trade_enabled"), "execution_mode": state.get("execution_mode"),
+            "selected_account": state.get("trade_account_mode"), "connected_account": state.get("trade_account"),
+            "account_matches_mode": state.get("account_matches_mode"), "balance": state.get("pocket_balance"),
+            "min_auto_payout": state.get("min_auto_payout"), "runtime": state.get("auto_runtime"),
             "latest_execution": state.get("latest_execution"),
         },
     }

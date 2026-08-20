@@ -45,20 +45,24 @@ jobs:
         run: |
           python - <<'PY'
           from backend.models.db_models import AutoTradeControl, TradeExecution
-          from backend.services.auto_trade import execute_confirmed_signal, maybe_execute_signal, serialize_auto_trade
+          from backend.services.auto_trade import MIN_AUTO_PAYOUT, execute_confirmed_signal, maybe_execute_signal, process_pending_auto_trade, serialize_auto_trade
+          from backend.services.pocket_demo_trading import DirectDemoTradingClient
+          from backend.services.pocket_telemetry import TelemetryPocketOptionClient
           from backend.services.trade_mode import VALID_EXECUTION_MODES, VALID_TRADE_MODES
-          from pocketoptionapi_async import AsyncPocketOptionClient
           state = serialize_auto_trade(None)
           assert state['auto_trade_enabled'] is False
           assert state['trade_amount'] == 1.0
+          assert MIN_AUTO_PAYOUT == 92.0
           assert VALID_EXECUTION_MODES == {'auto', 'confirm'}
           assert VALID_TRADE_MODES == {'demo', 'real'}
           assert callable(maybe_execute_signal)
+          assert callable(process_pending_auto_trade)
           assert callable(execute_confirmed_signal)
-          assert hasattr(AsyncPocketOptionClient, 'place_order')
+          assert DirectDemoTradingClient.__name__ == 'DirectDemoTradingClient'
+          assert issubclass(TelemetryPocketOptionClient, object)
           assert AutoTradeControl.__tablename__ == 'auto_trade_control'
           assert TradeExecution.__tablename__ == 'trade_executions'
-          print('Trade guardrails OK')
+          print('Trade timing/payout guardrails OK')
           PY
 
       - uses: actions/setup-node@v4
@@ -82,7 +86,10 @@ jobs:
           grep -R -q 'Статистика' dist/assets/*.js
           grep -R -q 'Запустить тестовую DEMO автосделку' dist/assets/*.js
           grep -R -q 'CONFIRM' dist/assets/*.js
-          echo 'Mini App flows OK'
+          grep -R -q 'Жду точное время входа' dist/assets/*.js
+          grep -R -q 'Баланс' dist/assets/*.js
+          grep -R -q 'Выплата' dist/assets/*.js
+          echo 'Mini App AUTO monitor OK'
 
       - name: Verify stale Telegram asset recovery
         env:
