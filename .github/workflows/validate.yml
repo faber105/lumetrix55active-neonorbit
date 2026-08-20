@@ -39,6 +39,8 @@ jobs:
           from api.main import app
           assert app.title == 'AlphaPulse API'
           assert app.version == '3.0'
+          paths = {route.path for route in app.routes}
+          assert '/api/auto/tick' in paths
           print('FastAPI 3.0 import OK')
           PY
 
@@ -50,6 +52,7 @@ jobs:
           python - <<'PY'
           from backend.services.auto_trade import MIN_AUTO_PAYOUT
           from backend.services.pocketoption_otc import TF_SECONDS
+          from backend.services.session_driver import TICK_MIN_INTERVAL_SECONDS, drive_session_tick
           from backend.services.session_engine import (
               AUTO_STRATEGIES,
               COUNT_TIMEFRAMES,
@@ -62,6 +65,8 @@ jobs:
           from backend.services.strategies import SMART_STRATEGIES, STRATEGIES
 
           assert signal_engine is not None
+          assert callable(drive_session_tick)
+          assert 2.0 <= TICK_MIN_INTERVAL_SECONDS <= 5.0
           assert tuple(AUTO_STRATEGIES) == ('trend_pulse', 'range_reversal', 'volatility_breakout')
           assert tuple(SMART_STRATEGIES) == (
               'trend_pulse', 'range_reversal', 'volatility_breakout',
@@ -87,8 +92,6 @@ jobs:
           })
           assert profit['timeframe'] == '5m' and profit['max_failed_series'] == 2
 
-          # Recovery amount must cover accumulated loss plus the base stake's
-          # expected profit at the current payout, rather than blindly using x2.
           recovery = _next_amount({
               'base_amount': 1.0,
               'current_level': 1,
