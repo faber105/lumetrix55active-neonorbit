@@ -12,10 +12,10 @@ from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.multi_strategy import preload_cycle, session_tick
 
-# The Mini App polls active AUTO state roughly every 750 ms. Keep the DB claim
-# interval aligned with that cadence so the very first poll after Pocket reports
-# a CLOSED deal can settle it and immediately continue into the next market scan.
+# This remains only a lightweight cadence throttle. Real mutual exclusion is
+# provided by the PostgreSQL advisory lock held for the whole trading tick.
 TICK_MIN_INTERVAL_SECONDS = 0.7
+_ADVISORY_LOCK_BASE = 918_420_000_000
 
 
 def _display_asset(asset: str) -> str:
@@ -111,28 +111,59 @@ async def _reset_preload_after_open(session_id: int) -> None:
 
 
 async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_SECONDS) -> dict:
-    session_id = await claim_session_tick(min_interval_seconds)
-    if session_id is None:
-        return {"status": "THROTTLED_OR_IDLE"}
+    """Run exactly one AUTO engine iteration at a time across all Vercel workers.
 
-    universe = await _refresh_live_otc_universe()
-    preload = None
-    try:
-        preload = await preload_cycle()
-    except Exception as exc:
-        preload = {"status": "PRELOAD_ERROR", "error": type(exc).__name__, "block": False}
+    The previous timestamp-only throttle allowed a second serverless invocation to
+    start while the first market scan was still running. That stale invocation
+    could emit SIGNAL_FOUND after another invocation had already opened a trade.
+    A PostgreSQL advisory lock is connection-scoped, so it safely serializes ticks
+    even when they execute in different Vercel instances.
+    """
+    tid = admin_id()
+    if tid <= 0:
+        return {"status": "IDLE"}
 
-    if preload and preload.get("block"):
-        result = dict(preload)
-        if preload.get("status") == "OPEN" and preload.get("preloaded"):
-            await _reset_preload_after_open(session_id)
-    else:
-        result = await session_tick()
+    lock_key = _ADVISORY_LOCK_BASE + int(tid)
+    async with AsyncSessionLocal() as lock_db:
+        locked = bool((await lock_db.execute(
+            text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": lock_key},
+        )).scalar())
+        if not locked:
+            return {"status": "BUSY", "driver": "postgres-advisory-lock"}
 
-    if isinstance(result, dict):
-        result.setdefault("session_id", session_id)
-        result.setdefault("driver", "atomic-db-throttle")
-        result.setdefault("otc_universe", universe)
-        if preload:
-            result.setdefault("preload", preload)
-    return result
+        try:
+            session_id = await claim_session_tick(min_interval_seconds)
+            if session_id is None:
+                return {"status": "THROTTLED_OR_IDLE", "driver": "postgres-advisory-lock"}
+
+            universe = await _refresh_live_otc_universe()
+            preload = None
+            try:
+                preload = await preload_cycle()
+            except Exception as exc:
+                preload = {"status": "PRELOAD_ERROR", "error": type(exc).__name__, "block": False}
+
+            if preload and preload.get("block"):
+                result = dict(preload)
+                if preload.get("status") == "OPEN" and preload.get("preloaded"):
+                    await _reset_preload_after_open(session_id)
+            else:
+                result = await session_tick()
+
+            if isinstance(result, dict):
+                result.setdefault("session_id", session_id)
+                result.setdefault("driver", "postgres-advisory-lock")
+                result.setdefault("otc_universe", universe)
+                if preload:
+                    result.setdefault("preload", preload)
+            return result
+        finally:
+            try:
+                await lock_db.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": lock_key},
+                )
+                await lock_db.commit()
+            except Exception:
+                pass
