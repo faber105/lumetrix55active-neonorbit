@@ -34,7 +34,7 @@ def split_strategy_key(value: object) -> list[str]:
 
 def _execution_strategies(selected: Iterable[str]) -> tuple[str, ...]:
     items = tuple(dict.fromkeys(str(item) for item in selected if item))
-    if "smart_confluence" in items:
+    if "smart_confluence" in items or "mixed_smart" in items:
         return tuple(SMART_EXECUTION_STRATEGIES)
     return items
 
@@ -74,7 +74,8 @@ def _validate_config(config: dict) -> dict:
     if mode == "profit":
         target = round(float(config.get("target_profit") or 1), 2)
         failed = int(config.get("max_failed_series") or 1)
-        if any(strategy not in session_engine.PROFIT_STRATEGIES for strategy in selected):
+        allowed_profit = set(session_engine.PROFIT_STRATEGIES) | {"mixed_smart"}
+        if any(strategy not in allowed_profit for strategy in selected):
             raise ValueError("Unknown profit-mode strategy")
         if target <= 0:
             raise ValueError("Target profit must be positive")
@@ -103,7 +104,7 @@ _ORIGINAL_EVENT = session_engine._event
 
 async def _scan_strategy_candidates(timeframe: str, assets, strategy: str) -> list[dict]:
     selected = split_strategy_key(strategy)
-    if len(selected) == 1 and selected[0] != "smart_confluence":
+    if len(selected) == 1 and selected[0] not in {"smart_confluence", "mixed_smart"}:
         return await _ORIGINAL_SCAN_STRATEGY(timeframe, assets, selected[0])
 
     execution = _execution_strategies(selected)
