@@ -103,6 +103,12 @@ img,svg,canvas{max-width:100%}
   display:none !important;
 }
 
+/* Keep the session journal fully scrollable above the fixed Telegram tab bar. */
+.journal{
+  margin-bottom:calc(112px + max(env(safe-area-inset-bottom),var(--ap-content-safe-bottom))) !important;
+  scroll-margin-bottom:calc(112px + max(env(safe-area-inset-bottom),var(--ap-content-safe-bottom)));
+}
+
 .bottom-nav{
   position:absolute !important;
   left:10px !important;
