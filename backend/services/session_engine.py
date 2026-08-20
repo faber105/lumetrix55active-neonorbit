@@ -495,7 +495,6 @@ async def session_tick():
     label = "Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy)
 
     telemetry = {
-        "stage": "SCANNING",
         "strategy": strategy,
         "timeframe": timeframe,
         "balance": balance,
@@ -509,7 +508,7 @@ async def session_tick():
     if not confirmed:
         message = f"Проанализировано {len(all_assets)}/{len(all_assets)} пар · {label} · подтверждённого сетапа ≥{threshold:.0f}% пока нет"
         await _update(int(session["id"]), stage="SCANNING", last_message=message)
-        await update_trade_runtime(**telemetry, message=message)
+        await update_trade_runtime(**telemetry, stage="SCANNING", message=message)
         return {
             "status": "SCANNING", "scanned": len(all_assets), "eligible": len(eligible_assets),
             "candidates": 0, "threshold": threshold,
@@ -537,7 +536,7 @@ async def session_tick():
     if signal is None:
         message = f"Проанализировано {len(all_assets)} пар · все текущие подходящие сетапы уже обработаны · жду новую точку"
         await _update(int(session["id"]), stage="SCANNING", last_message=message)
-        await update_trade_runtime(**telemetry, message=message)
+        await update_trade_runtime(**telemetry, stage="SCANNING", message=message)
         return {"status": "DUPLICATE", "scanned": len(all_assets), "eligible": len(eligible_assets)}
 
     if payout is None or payout < MIN_AUTO_PAYOUT:
