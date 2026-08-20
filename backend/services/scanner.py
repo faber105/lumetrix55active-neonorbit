@@ -13,7 +13,7 @@ from backend.services.control import get_control, update_control
 from backend.services.pocketoption_otc import MarketDataUnavailable, OTC_ASSETS, market_data
 from backend.services.positions import reconcile_positions, sync_broker_positions
 from backend.services.reconciler import reconcile_pending
-from backend.services.session_engine import session_tick
+from backend.services.session_driver import drive_session_tick
 from backend.services.signal_engine import signal_engine
 from backend.services.signal_store import save_signal
 from backend.services.trade_runtime import update_trade_runtime
@@ -170,7 +170,7 @@ async def scan_tick(bot: Bot) -> dict:
     )
 
     try:
-        auto = await session_tick()
+        auto = await drive_session_tick()
     except (MarketDataUnavailable, RuntimeError, asyncio.TimeoutError) as exc:
         message = "Pocket временно недоступен · сохраняю сессию и переподключусь автоматически"
         await update_trade_runtime(stage="WAIT_MARKET", message=message)
