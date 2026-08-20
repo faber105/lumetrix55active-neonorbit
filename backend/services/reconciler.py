@@ -4,10 +4,11 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import desc, select, update
 
 from backend.models.db_models import (
     AsyncSessionLocal,
+    PaperPosition,
     Signal,
     SignalDirection,
     SignalResult,
@@ -67,7 +68,6 @@ async def _train_once(signal_id: int, strategy: str, features_json: str, won: bo
         await db.commit()
     if claimed is None:
         return False
-
     try:
         await get_model(strategy).learn(json.loads(features_json), won)
         return True
@@ -84,12 +84,6 @@ async def _train_once(signal_id: int, strategy: str, features_json: str, won: bo
 
 
 async def _close_irrecoverable_stale(signal_id: int) -> bool:
-    """Close old PENDING history as DRAW when Pocket no longer exposes its candle.
-
-    The rolling broker history is finite. Retrying an hours-old candle on every
-    five-second scanner tick cannot recover the data and needlessly delays AUTO.
-    DRAW is intentionally neutral and never trains the WIN/LOSS model.
-    """
     current = _now()
     async with AsyncSessionLocal() as db:
         signal = (
@@ -99,9 +93,7 @@ async def _close_irrecoverable_stale(signal_id: int) -> bool:
                 .with_for_update(skip_locked=True)
             )
         ).scalar_one_or_none()
-        if signal is None:
-            return False
-        if signal.expiry_time > current - STALE_MARKET_DATA_AGE:
+        if signal is None or signal.expiry_time > current - STALE_MARKET_DATA_AGE:
             return False
         signal.result = SignalResult.DRAW
         signal.closed_at = current
@@ -112,21 +104,11 @@ async def _close_irrecoverable_stale(signal_id: int) -> bool:
 
 async def reconcile_pending(limit: int = 100) -> dict:
     async with AsyncSessionLocal() as db:
-        ids = list(
-            (
-                await db.execute(
-                    select(Signal.id)
-                    .where(Signal.result == SignalResult.PENDING)
-                    .order_by(Signal.entry_time)
-                    .limit(limit)
-                )
-            ).scalars().all()
-        )
+        ids = list((await db.execute(
+            select(Signal.id).where(Signal.result == SignalResult.PENDING).order_by(Signal.entry_time).limit(limit)
+        )).scalars().all())
 
-    entered = 0
-    closed = 0
-    trained = 0
-    stale_closed = 0
+    entered = closed = trained = stale_closed = 0
     errors: list[dict] = []
 
     for signal_id in ids:
@@ -145,27 +127,25 @@ async def reconcile_pending(limit: int = 100) -> dict:
                         continue
 
                     current = _now()
-                    if signal.entry_price is None and signal.entry_time <= current:
-                        signal.entry_price = await market_data.boundary_price(signal.asset, signal.entry_time)
-                        entered += 1
-
-                    if signal.expiry_time <= current:
-                        candle_open, candle_close = await exact_signal_candle_prices(
-                            signal.asset,
-                            signal.timeframe,
-                            signal.entry_time,
+                    auto_position = (
+                        await db.execute(
+                            select(PaperPosition)
+                            .where(PaperPosition.signal_id == signal.id, PaperPosition.source == "auto")
+                            .order_by(desc(PaperPosition.created_at))
+                            .limit(1)
                         )
-                        signal.entry_price = candle_open
-                        signal.close_price = candle_close
-                        delta = float(candle_close) - float(candle_open)
-                        epsilon = max(abs(float(candle_open)) * 1e-10, 1e-10)
-                        if abs(delta) <= epsilon:
-                            signal.result = SignalResult.DRAW
-                        elif signal.direction == SignalDirection.BUY:
-                            signal.result = SignalResult.WIN if delta > 0 else SignalResult.LOSS
-                        else:
-                            signal.result = SignalResult.WIN if delta < 0 else SignalResult.LOSS
-                        signal.closed_at = current
+                    ).scalar_one_or_none()
+
+                    # Executed AUTO signals must use the actual Pocket deal result.
+                    # Never train or score an AUTO trade from a separately fetched
+                    # candle, because its quote can differ from the broker option.
+                    if auto_position is not None:
+                        if auto_position.status != "CLOSED" or auto_position.result == SignalResult.PENDING:
+                            continue
+                        signal.entry_price = auto_position.entry_price
+                        signal.close_price = auto_position.close_price
+                        signal.result = auto_position.result
+                        signal.closed_at = auto_position.closed_at or current
                         closed += 1
                         closed_snapshot = {
                             "id": signal.id,
@@ -173,15 +153,39 @@ async def reconcile_pending(limit: int = 100) -> dict:
                             "features_json": signal.features_json,
                             "result": signal.result,
                         }
+                    else:
+                        if signal.entry_price is None and signal.entry_time <= current:
+                            signal.entry_price = await market_data.boundary_price(signal.asset, signal.entry_time)
+                            entered += 1
+                        if signal.expiry_time <= current:
+                            candle_open, candle_close = await exact_signal_candle_prices(
+                                signal.asset, signal.timeframe, signal.entry_time
+                            )
+                            signal.entry_price = candle_open
+                            signal.close_price = candle_close
+                            delta = float(candle_close) - float(candle_open)
+                            epsilon = max(abs(float(candle_open)) * 1e-10, 1e-10)
+                            if abs(delta) <= epsilon:
+                                signal.result = SignalResult.DRAW
+                            elif signal.direction == SignalDirection.BUY:
+                                signal.result = SignalResult.WIN if delta > 0 else SignalResult.LOSS
+                            else:
+                                signal.result = SignalResult.WIN if delta < 0 else SignalResult.LOSS
+                            signal.closed_at = current
+                            closed += 1
+                            closed_snapshot = {
+                                "id": signal.id,
+                                "strategy": signal.strategy,
+                                "features_json": signal.features_json,
+                                "result": signal.result,
+                            }
 
             if closed_snapshot is not None:
                 result = closed_snapshot["result"]
                 if result in {SignalResult.WIN, SignalResult.LOSS}:
                     if await _train_once(
-                        closed_snapshot["id"],
-                        closed_snapshot["strategy"],
-                        closed_snapshot["features_json"],
-                        result == SignalResult.WIN,
+                        closed_snapshot["id"], closed_snapshot["strategy"],
+                        closed_snapshot["features_json"], result == SignalResult.WIN,
                     ):
                         trained += 1
                         await _update_performance(closed_snapshot["strategy"], result)
@@ -200,10 +204,6 @@ async def reconcile_pending(limit: int = 100) -> dict:
             errors.append({"id": signal_id, "type": type(exc).__name__})
 
     return {
-        "entered": entered,
-        "closed": closed,
-        "stale_closed": stale_closed,
-        "trained": trained,
-        "pending_checked": len(ids),
-        "errors": errors,
+        "entered": entered, "closed": closed, "stale_closed": stale_closed,
+        "trained": trained, "pending_checked": len(ids), "errors": errors,
     }
