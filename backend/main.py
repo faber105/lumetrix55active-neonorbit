@@ -33,6 +33,7 @@ def _deployment_base_url() -> str:
 BACKEND_URL = _deployment_base_url()
 if BACKEND_URL:
     os.environ['BACKEND_URL'] = BACKEND_URL
+    os.environ['MINI_APP_URL'] = BACKEND_URL
 
 logging.basicConfig(level=logging.INFO)
 logger=logging.getLogger('alphapulse')
@@ -47,6 +48,30 @@ else:
     def webhook_secret():return ''
 
 
+async def repair_telegram_webhook() -> dict:
+    if bot is None:
+        raise HTTPException(503,'Telegram is not configured in this deployment')
+    if not BACKEND_URL.startswith('https://'):
+        raise HTTPException(503,'Production backend URL is not configured')
+    target=f'{BACKEND_URL}/telegram/webhook'
+    await bot.set_webhook(
+        url=target,
+        secret_token=webhook_secret(),
+        drop_pending_updates=False,
+    )
+    info=await bot.get_webhook_info()
+    actual=str(info.url or '')
+    ok=actual==target
+    logger.info('Telegram webhook repair target=%s actual=%s ok=%s',target,actual,ok)
+    return {
+        'ok':ok,
+        'target':target,
+        'actual':actual,
+        'pending_update_count':int(info.pending_update_count or 0),
+        'last_error_message':str(info.last_error_message or '')[:300] or None,
+    }
+
+
 @asynccontextmanager
 async def lifespan(app):
     del app
@@ -58,16 +83,8 @@ async def lifespan(app):
         except Exception:logger.exception('AUTO preload schema bootstrap failed')
     else:logger.warning('DATABASE_URL is not configured; database routes are disabled in this deployment')
     try:
-        # Always refresh Telegram's webhook on startup. The production URL is
-        # discovered from Vercel automatically, so moving accounts/projects does
-        # not require another source-code edit.
         if bot is not None and BACKEND_URL:
-            await bot.set_webhook(
-                url=f'{BACKEND_URL}/telegram/webhook',
-                secret_token=webhook_secret(),
-                drop_pending_updates=False,
-            )
-            logger.info('Telegram webhook force-refreshed to %s', BACKEND_URL)
+            await repair_telegram_webhook()
         else:
             await configure_webhook()
     except Exception:
@@ -77,7 +94,7 @@ async def lifespan(app):
     except Exception:pass
 
 
-app=FastAPI(title='AlphaPulse API',version='3.1',lifespan=lifespan)
+app=FastAPI(title='AlphaPulse API',version='3.2',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
 
 
@@ -108,7 +125,7 @@ app.include_router(websocket.router,prefix='/ws',tags=['websocket'])
 @app.get('/health')
 async def health():
     return {
-        'status':'ok','service':'alphapulsesbot','version':'3.1',
+        'status':'ok','service':'alphapulsesbot','version':'3.2',
         'scanner':'adaptive-timeframe-driver','telegram_configured':TELEGRAM_ENABLED,
         'database_configured':bool(os.getenv('DATABASE_URL','').strip()),
         'backend_url':BACKEND_URL or None,
@@ -120,6 +137,11 @@ async def health():
         },
         'market':await market_data.health(),
     }
+
+
+@app.post('/api/internal/telegram-repair')
+async def internal_telegram_repair():
+    return await repair_telegram_webhook()
 
 
 @app.post('/telegram/webhook')
