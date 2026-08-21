@@ -67,16 +67,19 @@ async def _load_runtime_secrets_from_db() -> None:
                 continue
             if candidate.database != original.database:
                 os.environ["DATABASE_URL"] = candidate.render_as_string(hide_password=False)
+            # Neon is the canonical runtime-secret store. Always prefer these values
+            # over manually copied Vercel env values so a stale/typoed secret cannot
+            # break Telegram or Pocket after an account migration.
             if bot_token:
-                os.environ.setdefault("TELEGRAM_BOT_TOKEN", bot_token)
-                os.environ.setdefault("BOT_TOKEN", bot_token)
+                os.environ["TELEGRAM_BOT_TOKEN"] = bot_token
+                os.environ["BOT_TOKEN"] = bot_token
             if admin_secret:
-                os.environ.setdefault("ADMIN_SECRET", admin_secret)
+                os.environ["ADMIN_SECRET"] = admin_secret
             if admin_id:
-                os.environ.setdefault("ADMIN_ID", admin_id)
-                os.environ.setdefault("ADMIN_TELEGRAM_ID", admin_id)
+                os.environ["ADMIN_ID"] = admin_id
+                os.environ["ADMIN_TELEGRAM_ID"] = admin_id
             if pocket:
-                os.environ.setdefault("POCKET_OPTION_SSID", pocket)
+                os.environ["POCKET_OPTION_SSID"] = pocket
             return
         except (asyncpg.UndefinedTableError, asyncpg.InvalidCatalogNameError) as exc:
             last_error = exc
@@ -88,7 +91,7 @@ async def _load_runtime_secrets_from_db() -> None:
         raise last_error
 
 
-if os.getenv("DATABASE_URL", "").strip() and not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+if os.getenv("DATABASE_URL", "").strip():
     try:
         asyncio.run(_load_runtime_secrets_from_db())
     except Exception as exc:
@@ -98,7 +101,7 @@ production_host = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
 if production_host:
     production_base_url = production_host if production_host.startswith(("http://", "https://")) else f"https://{production_host}"
 else:
-    production_base_url = "https://alphapulse-runtime-staging.vercel.app"
+    production_base_url = "https://lumetrix55active-neonorbit.vercel.app"
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
 os.environ["MINI_APP_URL"] = production_base_url.rstrip("/")
 
