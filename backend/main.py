@@ -53,7 +53,7 @@ async def repair_telegram_webhook() -> dict:
         raise HTTPException(503,'Telegram is not configured in this deployment')
     if not BACKEND_URL.startswith('https://'):
         raise HTTPException(503,'Production backend URL is not configured')
-    target=f'{BACKEND_URL}/telegram/webhook'
+    target=f'{BACKEND_URL}/api/telegram/webhook'
     await bot.set_webhook(
         url=target,
         secret_token=webhook_secret(),
@@ -94,7 +94,7 @@ async def lifespan(app):
     except Exception:pass
 
 
-app=FastAPI(title='AlphaPulse API',version='3.2',lifespan=lifespan)
+app=FastAPI(title='AlphaPulse API',version='3.3',lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
 
 
@@ -122,10 +122,9 @@ app.include_router(admin_stats.router,prefix='/api/admin-stats',tags=['admin-sta
 app.include_router(websocket.router,prefix='/ws',tags=['websocket'])
 
 
-@app.get('/health')
-async def health():
+async def _health_payload():
     return {
-        'status':'ok','service':'alphapulsesbot','version':'3.2',
+        'status':'ok','service':'alphapulsesbot','version':'3.3',
         'scanner':'adaptive-timeframe-driver','telegram_configured':TELEGRAM_ENABLED,
         'database_configured':bool(os.getenv('DATABASE_URL','').strip()),
         'backend_url':BACKEND_URL or None,
@@ -139,17 +138,36 @@ async def health():
     }
 
 
+@app.get('/health')
+async def health():
+    return await _health_payload()
+
+
+@app.get('/api/health')
+async def api_health():
+    return await _health_payload()
+
+
 @app.post('/api/internal/telegram-repair')
 async def internal_telegram_repair():
     return await repair_telegram_webhook()
 
 
-@app.post('/telegram/webhook')
-async def telegram_webhook(payload:dict,x_telegram_bot_api_secret_token:str|None=Header(default=None)):
+async def _telegram_webhook_handler(payload:dict,x_telegram_bot_api_secret_token:str|None):
     if not TELEGRAM_ENABLED:raise HTTPException(503,'Telegram is not configured in this deployment')
     if not valid_secret(x_telegram_bot_api_secret_token):raise HTTPException(403,'Invalid Telegram webhook secret')
     await feed_update(payload)
     return {'ok':True}
+
+
+@app.post('/api/telegram/webhook')
+async def api_telegram_webhook(payload:dict,x_telegram_bot_api_secret_token:str|None=Header(default=None)):
+    return await _telegram_webhook_handler(payload,x_telegram_bot_api_secret_token)
+
+
+@app.post('/telegram/webhook')
+async def telegram_webhook(payload:dict,x_telegram_bot_api_secret_token:str|None=Header(default=None)):
+    return await _telegram_webhook_handler(payload,x_telegram_bot_api_secret_token)
 
 
 async def _verify_scanner(authorization: str | None) -> None:
