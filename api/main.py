@@ -21,6 +21,21 @@ for source in (bootstrap, legacy):
         except Exception:
             pass
 
+# Normalize values copied through the Vercel UI before any third-party library
+# validates them. An accidental trailing newline in a bot token used to crash the
+# whole Python function during import, making even /health unavailable.
+for _key in (
+    "TELEGRAM_BOT_TOKEN",
+    "BOT_TOKEN",
+    "ADMIN_ID",
+    "ADMIN_TELEGRAM_ID",
+    "BACKEND_URL",
+    "PUBLIC_BACKEND_URL",
+    "POCKET_OPTION_SSID",
+):
+    if _key in os.environ:
+        os.environ[_key] = str(os.environ.get(_key) or "").strip()
+
 
 def _asyncpg_kwargs(url):
     return {
@@ -94,37 +109,66 @@ if os.getenv("DATABASE_URL", "").strip() and not os.getenv("TELEGRAM_BOT_TOKEN",
     except Exception as exc:
         print(f"AlphaPulse runtime secret bootstrap failed: {type(exc).__name__}")
 
-production_host = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+production_host = (
+    os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+    or os.getenv("BACKEND_URL", "").strip()
+    or os.getenv("PUBLIC_BACKEND_URL", "").strip()
+)
 if production_host:
     production_base_url = production_host if production_host.startswith(("http://", "https://")) else f"https://{production_host}"
 else:
-    production_base_url = "https://alphapulse-runtime-staging.vercel.app"
+    production_base_url = "https://lumetrix55active-neonorbit.vercel.app"
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
 os.environ["MINI_APP_URL"] = production_base_url.rstrip("/")
 
-# Market data stays read-only. The telemetry subclass additionally records the
-# authenticated Pocket balance and live `updateAssets` payout table; it never has
-# an order method.
-from backend.services import pocketoption_otc as _po_service
-from backend.services.pocket_telemetry import TelemetryPocketOptionClient
+_IMPORT_ERROR: Exception | None = None
 
+try:
+    # Market data stays read-only. The telemetry subclass additionally records the
+    # authenticated Pocket balance and live `updateAssets` payout table; it never has
+    # an order method.
+    from backend.services import pocketoption_otc as _po_service
+    from backend.services.pocket_telemetry import TelemetryPocketOptionClient
 
-def _make_direct_market_client(self):
-    return TelemetryPocketOptionClient(self.ssid, is_demo=self.demo)
+    def _make_direct_market_client(self):
+        return TelemetryPocketOptionClient(self.ssid, is_demo=self.demo)
 
+    _po_service.PocketOptionOTCService._make_client = _make_direct_market_client
 
-_po_service.PocketOptionOTCService._make_client = _make_direct_market_client
+    # Broker execution is still hard-limited to DEMO.
+    from backend.services import auto_trade as _auto_trade
+    from backend.services.pocket_demo_trading import DirectDemoTradingClient
 
-# Broker execution is still hard-limited to DEMO. The wrapper sends one order,
-# requires `successopenOrder`, and does not retry uncertain broker responses.
-from backend.services import auto_trade as _auto_trade
-from backend.services.pocket_demo_trading import DirectDemoTradingClient
+    def _make_direct_demo_trading_client():
+        return DirectDemoTradingClient(_po_service.market_data.ssid)
 
+    _auto_trade._build_trading_client = _make_direct_demo_trading_client
 
-def _make_direct_demo_trading_client():
-    return DirectDemoTradingClient(_po_service.market_data.ssid)
+    from backend.main import app
+except Exception as exc:
+    # Never let Vercel collapse into opaque FUNCTION_INVOCATION_FAILED again.
+    # Keep a tiny diagnostic app alive so /health reveals the failing component
+    # without exposing credentials or environment values.
+    _IMPORT_ERROR = exc
+    import traceback
+    traceback.print_exc()
+    from fastapi import FastAPI
 
+    app = FastAPI(title="AlphaPulse bootstrap diagnostics", version="3.1-recovery")
 
-_auto_trade._build_trading_client = _make_direct_demo_trading_client
+    @app.get("/health")
+    async def recovery_health():
+        return {
+            "status": "bootstrap_error",
+            "service": "alphapulsesbot",
+            "error_type": type(_IMPORT_ERROR).__name__ if _IMPORT_ERROR else None,
+            "error": str(_IMPORT_ERROR)[:500] if _IMPORT_ERROR else None,
+            "telegram_env_present": bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip()),
+            "database_env_present": bool(os.getenv("DATABASE_URL", "").strip()),
+            "pocket_env_present": bool(os.getenv("POCKET_OPTION_SSID", "").strip()),
+            "backend_url": os.getenv("BACKEND_URL") or None,
+        }
 
-from backend.main import app
+    @app.get("/")
+    async def recovery_root():
+        return await recovery_health()
