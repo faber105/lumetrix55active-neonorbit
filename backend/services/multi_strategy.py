@@ -4,7 +4,7 @@ from contextvars import ContextVar
 from typing import Iterable
 
 from backend.services import auto_trade, session_engine
-from backend.services.preload_guard import preload_cycle as _base_preload_cycle
+from backend.services.preload_journal import preload_cycle as _base_preload_cycle
 from backend.services.signal_engine import SMART_EXECUTION_STRATEGIES, signal_engine
 
 _SELECTED_SCAN_STRATEGIES: ContextVar[tuple[str, ...] | None] = ContextVar(
