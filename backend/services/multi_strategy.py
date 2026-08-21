@@ -11,11 +11,11 @@ _SELECTED_SCAN_STRATEGIES: ContextVar[tuple[str, ...] | None] = ContextVar(
     "auto_selected_scan_strategies", default=None
 )
 
-# Serverless/Pocket connection setup can easily consume more than the old 1.5s
-# grace period. Keep a small but practical window so a prepared AUTO entry,
-# especially a martingale recovery entry, is not discarded only because the
-# request reached the broker a couple of seconds after the candle boundary.
-auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 4.0)
+# Serverless/Pocket ticks can occasionally land several seconds after a 5m
+# candle boundary. Keep enough grace so a valid prepared PROFIT entry is not
+# discarded only because one scheduler tick arrived late. This still keeps the
+# entry close to the intended candle open rather than drifting into the candle.
+auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 12.0)
 
 # PROFIT / "к цели" uses the AUTO payout setting as the hard admission gate.
 # Strategy evaluators still decide whether a setup exists and rank candidates by
