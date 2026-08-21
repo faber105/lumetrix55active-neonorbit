@@ -6,6 +6,8 @@ import App from './App.jsx'
 const telegram = window.Telegram?.WebApp
 const rootStyle = document.documentElement.style
 
+document.documentElement.classList.toggle('telegram-miniapp', Boolean(telegram))
+
 const px = (value) => `${Math.max(0, Number(value) || 0)}px`
 
 function syncTelegramViewport() {
@@ -27,6 +29,7 @@ function syncTelegramViewport() {
   rootStyle.setProperty('--ap-content-safe-right', px(contentSafe.right))
   rootStyle.setProperty('--ap-content-safe-bottom', px(contentSafe.bottom))
   rootStyle.setProperty('--ap-content-safe-left', px(contentSafe.left))
+  document.documentElement.classList.toggle('telegram-fullscreen', Boolean(telegram?.isFullscreen))
 }
 
 function requestImmersiveTelegramMode() {
