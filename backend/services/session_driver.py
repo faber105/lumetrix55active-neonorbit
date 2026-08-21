@@ -7,10 +7,16 @@ from sqlalchemy import text
 
 from backend.models.db_models import AsyncSessionLocal, utcnow
 from backend.services.auto_scan_scope import set_auto_scan_scope
-from backend.services.auto_trade import MIN_AUTO_PAYOUT, get_demo_account_snapshot
+from backend.services.auto_trade import (
+    MIN_AUTO_PAYOUT,
+    get_demo_account_snapshot,
+    process_pending_auto_trade,
+)
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.multi_strategy import preload_cycle, session_tick
+from backend.services.session_engine import _active, _load_signal, _register_open, _update
+from backend.services.trade_runtime import get_trade_runtime
 
 # This remains only a lightweight cadence throttle. Real mutual exclusion is
 # provided by the PostgreSQL advisory lock held for the whole trading tick.
@@ -110,14 +116,59 @@ async def _reset_preload_after_open(session_id: int) -> None:
         pass
 
 
+async def _drive_pending_entry(session: dict) -> dict | None:
+    """Handle a scheduled entry before any market refresh or reconciliation work.
+
+    Exact candle-boundary orders are latency sensitive. Once a signal has already
+    been selected, refreshing the whole OTC universe first can consume the entry
+    window and incorrectly turn a valid setup into MISSED_ENTRY.
+    """
+    signal_id = session.get("pending_signal_id")
+    if not signal_id or session.get("active_position_id"):
+        return None
+
+    pending = await _load_signal(int(signal_id))
+    trade = await process_pending_auto_trade()
+    status = str(trade.get("status") or "")
+
+    if status == "OPEN" and pending:
+        runtime = await get_trade_runtime()
+        amount = float(runtime.get("amount") or session.get("base_amount") or 1.0)
+        await _register_open(
+            session,
+            pending,
+            trade,
+            amount,
+            trade.get("payout") or runtime.get("payout_percent"),
+        )
+        return {"status": "OPEN", "trade": trade, "fast_path": "pending-entry"}
+
+    if status in {"WAIT_ENTRY", "SCHEDULED", "OPENING"}:
+        runtime = await get_trade_runtime()
+        await _update(
+            int(session["id"]),
+            stage=status,
+            last_message=runtime.get("message") or "Жду точное время входа",
+        )
+        trade["fast_path"] = "pending-entry"
+        return trade
+
+    await _update(
+        int(session["id"]),
+        pending_signal_id=None,
+        stage="SCANNING",
+        last_message=f"Вход пропущен: {status or 'UNKNOWN'} · продолжаю анализ всех пар",
+    )
+    trade["fast_path"] = "pending-entry"
+    return trade
+
+
 async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_SECONDS) -> dict:
     """Run exactly one AUTO engine iteration at a time across all Vercel workers.
 
-    The previous timestamp-only throttle allowed a second serverless invocation to
-    start while the first market scan was still running. That stale invocation
-    could emit SIGNAL_FOUND after another invocation had already opened a trade.
-    A PostgreSQL advisory lock is connection-scoped, so it safely serializes ticks
-    even when they execute in different Vercel instances.
+    The PostgreSQL advisory lock serializes ticks across serverless workers. A
+    scheduled pending signal is handled before any full-market work so its exact
+    entry boundary cannot be lost to Pocket snapshot refresh latency.
     """
     tid = admin_id()
     if tid <= 0:
@@ -136,6 +187,16 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
             session_id = await claim_session_tick(min_interval_seconds)
             if session_id is None:
                 return {"status": "THROTTLED_OR_IDLE", "driver": "postgres-advisory-lock"}
+
+            # Critical fast path: a signal already selected for an exact candle
+            # boundary must be serviced before refreshing 100+ OTC instruments.
+            session = await _active()
+            if session and session.get("pending_signal_id") and not session.get("active_position_id"):
+                pending_result = await _drive_pending_entry(session)
+                if pending_result is not None:
+                    pending_result.setdefault("session_id", session_id)
+                    pending_result.setdefault("driver", "postgres-advisory-lock")
+                    return pending_result
 
             universe = await _refresh_live_otc_universe()
             preload = None
