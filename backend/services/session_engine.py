@@ -482,6 +482,19 @@ async def session_tick():
     all_assets = list(OTC_ASSETS.keys())
     eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]
     eligible_payouts = {asset: _payout(snapshot, asset) for asset in eligible_assets}
+    scan_assets = eligible_assets
+    if not scan_assets:
+        message = f"Проверено {len(all_assets)} OTC пар · с payout ≥{MIN_AUTO_PAYOUT:g}% сейчас нет доступных · жду обновления выплат"
+        await _update(int(session["id"]), stage="WAIT_PAYOUT", last_message=message)
+        await update_trade_runtime(
+            stage="WAIT_PAYOUT", message=message, balance=balance,
+            scanned_assets=[], scanned_count=0, eligible_assets=[], eligible_payouts={},
+            min_payout=MIN_AUTO_PAYOUT,
+        )
+        return {
+            "status": "WAIT_PAYOUT", "scanned": 0, "eligible": 0,
+            "discovered": len(all_assets), "min_payout": MIN_AUTO_PAYOUT,
+        }
     strategy = str(session["strategy"])
     timeframe = str(session["timeframe"])
 
@@ -491,14 +504,14 @@ async def session_tick():
     # This avoids waiting for one rare strategy while still requiring confirmation.
     mixed_count = session["mode"] == "count"
     if mixed_count:
-        candidates = await signal_engine.scan_best_candidates(timeframe, all_assets)
+        candidates = await signal_engine.scan_best_candidates(timeframe, scan_assets)
         threshold = COUNT_MIN_CONFIDENCE
         strategy = "smart_confluence"
     elif session["mode"] == "profit" and strategy == "smart_confluence":
-        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)
+        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, scan_assets)
         threshold = PROFIT_MIN_CONFIDENCE
     else:
-        candidates = await signal_engine.scan_strategy_candidates(timeframe, all_assets, strategy)
+        candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)
         threshold = PROFIT_MIN_CONFIDENCE
 
     confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]
@@ -519,28 +532,28 @@ async def session_tick():
         "strategy": strategy,
         "timeframe": timeframe,
         "balance": balance,
-        "scanned_assets": all_assets,
-        "scanned_count": len(all_assets),
+        "scanned_assets": scan_assets,
+        "scanned_count": len(scan_assets),
         "eligible_assets": eligible_assets,
         "eligible_payouts": eligible_payouts,
         "min_payout": MIN_AUTO_PAYOUT,
     }
 
     if not confirmed:
-        message = f"Проанализировано {len(all_assets)}/{len(all_assets)} пар · {label} · подтверждённого сетапа ≥{threshold:.0f}% пока нет"
+        message = f"Проанализировано {len(scan_assets)}/{len(scan_assets)} пар · {label} · подтверждённого сетапа ≥{threshold:.0f}% пока нет"
         await _update(int(session["id"]), stage="SCANNING", last_message=message)
         await update_trade_runtime(**telemetry, stage="SCANNING", message=message)
         return {
-            "status": "SCANNING", "scanned": len(all_assets), "eligible": len(eligible_assets),
+            "status": "SCANNING", "scanned": len(scan_assets), "eligible": len(eligible_assets),
             "candidates": 0, "threshold": threshold,
         }
 
     if not tradable_candidates:
-        message = f"Проанализировано {len(all_assets)} пар · найдено {len(confirmed)} сетапов, но у них payout <{MIN_AUTO_PAYOUT:g}% · продолжаю поиск"
+        message = f"Проанализировано {len(scan_assets)} пар · найдено {len(confirmed)} сетапов, но у них payout <{MIN_AUTO_PAYOUT:g}% · продолжаю поиск"
         await _update(int(session["id"]), stage="WAIT_PAYOUT", last_message=message)
         await update_trade_runtime(**telemetry, stage="WAIT_PAYOUT", message=message)
         return {
-            "status": "WAIT_PAYOUT", "scanned": len(all_assets), "eligible": len(eligible_assets),
+            "status": "WAIT_PAYOUT", "scanned": len(scan_assets), "eligible": len(eligible_assets),
             "candidates": len(confirmed), "min_payout": MIN_AUTO_PAYOUT,
         }
 
@@ -576,10 +589,10 @@ async def session_tick():
         break
 
     if signal is None:
-        message = f"Проанализировано {len(all_assets)} пар · все текущие подходящие сетапы уже обработаны · жду новую точку"
+        message = f"Проанализировано {len(scan_assets)} пар · все текущие подходящие сетапы уже обработаны · жду новую точку"
         await _update(int(session["id"]), stage="SCANNING", last_message=message)
         await update_trade_runtime(**telemetry, stage="SCANNING", message=message)
-        return {"status": "DUPLICATE", "scanned": len(all_assets), "eligible": len(eligible_assets)}
+        return {"status": "DUPLICATE", "scanned": len(scan_assets), "eligible": len(eligible_assets)}
 
     if payout is None or payout < MIN_AUTO_PAYOUT:
         message = f"Сетап {signal['pair']} пропущен: payout {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}%"
@@ -595,13 +608,13 @@ async def session_tick():
     )
     await _event(
         int(session["id"]), "SIGNAL_FOUND", f"Найден сигнал {signal['pair']} {signal['direction']}",
-        {"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(all_assets), "mixed": mixed_count, "confirmed": True},
+        {"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(scan_assets), "mixed": mixed_count, "confirmed": True},
     )
     await update_trade_runtime(
         stage="SIGNAL_FOUND", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
         strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout, balance=balance,
         entry_time=signal["entry_time"], expiry_time=signal["expiry_time"], amount=amount,
-        scanned_assets=all_assets, scanned_count=len(all_assets), eligible_assets=eligible_assets,
+        scanned_assets=all_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,
         eligible_payouts=eligible_payouts, min_payout=MIN_AUTO_PAYOUT,
         message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),
     )
@@ -619,7 +632,7 @@ async def session_tick():
             int(session["id"]), pending_signal_id=None, stage="SCANNING",
             last_message=f"Вход пропущен: {trade.get('status')} · продолжаю анализ всех пар",
         )
-    return {"status": trade.get("status"), "signal": signal, "trade": trade, "scanned": len(all_assets), "eligible": len(eligible_assets)}
+    return {"status": trade.get("status"), "signal": signal, "trade": trade, "scanned": len(scan_assets), "eligible": len(eligible_assets)}
 
 
 async def session_history(limit=30):

@@ -23,7 +23,7 @@ logger = logging.getLogger("alphapulse.auto_trade")
 _trade_lock = asyncio.Lock()
 MIN_TRADE_AMOUNT = 1.0
 MAX_TRADE_AMOUNT = 50000.0
-MIN_AUTO_PAYOUT = float(os.getenv("AUTO_TRADE_MIN_PAYOUT", "92"))
+MIN_AUTO_PAYOUT = 92.0
 # GitHub scanner runs every few seconds. Enter the blocking exact-entry path only
 # when the candle boundary is close enough to keep a Vercel request short.
 AUTO_DUE_WINDOW_SECONDS = max(5, min(10, int(os.getenv("AUTO_DUE_WINDOW_SECONDS", "7"))))

@@ -217,18 +217,25 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
     await _save_candidate(int(session["id"]), signal_id=None, entry_time=None, expiry_time=None, amount=None, payout=None, opened_position_id=None, status="SEARCHING")
     snapshot = await get_demo_account_snapshot()
     all_assets = list(OTC_ASSETS.keys())
+    eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]
+    if not eligible_assets:
+        await _update(
+            int(session["id"]),
+            last_message=f"Сделка открыта · среди {len(all_assets)} OTC пар сейчас нет payout ≥{MIN_AUTO_PAYOUT:g}% · жду обновления выплат",
+        )
+        return {"status": "WAIT_PAYOUT", "eligible": 0, "seconds_to_expiry": round(remaining, 1)}
     timeframe = str(session.get("timeframe") or "5m")
     strategy = str(session.get("strategy") or "smart_confluence")
     mixed_count = str(session.get("mode")) == "count"
 
     if mixed_count:
-        candidates = await signal_engine.scan_best_candidates(timeframe, all_assets)
+        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
         threshold = COUNT_MIN_CONFIDENCE
     elif strategy == "smart_confluence":
-        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)
+        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, eligible_assets)
         threshold = PROFIT_MIN_CONFIDENCE
     else:
-        candidates = await signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, all_assets, strategy)
+        candidates = await signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, eligible_assets, strategy)
         threshold = PROFIT_MIN_CONFIDENCE
 
     confirmed = sorted(
