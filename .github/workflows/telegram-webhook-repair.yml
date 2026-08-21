@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
     paths:
+      - 'backend/**'
+      - 'api/**'
+      - 'bot/**'
       - '.github/workflows/telegram-webhook-repair.yml'
 
 permissions:
@@ -13,32 +16,24 @@ permissions:
 jobs:
   repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
-      - name: Force refresh production webhook
+      - name: Wait for production and repair webhook
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          REPAIR_URL: https://lumetrix55active-neonorbit.vercel.app/api/internal/telegram-repair
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${BOT_TOKEN:-}" ]; then
-            echo "TELEGRAM_BOT_TOKEN secret is missing"
-            exit 2
-          fi
-          SECRET=$(BOT_TOKEN="$BOT_TOKEN" python3 - <<'PY'
-          import hashlib, os
-          token = os.environ['BOT_TOKEN']
-          print(hashlib.sha256(f'alphapulsesbot:{token}'.encode()).hexdigest())
-          PY
-          )
-          curl --fail --silent --show-error \
-            --connect-timeout 5 --max-time 20 \
-            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-            --data-urlencode "url=https://lumetrix55active-neonorbit.vercel.app/telegram/webhook" \
-            --data-urlencode "secret_token=${SECRET}" \
-            --data-urlencode "drop_pending_updates=false"
-          echo
-          curl --fail --silent --show-error \
-            --connect-timeout 5 --max-time 20 \
-            "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
-          echo
+          for i in $(seq 1 30); do
+            echo "Webhook repair attempt $i/30"
+            if RESPONSE=$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 25 \
+              -X POST "$REPAIR_URL"); then
+              echo "$RESPONSE"
+              python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data' <<<"$RESPONSE"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "Production webhook repair did not become ready in time"
+          exit 1
