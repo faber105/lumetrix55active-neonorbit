@@ -1,0 +1,89 @@
+name: AlphaPulse Low Latency AUTO Settlement
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fast-settlement-minimal-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reduce Pocket result and preload latency
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Pocket closed-deal polling: do not spend ~0.9s waiting on every probe.
+          path = Path('backend/services/positions.py')
+          text = path.read_text()
+          if 'get_closed_deals(listen_seconds=0.9)' in text:
+              text = text.replace('get_closed_deals(listen_seconds=0.9)', 'get_closed_deals(listen_seconds=0.20)', 1)
+          elif 'get_closed_deals(listen_seconds=0.20)' not in text:
+              raise SystemExit('positions closed-deals target not found')
+          path.write_text(text)
+
+          # A prepared next signal must be revisited every second instead of the
+          # old 5m-position 8 second cadence.
+          path = Path('backend/services/cpu_guard.py')
+          text = path.read_text()
+          old = '_PENDING_FAST = {"WAIT_ENTRY", "SCHEDULED", "OPENING", "PRELOAD_PRIORITY", "PREPARED", "WAIT_CLOSE"}'
+          new = '_PENDING_FAST = {"WAIT_ENTRY", "SCHEDULED", "OPENING", "PRELOAD_PRIORITY", "PRELOAD_ACTIVE", "PRELOAD_WAIT_CLOSE", "PRELOAD_RETRY", "PREPARED", "WAIT_CLOSE"}'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif '"PRELOAD_ACTIVE"' not in text:
+              raise SystemExit('cpu_guard pending-fast target not found')
+          path.write_text(text)
+
+          # For an already-confirmed preloaded setup, keep the mandatory live payout
+          # check but shorten the telemetry listen window before sending the order.
+          path = Path('backend/services/auto_trade.py')
+          text = path.read_text()
+          old = 'snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=4)'
+          new = 'snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=(0.20 if confirmed and not exact_entry else 0.8)), timeout=4)'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif '0.20 if confirmed and not exact_entry else 0.8' not in text:
+              raise SystemExit('auto_trade snapshot target not found')
+          path.write_text(text)
+
+          # AUTO state/journal: while the session is active show Pocket result and
+          # OPEN/CLOSED transitions every second. Trading remains on its own tick.
+          path = Path('miniapp/src/App.jsx')
+          text = path.read_text()
+          old = '  usePolling(load,2500,Boolean(TG_ID&&isAdmin&&enabled));'
+          new = '  usePolling(load,state?.active?1000:2500,Boolean(TG_ID&&isAdmin&&enabled));'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'usePolling(load,state?.active?1000:2500' not in text:
+              raise SystemExit('App AUTO state polling target not found')
+          path.write_text(text)
+          PY
+
+      - name: Validate backend syntax
+        run: python3 -m compileall -q backend api bot
+
+      - name: Build Mini App
+        run: |
+          npm --prefix miniapp install --no-audit --no-fund
+          npm --prefix miniapp run build
+
+      - name: Commit low latency fix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/positions.py backend/services/cpu_guard.py backend/services/auto_trade.py miniapp/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'Speed up Pocket settlement and preloaded AUTO entries'
+          git push
