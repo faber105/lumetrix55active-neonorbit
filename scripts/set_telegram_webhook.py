@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 EXPECTED_BOT_ID = "8347664656"
 DEFAULT_BASE_URL = "https://lumetrix55active-neonorbit.vercel.app"
 DIAG_KEY = "__vercel_build_telegram_diag__"
+TOKEN_KEY = "__runtime_telegram_bot__"
 
 
 def _safe_error(exc: Exception, token: str) -> str:
@@ -38,25 +39,42 @@ def _api(token: str, method: str, data: dict | None = None) -> dict:
     return body
 
 
-async def _persist_diag(payload: dict) -> None:
+async def _db_connect():
+    import asyncpg
+    from sqlalchemy.engine import make_url
+
     raw = str(os.getenv("DATABASE_URL") or "").strip()
     if not raw:
-        return
-    try:
-        import asyncpg
-        from sqlalchemy.engine import make_url
+        return None
+    url = make_url(raw)
+    return await asyncpg.connect(
+        host=url.host,
+        port=url.port or 5432,
+        user=url.username,
+        password=url.password,
+        database=url.database,
+        ssl="require" if url.host and "neon.tech" in url.host else None,
+        statement_cache_size=0,
+        timeout=12,
+    )
 
-        url = make_url(raw)
-        conn = await asyncpg.connect(
-            host=url.host,
-            port=url.port or 5432,
-            user=url.username,
-            password=url.password,
-            database=url.database,
-            ssl="require" if url.host and "neon.tech" in url.host else None,
-            statement_cache_size=0,
-            timeout=12,
-        )
+
+async def _load_token_from_neon() -> str:
+    conn = await _db_connect()
+    if conn is None:
+        return ""
+    try:
+        value = await conn.fetchval("SELECT payload FROM ml_state WHERE strategy=$1", TOKEN_KEY)
+        return str(value or "").strip()
+    finally:
+        await conn.close()
+
+
+async def _persist_diag(payload: dict) -> None:
+    try:
+        conn = await _db_connect()
+        if conn is None:
+            return
         try:
             body = json.dumps(
                 {"at": datetime.now(timezone.utc).isoformat(), **payload},
@@ -78,10 +96,10 @@ async def _persist_diag(payload: dict) -> None:
         print(f"Cannot persist Telegram build diagnostic: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
-def _run_setup() -> dict:
-    token = str(os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+def _run_setup(token: str, token_source: str) -> dict:
     diag = {
         "token_present": bool(token),
+        "token_source": token_source,
         "token_bot_id": token.split(":", 1)[0] if token and ":" in token else (token[:20] if token else None),
         "database_present": bool(str(os.getenv("DATABASE_URL") or "").strip()),
         "backend_env_present": bool(str(os.getenv("BACKEND_URL") or os.getenv("PUBLIC_BACKEND_URL") or "").strip()),
@@ -89,7 +107,7 @@ def _run_setup() -> dict:
     }
 
     if not token:
-        diag.update(error_type="MissingToken", error="TELEGRAM_BOT_TOKEN is missing in Vercel Production environment")
+        diag.update(error_type="MissingToken", error="Telegram token is missing in both Vercel env and Neon runtime store")
         return diag
 
     if diag["token_bot_id"] != EXPECTED_BOT_ID:
@@ -139,16 +157,27 @@ def _run_setup() -> dict:
     return diag
 
 
-def main() -> int:
-    diag = _run_setup()
-    try:
-        asyncio.run(_persist_diag(diag))
-    except Exception as exc:
-        print(f"Diagnostic persistence runner failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+async def _main_async() -> int:
+    env_token = str(os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+    token = env_token
+    source = "vercel_env" if env_token else "none"
+
+    if not token and str(os.getenv("DATABASE_URL") or "").strip():
+        try:
+            token = await _load_token_from_neon()
+            if token:
+                source = "neon_runtime_store"
+        except Exception as exc:
+            print(f"Cannot load Telegram token from Neon: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    diag = _run_setup(token, source)
+    await _persist_diag(diag)
     print("Telegram build diagnostic:", json.dumps(diag, ensure_ascii=False))
-    # Keep the deployment alive even when Telegram setup fails. The sanitized
-    # failure is persisted to Neon and can be repaired without losing production.
     return 0
+
+
+def main() -> int:
+    return asyncio.run(_main_async())
 
 
 if __name__ == "__main__":
