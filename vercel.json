@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm --prefix miniapp install --no-audit --no-fund && npm --prefix miniapp run build && python scripts/set_telegram_webhook.py",
+  "buildCommand": "npm --prefix miniapp install --no-audit --no-fund && npm --prefix miniapp run build && python scripts/diagnose_runtime_import.py && python scripts/set_telegram_webhook.py",
   "outputDirectory": "miniapp/dist",
   "git": {
     "deploymentEnabled": {
@@ -9,15 +9,63 @@
   },
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "/api/index"
-    },
-    {
       "source": "/telegram/webhook",
-      "destination": "/api/index"
+      "destination": "/api/telegram/webhook"
     },
     {
       "source": "/health",
+      "destination": "/api/health"
+    },
+    {
+      "source": "/api/auth/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/home/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/signals/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/market/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/stats/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/settings/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/live/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/auto/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/auto-preload/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/admin/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/admin-stats/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/internal/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/ws/:path*",
       "destination": "/api/index"
     }
   ],
@@ -47,6 +95,12 @@
     "api/index.py": {
       "maxDuration": 300,
       "includeFiles": "miniapp/dist/**"
+    },
+    "api/telegram/webhook.py": {
+      "maxDuration": 60
+    },
+    "api/health.py": {
+      "maxDuration": 30
     }
   }
 }
