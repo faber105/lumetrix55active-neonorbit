@@ -11,88 +11,92 @@ on:
       - '.github/workflows/telegram-webhook-repair.yml'
 
 permissions:
-  contents: write
+  contents: read
+  statuses: write
 
 jobs:
   repair:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Probe production and repair Telegram webhook
-        id: probe
         env:
           REPAIR_URL: https://lumetrix55active-neonorbit.vercel.app/api/internal/telegram-repair
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set +e
-          rm -f /tmp/repair_body /tmp/repair_err
-          RESULT="failed"
-          HTTP_CODE="000"
+          STATE="failure"
+          DESCRIPTION="repair endpoint did not respond"
           BODY=""
-          CURL_ERROR=""
+          HTTP_CODE="000"
 
           for i in $(seq 1 40); do
             echo "Webhook repair attempt $i/40"
-            : > /tmp/repair_body
-            : > /tmp/repair_err
+            BODY_FILE=$(mktemp)
+            ERR_FILE=$(mktemp)
             HTTP_CODE=$(curl --silent --show-error \
-              --output /tmp/repair_body \
+              --output "$BODY_FILE" \
               --write-out '%{http_code}' \
               --connect-timeout 5 --max-time 25 \
-              -X POST "$REPAIR_URL" 2>/tmp/repair_err)
+              -X POST "$REPAIR_URL" 2>"$ERR_FILE")
             CURL_RC=$?
-            BODY=$(cat /tmp/repair_body 2>/dev/null)
-            CURL_ERROR=$(cat /tmp/repair_err 2>/dev/null)
-            echo "HTTP=$HTTP_CODE curl_rc=$CURL_RC body=$BODY error=$CURL_ERROR"
+            BODY=$(cat "$BODY_FILE")
+            CURL_ERR=$(cat "$ERR_FILE")
+            rm -f "$BODY_FILE" "$ERR_FILE"
+            echo "HTTP=$HTTP_CODE curl_rc=$CURL_RC body=$BODY error=$CURL_ERR"
 
             if [ "$CURL_RC" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
-              if BODY="$BODY" python3 - <<'PY'
-          import json, os, sys
-          try:
-              data = json.loads(os.environ.get('BODY') or '{}')
-          except Exception:
-              sys.exit(1)
-          sys.exit(0 if data.get('ok') is True else 1)
-          PY
-              then
-                RESULT="ok"
+              SUMMARY=$(BODY="$BODY" python3 - <<'PY'
+import json, os
+try:
+    data=json.loads(os.environ.get('BODY') or '{}')
+except Exception:
+    print('invalid JSON response')
+    raise SystemExit(1)
+if data.get('ok') is True:
+    actual=str(data.get('actual') or '')
+    pending=int(data.get('pending_update_count') or 0)
+    last=str(data.get('last_error_message') or '')
+    print(f'ok actual={actual} pending={pending} last={last}'[:130])
+    raise SystemExit(0)
+print(('repair returned ok=false: '+str(data))[:130])
+raise SystemExit(1)
+PY
+              )
+              if [ $? -eq 0 ]; then
+                STATE="success"
+                DESCRIPTION="$SUMMARY"
                 break
+              else
+                DESCRIPTION="$SUMMARY"
               fi
+            else
+              DESCRIPTION="HTTP ${HTTP_CODE} curl=${CURL_RC} ${CURL_ERR}"
             fi
             sleep 6
           done
 
-          mkdir -p diagnostics
-          {
-            echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "source_commit=${GITHUB_SHA}"
-            echo "result=${RESULT}"
-            echo "http_code=${HTTP_CODE}"
-            echo "curl_error=${CURL_ERROR}"
-            echo "response=${BODY}"
-          } > diagnostics/telegram-repair-status.txt
+          DESCRIPTION=$(printf '%s' "$DESCRIPTION" | tr '\n\r' '  ' | cut -c1-130)
+          export STATE DESCRIPTION
+          python3 - <<'PY' >/tmp/status.json
+import json, os
+print(json.dumps({
+  'state': os.environ['STATE'],
+  'context': 'telegram-webhook-repair',
+  'description': os.environ['DESCRIPTION'],
+  'target_url': 'https://lumetrix55active-neonorbit.vercel.app/api/health'
+}))
+PY
 
-          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/status.json \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}"
+          echo
 
-      - name: Publish sanitized diagnostics branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp diagnostics/telegram-repair-status.txt /tmp/telegram-repair-status.txt
-          git checkout --orphan diagnostics-webhook
-          git rm -rf . >/dev/null 2>&1 || true
-          mkdir -p diagnostics
-          cp /tmp/telegram-repair-status.txt diagnostics/telegram-repair-status.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add diagnostics/telegram-repair-status.txt
-          git commit -m "Update Telegram webhook diagnostics"
-          git push --force origin diagnostics-webhook
-
-      - name: Require successful repair
-        if: steps.probe.outputs.result != 'ok'
-        run: exit 1
+          if [ "$STATE" != "success" ]; then exit 1; fi
