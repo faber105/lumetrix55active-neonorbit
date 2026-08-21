@@ -15,6 +15,7 @@ from backend.services.auto_trade import (
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.multi_strategy import preload_cycle, session_tick
+from backend.services.preload_next import _candidate as _preload_candidate
 from backend.services.session_engine import _active, _load_signal, _register_open, _update
 from backend.services.trade_runtime import get_trade_runtime
 
@@ -22,6 +23,7 @@ from backend.services.trade_runtime import get_trade_runtime
 # provided by the PostgreSQL advisory lock held for the whole trading tick.
 TICK_MIN_INTERVAL_SECONDS = 0.7
 _ADVISORY_LOCK_BASE = 918_420_000_000
+_PRELOAD_PRIORITY_STATES = {"PREPARED", "WAIT_CLOSE"}
 
 
 def _display_asset(asset: str) -> str:
@@ -163,12 +165,20 @@ async def _drive_pending_entry(session: dict) -> dict | None:
     return trade
 
 
+async def _preload_is_priority(session_id: int) -> bool:
+    try:
+        candidate = await _preload_candidate(int(session_id))
+    except Exception:
+        return False
+    return bool(candidate and str(candidate.get("status") or "") in _PRELOAD_PRIORITY_STATES and candidate.get("signal_id"))
+
+
 async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_SECONDS) -> dict:
     """Run exactly one AUTO engine iteration at a time across all Vercel workers.
 
-    The PostgreSQL advisory lock serializes ticks across serverless workers. A
-    scheduled pending signal is handled before any full-market work so its exact
-    entry boundary cannot be lost to Pocket snapshot refresh latency.
+    Pending and preloaded entries are latency-sensitive and always outrank a new
+    full-market scan. A PREPARED/WAIT_CLOSE candidate stays authoritative until
+    it is opened or explicitly cancelled by the preload engine.
     """
     tid = admin_id()
     if tid <= 0:
@@ -188,9 +198,10 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
             if session_id is None:
                 return {"status": "THROTTLED_OR_IDLE", "driver": "postgres-advisory-lock"}
 
-            # Critical fast path: a signal already selected for an exact candle
-            # boundary must be serviced before refreshing 100+ OTC instruments.
             session = await _active()
+
+            # First priority: an ordinary pending signal that is already waiting
+            # for its exact candle boundary.
             if session and session.get("pending_signal_id") and not session.get("active_position_id"):
                 pending_result = await _drive_pending_entry(session)
                 if pending_result is not None:
@@ -198,19 +209,41 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
                     pending_result.setdefault("driver", "postgres-advisory-lock")
                     return pending_result
 
-            universe = await _refresh_live_otc_universe()
+            # Second priority: a signal prepared while the previous position was
+            # still open. Never let a fresh 114-pair scan overtake it. We also run
+            # preload before refreshing the OTC universe to minimize entry latency.
+            had_preload_priority = await _preload_is_priority(session_id)
             preload = None
             try:
                 preload = await preload_cycle()
             except Exception as exc:
-                preload = {"status": "PRELOAD_ERROR", "error": type(exc).__name__, "block": False}
+                # If a prepared entry already exists, a transient Pocket/DB error
+                # must not drop us into a normal scan. Keep retrying that candidate.
+                preload = {
+                    "status": "PRELOAD_ERROR",
+                    "error": type(exc).__name__,
+                    "block": had_preload_priority,
+                }
+
+            still_preload_priority = await _preload_is_priority(session_id)
+            if still_preload_priority:
+                if preload is None:
+                    preload = {"status": "PRELOAD_PRIORITY", "block": True}
+                elif not preload.get("block"):
+                    preload = {**preload, "block": True, "priority": True}
 
             if preload and preload.get("block"):
                 result = dict(preload)
                 if preload.get("status") == "OPEN" and preload.get("preloaded"):
                     await _reset_preload_after_open(session_id)
-            else:
-                result = await session_tick()
+                result.setdefault("session_id", session_id)
+                result.setdefault("driver", "postgres-advisory-lock")
+                return result
+
+            # Only when no prepared entry is outstanding may the normal engine
+            # refresh the market universe and search for a brand-new setup.
+            universe = await _refresh_live_otc_universe()
+            result = await session_tick()
 
             if isinstance(result, dict):
                 result.setdefault("session_id", session_id)
