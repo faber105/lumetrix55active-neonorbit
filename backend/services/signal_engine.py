@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
@@ -27,44 +26,6 @@ CANDLE_LOOKBACK = max(100, min(140, int(os.getenv("SIGNAL_CANDLE_LOOKBACK", "110
 
 TF_SECONDS.setdefault("15s", 15)
 TF_SECONDS.setdefault("3m", 180)
-
-# AUTO used to reload the complete candle history for every asset on every tick.
-# On a 5m strategy this creates a lot of redundant Pocket requests while the same
-# forming candle is changing only slightly. Keep a very short cache: it still
-# refreshes the live market several times inside every 5m candle, but avoids
-# hammering 100+ history requests every second and reduces connection churn.
-_CANDLE_CACHE: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
-_CANDLE_CACHE_LOCKS: dict[tuple[str, str, int], asyncio.Lock] = {}
-
-
-def _candle_cache_ttl(timeframe: str) -> float:
-    return {
-        "15s": 0.45,
-        "1m": 0.9,
-        "3m": 2.0,
-        "5m": 4.0,
-        "15m": 6.0,
-        "1h": 10.0,
-    }.get(str(timeframe), 1.0)
-
-
-async def _cached_candles(asset: str, timeframe: str, count: int) -> list[dict]:
-    key = (str(asset), str(timeframe), int(count))
-    now = time.monotonic()
-    cached = _CANDLE_CACHE.get(key)
-    ttl = _candle_cache_ttl(timeframe)
-    if cached and now - cached[0] <= ttl:
-        return cached[1]
-
-    lock = _CANDLE_CACHE_LOCKS.setdefault(key, asyncio.Lock())
-    async with lock:
-        now = time.monotonic()
-        cached = _CANDLE_CACHE.get(key)
-        if cached and now - cached[0] <= ttl:
-            return cached[1]
-        candles = await market_data.get_candles(asset, timeframe, count)
-        _CANDLE_CACHE[key] = (time.monotonic(), candles)
-        return candles
 
 
 def _next_candle_boundary(server_ts: int, timeframe: str) -> int:
@@ -148,28 +109,28 @@ class SignalEngine:
     async def evaluate_asset(self, asset: str, timeframe: str, strategy: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await _cached_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate(strategy, candles)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def _evaluate_asset_best(self, asset: str, timeframe: str, strategies: Iterable[str]) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await _cached_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate_best(candles, strategies)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_asset_composite(self, asset: str, timeframe: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await _cached_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
         candidate = evaluate_best(candles, MANUAL_STRATEGIES)
         if candidate is None:
             candidate = _fallback_bias(candles)
         return await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_vip_asset(self, asset: str) -> Optional[dict]:
-        candles = await _cached_candles(asset, "5m", CANDLE_LOOKBACK)
+        candles = await market_data.get_candles(asset, "5m", CANDLE_LOOKBACK)
         candidate = evaluate("vip_confluence", candles)
         if candidate is None:
             candidate = evaluate_best(candles, SMART_STRATEGIES)
