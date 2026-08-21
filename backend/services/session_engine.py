@@ -359,7 +359,7 @@ async def _settle(session):
     if result == SignalResult.WIN.value:
         wins += 1
         level, series_loss = 0, 0
-        message = f"WIN +{pnl:.2f} · анализирую все пары для следующего входа"
+        message = f"WIN +{pnl:.2f} · анализирую пары с payout ≥92% для следующего входа"
         if session["mode"] == "count" and wins >= int(session["target_wins"]):
             status, stage, reason, ended = "COMPLETED", "COMPLETED", "TARGET_WINS", utcnow()
             message = "Цель по успешным сделкам достигнута"
@@ -383,7 +383,7 @@ async def _settle(session):
                 message = "Достигнут лимит полностью проигранных серий"
             else:
                 stage = "SCANNING"
-                message = "Полная минусовая серия учтена · анализирую все пары дальше"
+                message = "Полная минусовая серия учтена · анализирую пары с payout ≥92% дальше"
     else:
         message = "DRAW · повторяю текущий уровень на следующем подтверждённом сетапе"
 
@@ -471,10 +471,10 @@ async def session_tick():
                 last_message=runtime.get("message") or "Жду точное время входа",
             )
             return trade
-        await _update(int(session["id"]), pending_signal_id=None, stage="SCANNING", last_message="Сигнал пропущен · продолжаю анализ всех пар")
+        await _update(int(session["id"]), pending_signal_id=None, stage="SCANNING", last_message="Сигнал пропущен · продолжаю анализ пар с payout ≥92%")
         session = (await _active()) or session
 
-    snapshot = await get_demo_account_snapshot()
+    snapshot = await get_demo_account_snapshot(max_age=1.0)
     balance = snapshot.get("balance")
     if balance is not None:
         await _update(int(session["id"]), current_balance=float(balance))
@@ -614,7 +614,7 @@ async def session_tick():
         stage="SIGNAL_FOUND", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
         strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout, balance=balance,
         entry_time=signal["entry_time"], expiry_time=signal["expiry_time"], amount=amount,
-        scanned_assets=all_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,
+        scanned_assets=scan_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,
         eligible_payouts=eligible_payouts, min_payout=MIN_AUTO_PAYOUT,
         message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),
     )
@@ -630,7 +630,7 @@ async def session_tick():
     else:
         await _update(
             int(session["id"]), pending_signal_id=None, stage="SCANNING",
-            last_message=f"Вход пропущен: {trade.get('status')} · продолжаю анализ всех пар",
+            last_message=f"Вход пропущен: {trade.get('status')} · продолжаю анализ пар с payout ≥92%",
         )
     return {"status": trade.get("status"), "signal": signal, "trade": trade, "scanned": len(scan_assets), "eligible": len(eligible_assets)}
 

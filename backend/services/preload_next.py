@@ -215,7 +215,7 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
             return {"status": "SEARCHING", "seconds_to_expiry": round(remaining, 1)}
 
     await _save_candidate(int(session["id"]), signal_id=None, entry_time=None, expiry_time=None, amount=None, payout=None, opened_position_id=None, status="SEARCHING")
-    snapshot = await get_demo_account_snapshot()
+    snapshot = await get_demo_account_snapshot(max_age=1.0)
     all_assets = list(OTC_ASSETS.keys())
     eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]
     if not eligible_assets:
@@ -310,7 +310,7 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
 
     await _update(
         int(session["id"]),
-        last_message=f"Сделка открыта · до закрытия {max(0, int(remaining))}с · заранее анализирую следующий вход",
+        last_message=f"Сделка открыта · до закрытия {max(0, int(remaining))}с · заранее анализирую следующий вход только среди payout ≥92%",
     )
     return {"status": "SEARCHING", "seconds_to_expiry": round(remaining, 1)}
 
