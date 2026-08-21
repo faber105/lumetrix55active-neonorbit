@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import './mobile.css'
 import App from './App.jsx'
-import SessionEnhancer from './SessionEnhancer.jsx'
 
 const telegram = window.Telegram?.WebApp
 const rootStyle = document.documentElement.style
@@ -66,6 +65,5 @@ document.addEventListener('pointerdown', requestImmersiveTelegramMode, { once: t
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
-    <SessionEnhancer />
   </StrictMode>,
 )
