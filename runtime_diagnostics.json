@@ -1,7 +1,16 @@
 {
-  "at": "2026-08-21T15:03:03.650739+00:00",
-  "health_status": 500,
-  "health": "A server error has occurred\n\nFUNCTION_INVOCATION_FAILED\n\niad1::kzxgm-1787324565898-5aa3e9520985\n",
-  "repair_status": 500,
-  "repair": "A server error has occurred\n\nFUNCTION_INVOCATION_FAILED\n\niad1::4wpf5-1787324578111-5765be995b0c\n"
+  "at": "2026-08-21T15:07:04.626448+00:00",
+  "health_status": 200,
+  "health": {
+    "status": "ok",
+    "service": "alphapulsesbot",
+    "version": "3.4",
+    "telegram_configured": true,
+    "database_configured": true,
+    "backend_url": "https://lumetrix55active-neonorbit.vercel.app"
+  },
+  "repair_status": 405,
+  "repair": {
+    "detail": "Method Not Allowed"
+  }
 }
