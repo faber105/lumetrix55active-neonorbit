@@ -89,9 +89,8 @@ def _fast_preload_client():
     original_snapshot = client.account_snapshot
 
     async def fast_snapshot(listen_seconds: float = 1.2):
-        # execute_confirmed_signal uses 0.8s here. The prepared signal already has
-        # a payout snapshot, so 0.18s is enough for the mandatory live re-check
-        # without delaying the order another ~0.6s.
+        # Keep the fast prepared-entry path, but never shorten an already-fast
+        # explicit telemetry request any further.
         window = 0.18 if 0.75 <= float(listen_seconds) <= 0.85 else float(listen_seconds)
         return await original_snapshot(listen_seconds=window)
 
@@ -121,7 +120,8 @@ async def _resilient_preload_consume(session: dict, candidate: dict) -> dict | N
     trade = result.get("trade") if isinstance(result.get("trade"), dict) else {}
     trade_status = str(trade.get("status") or status)
     reason = str(trade.get("reason") or "")
-    retryable = trade_status == "FAILED" or (
+    payout_missing = trade_status == "PAYOUT_TOO_LOW" and trade.get("payout") is None
+    retryable = trade_status in {"FAILED", "DUPLICATE"} or payout_missing or (
         trade_status == "SKIPPED" and reason == "max_open_positions"
     )
     if not retryable or not candidate.get("entry_time") or not candidate.get("signal_id"):
@@ -129,15 +129,9 @@ async def _resilient_preload_consume(session: dict, candidate: dict) -> dict | N
 
     try:
         entry = preload_next._to_naive_utc(candidate.get("entry_time"))
-        lateness = max(0.0, (session_engine.utcnow() - entry).total_seconds())
+        lateness = max(0.0, (preload_next.utcnow() - entry).total_seconds())
     except Exception:
-        # session_engine has no public clock contract; fall back to preload helper's
-        # imported utcnow through its module namespace.
-        try:
-            entry = preload_next._to_naive_utc(candidate.get("entry_time"))
-            lateness = max(0.0, (preload_next.utcnow() - entry).total_seconds())
-        except Exception:
-            return result
+        return result
 
     if lateness > 8.0:
         return result
@@ -146,8 +140,14 @@ async def _resilient_preload_consume(session: dict, candidate: dict) -> dict | N
     await session_engine._event(
         int(session["id"]),
         "PRELOAD_RETRY",
-        "Pocket завершает прошлую сделку · заранее найденный вход сохранён и повторяется без нового 5m ожидания",
-        {"signal_id": int(candidate["signal_id"]), "status": trade_status, "reason": reason or None, "lateness": round(lateness, 2)},
+        "Pocket завершает прошлую сделку или обновляет payout · заранее найденный вход сохранён и повторяется без нового 5m ожидания",
+        {
+            "signal_id": int(candidate["signal_id"]),
+            "status": trade_status,
+            "reason": reason or None,
+            "payout": trade.get("payout"),
+            "lateness": round(lateness, 2),
+        },
     )
     return {"status": "WAIT_CLOSE", "block": True, "retry": True, "trade": trade}
 
