@@ -1,0 +1,44 @@
+name: Repair Telegram Webhook
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/telegram-webhook-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Force refresh production webhook
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ]; then
+            echo "TELEGRAM_BOT_TOKEN secret is missing"
+            exit 2
+          fi
+          SECRET=$(BOT_TOKEN="$BOT_TOKEN" python3 - <<'PY'
+          import hashlib, os
+          token = os.environ['BOT_TOKEN']
+          print(hashlib.sha256(f'alphapulsesbot:{token}'.encode()).hexdigest())
+          PY
+          )
+          curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 20 \
+            -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=https://alphapulse-runtime-staging.vercel.app/telegram/webhook" \
+            --data-urlencode "secret_token=${SECRET}" \
+            --data-urlencode "drop_pending_updates=false"
+          echo
+          curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 20 \
+            "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
+          echo
