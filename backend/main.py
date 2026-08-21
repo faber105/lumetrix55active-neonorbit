@@ -19,12 +19,13 @@ from backend.services.preload_next import ensure_preload_schema
 os.environ['BACKEND_URL']='https://alphapulse-runtime-staging.vercel.app'
 logging.basicConfig(level=logging.INFO);logger=logging.getLogger('alphapulse');TELEGRAM_ENABLED=bool(os.getenv('TELEGRAM_BOT_TOKEN','').strip())
 if TELEGRAM_ENABLED:
-    from bot.main import bot, configure_webhook, feed_update, valid_secret
+    from bot.main import bot, configure_webhook, feed_update, valid_secret, webhook_secret
 else:
     bot=None
     async def configure_webhook():return None
     async def feed_update(payload):del payload;raise RuntimeError('Telegram is not configured in this deployment')
     def valid_secret(value):del value;return False
+    def webhook_secret():return ''
 @asynccontextmanager
 async def lifespan(app):
     del app
@@ -35,8 +36,20 @@ async def lifespan(app):
         try:await ensure_preload_schema()
         except Exception:logger.exception('AUTO preload schema bootstrap failed')
     else:logger.warning('DATABASE_URL is not configured; database routes are disabled in this deployment')
-    try:await configure_webhook()
-    except Exception:logger.exception('Webhook setup failed; API remains available')
+    try:
+        # Always refresh the Telegram webhook even when the URL did not change.
+        # This repairs stale Telegram-side webhook state without dropping queued updates.
+        if bot is not None:
+            await bot.set_webhook(
+                url='https://alphapulse-runtime-staging.vercel.app/telegram/webhook',
+                secret_token=webhook_secret(),
+                drop_pending_updates=False,
+            )
+            logger.info('Telegram webhook force-refreshed')
+        else:
+            await configure_webhook()
+    except Exception:
+        logger.exception('Webhook setup failed; API remains available')
     yield
     try:await market_data.close()
     except Exception:pass
