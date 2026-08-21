@@ -1,0 +1,121 @@
+name: AlphaPulse AUTO Strict 92 Payout Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/auto-payout-92-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restrict AUTO analysis to live payout >=92%
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {count}')
+              p.write_text(text.replace(old, new, 1))
+
+          # AUTO payout is a hard product rule. Do not allow an environment
+          # variable to silently lower it below 92%.
+          replace_once(
+              'backend/services/auto_trade.py',
+              'MIN_AUTO_PAYOUT = float(os.getenv("AUTO_TRADE_MIN_PAYOUT", "92"))',
+              'MIN_AUTO_PAYOUT = 92.0',
+              'hard payout threshold',
+          )
+
+          # Normal AUTO cycle: build the live eligible universe first, and only
+          # run strategy analysis on assets whose current Pocket payout is >=92%.
+          replace_once(
+              'backend/services/session_engine.py',
+              '''    all_assets = list(OTC_ASSETS.keys())\n    eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]\n    eligible_payouts = {asset: _payout(snapshot, asset) for asset in eligible_assets}\n    strategy = str(session["strategy"])\n''',
+              '''    all_assets = list(OTC_ASSETS.keys())\n    eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]\n    eligible_payouts = {asset: _payout(snapshot, asset) for asset in eligible_assets}\n    scan_assets = eligible_assets\n    if not scan_assets:\n        message = f"Проверено {len(all_assets)} OTC пар · с payout ≥{MIN_AUTO_PAYOUT:g}% сейчас нет доступных · жду обновления выплат"\n        await _update(int(session["id"]), stage="WAIT_PAYOUT", last_message=message)\n        await update_trade_runtime(\n            stage="WAIT_PAYOUT", message=message, balance=balance,\n            scanned_assets=[], scanned_count=0, eligible_assets=[], eligible_payouts={},\n            min_payout=MIN_AUTO_PAYOUT,\n        )\n        return {\n            "status": "WAIT_PAYOUT", "scanned": 0, "eligible": 0,\n            "discovered": len(all_assets), "min_payout": MIN_AUTO_PAYOUT,\n        }\n    strategy = str(session["strategy"])\n''',
+              'session eligible universe',
+          )
+
+          p = Path('backend/services/session_engine.py')
+          text = p.read_text()
+          replacements = {
+              'signal_engine.scan_best_candidates(timeframe, all_assets)': 'signal_engine.scan_best_candidates(timeframe, scan_assets)',
+              'signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)': 'signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, scan_assets)',
+              'signal_engine.scan_strategy_candidates(timeframe, all_assets, strategy)': 'signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)',
+              '"scanned_assets": all_assets,': '"scanned_assets": scan_assets,',
+              '"scanned_count": len(all_assets),': '"scanned_count": len(scan_assets),',
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count < 1:
+                  raise SystemExit(f'session patch missing: {old}')
+              text = text.replace(old, new)
+          # All journal/result scan counts in session_tick should describe the
+          # filtered universe actually analyzed, not every OTC symbol discovered.
+          text = text.replace('len(all_assets)', 'len(scan_assets)')
+          # Restore discovered count in the early no-eligible branch.
+          text = text.replace('"discovered": len(scan_assets), "min_payout": MIN_AUTO_PAYOUT,', '"discovered": len(all_assets), "min_payout": MIN_AUTO_PAYOUT,')
+          text = text.replace('message = f"Проверено {len(scan_assets)} OTC пар · с payout ≥{MIN_AUTO_PAYOUT:g}% сейчас нет доступных · жду обновления выплат"', 'message = f"Проверено {len(all_assets)} OTC пар · с payout ≥{MIN_AUTO_PAYOUT:g}% сейчас нет доступных · жду обновления выплат"')
+          p.write_text(text)
+
+          # Pre-analysis while a trade is open must obey the exact same >=92%
+          # universe and must not waste CPU analysing low-payout pairs.
+          replace_once(
+              'backend/services/preload_next.py',
+              '''    snapshot = await get_demo_account_snapshot()\n    all_assets = list(OTC_ASSETS.keys())\n    timeframe = str(session.get("timeframe") or "5m")\n''',
+              '''    snapshot = await get_demo_account_snapshot()\n    all_assets = list(OTC_ASSETS.keys())\n    eligible_assets = [asset for asset in all_assets if _tradable(snapshot, asset)]\n    if not eligible_assets:\n        await _update(\n            int(session["id"]),\n            last_message=f"Сделка открыта · среди {len(all_assets)} OTC пар сейчас нет payout ≥{MIN_AUTO_PAYOUT:g}% · жду обновления выплат",\n        )\n        return {"status": "WAIT_PAYOUT", "eligible": 0, "seconds_to_expiry": round(remaining, 1)}\n    timeframe = str(session.get("timeframe") or "5m")\n''',
+              'preload eligible universe',
+          )
+
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text()
+          for old, new in {
+              'signal_engine.scan_best_candidates(timeframe, all_assets)': 'signal_engine.scan_best_candidates(timeframe, eligible_assets)',
+              'signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, all_assets)': 'signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, eligible_assets)',
+              'signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, all_assets, strategy)': 'signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, eligible_assets, strategy)',
+          }.items():
+              count = text.count(old)
+              if count < 1:
+                  raise SystemExit(f'preload patch missing: {old}')
+              text = text.replace(old, new)
+          p.write_text(text)
+
+          # Guardrails: prove the low-payout universe can no longer reach either
+          # normal AUTO scanning or preload scanning.
+          auto = Path('backend/services/auto_trade.py').read_text()
+          session = Path('backend/services/session_engine.py').read_text()
+          preload = Path('backend/services/preload_next.py').read_text()
+          assert 'MIN_AUTO_PAYOUT = 92.0' in auto
+          assert 'scan_best_candidates(timeframe, scan_assets)' in session
+          assert 'scan_strategy_candidates(timeframe, scan_assets, strategy)' in session
+          assert 'scan_best_candidates(timeframe, eligible_assets)' in preload
+          assert 'scan_strategy_candidates(PROFIT_TIMEFRAME, eligible_assets, strategy)' in preload
+          PY
+
+      - name: Validate backend syntax
+        run: |
+          python3 -m compileall -q backend api bot
+
+      - name: Commit strict payout filter
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/auto_trade.py backend/services/session_engine.py backend/services/preload_next.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Scan only 92 percent payout pairs in AUTO'
+          git push
