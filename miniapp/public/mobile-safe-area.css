@@ -6,7 +6,7 @@ html,body,#root{min-height:100%;background:#070a12}
 body{padding-top:max(14px,var(--ap-tg-top));}
 .app{
   min-height:calc(100dvh - max(14px,var(--ap-tg-top)));
-  padding-bottom:220px!important;
+  padding-bottom:calc(108px + var(--ap-tg-bottom))!important;
 }
 .topbar{
   top:0!important;
@@ -18,7 +18,7 @@ main{padding-top:22px!important;padding-bottom:76px!important;}
   position:fixed!important;
   left:12px!important;
   right:12px!important;
-  bottom:88px!important;
+  bottom:calc(6px + var(--ap-tg-bottom))!important;
   min-height:68px!important;
   z-index:2147483647!important;
   pointer-events:auto!important;
@@ -37,8 +37,8 @@ main{padding-top:22px!important;padding-bottom:76px!important;}
   body{padding-top:max(18px,var(--ap-tg-top));}
   .topbar{padding-top:16px!important;padding-bottom:12px!important;}
   main{padding-top:20px!important;}
-  .bottom-nav{bottom:96px!important;}
+  .bottom-nav{bottom:calc(6px + var(--ap-tg-bottom))!important;}
 }
 @media (max-width:390px){
-  .bottom-nav{bottom:102px!important;}
+  .bottom-nav{bottom:calc(4px + var(--ap-tg-bottom))!important;}
 }
