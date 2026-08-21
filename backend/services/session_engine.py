@@ -376,8 +376,8 @@ async def _settle(session):
             failed += 1
             level, series_loss = 0, 0
             if session["mode"] == "count":
-                status, stage, reason, ended = "STOPPED", "STOPPED", "MARTINGALE_EXHAUSTED", utcnow()
-                message = "Серия закрыта в минус · лимит перекрытий исчерпан"
+                stage = "SCANNING"
+                message = "Серия закрыта в минус · лимит перекрытий исчерпан · начинаю новую серию и продолжаю до заданного числа WIN"
             elif failed >= int(session["max_failed_series"]):
                 status, stage, reason, ended = "STOPPED", "STOPPED", "FAILED_SERIES_LIMIT", utcnow()
                 message = "Достигнут лимит полностью проигранных серий"

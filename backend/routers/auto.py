@@ -11,6 +11,7 @@ from sqlalchemy import text
 from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
 from backend.services.session_driver import drive_session_tick
+from backend.services.cpu_guard import adaptive_drive_session_tick
 from backend.services.session_engine import session_history, session_state, start_session, stop_session
 from backend.services.trade_mode import set_execution_mode
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
@@ -167,11 +168,11 @@ def _decorate_live_state(payload: dict) -> dict:
 
 
 @router.get("/state")
-async def state(refresh: bool = Query(False), drive: bool = Query(True), _: TelegramMiniAppUser = Depends(admin_user)):
+async def state(refresh: bool = Query(False), drive: bool = Query(False), _: TelegramMiniAppUser = Depends(admin_user)):
     tick_result = None
     if drive:
         try:
-            tick_result = await drive_session_tick()
+            tick_result = await adaptive_drive_session_tick()
         except Exception as exc:
             tick_result = {"status": "ERROR", "error": type(exc).__name__}
     payload = await session_state(refresh_balance=refresh)
@@ -181,7 +182,7 @@ async def state(refresh: bool = Query(False), drive: bool = Query(True), _: Tele
 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
-    return await drive_session_tick()
+    return await adaptive_drive_session_tick()
 
 
 @router.post("/start")

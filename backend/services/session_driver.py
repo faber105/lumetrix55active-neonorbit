@@ -14,9 +14,10 @@ from backend.services.auto_trade import (
 )
 from backend.services.control import admin_id
 from backend.services.pocketoption_otc import OTC_ASSETS
+from backend.services.positions import reconcile_positions
 from backend.services.multi_strategy import preload_cycle, session_tick
 from backend.services.preload_next import _candidate as _preload_candidate
-from backend.services.session_engine import _active, _load_signal, _register_open, _update
+from backend.services.session_engine import _active, _load_signal, _register_open, _settle, _update
 from backend.services.trade_runtime import get_trade_runtime
 
 # This remains only a lightweight cadence throttle. Real mutual exclusion is
@@ -199,6 +200,23 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
                 return {"status": "THROTTLED_OR_IDLE", "driver": "postgres-advisory-lock"}
 
             session = await _active()
+
+            # Always reconcile broker truth before preload priority can short-circuit
+            # the normal engine. This guarantees OPEN -> CLOSED -> SCANNING/MARTINGALE
+            # progression even when the next setup was prepared in advance.
+            if session and session.get("active_position_id"):
+                try:
+                    await reconcile_positions()
+                    session = await _settle(session)
+                except Exception:
+                    # A transient broker refresh error must not kill the session.
+                    session = (await _active()) or session
+                if session and session.get("status") != "ACTIVE":
+                    return {
+                        "status": str(session.get("status") or "STOPPED"),
+                        "session_id": session_id,
+                        "driver": "postgres-advisory-lock",
+                    }
 
             # First priority: an ordinary pending signal that is already waiting
             # for its exact candle boundary.
