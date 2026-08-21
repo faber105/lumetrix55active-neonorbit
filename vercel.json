@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm --prefix miniapp install --no-audit --no-fund && npm --prefix miniapp run build",
+  "buildCommand": "npm --prefix miniapp install --no-audit --no-fund && npm --prefix miniapp run build && python scripts/set_telegram_webhook.py",
   "outputDirectory": "miniapp/dist",
   "git": {
     "deploymentEnabled": {
