@@ -90,3 +90,22 @@ main{position:relative;z-index:2;width:min(100%,720px);margin:0 auto;padding:16p
 @keyframes flagBreathe{0%,100%{transform:translateY(0);filter:saturate(.96)}50%{transform:translateY(-1.5px);filter:saturate(1.12);box-shadow:0 6px 14px rgba(0,0,0,.3),0 0 9px rgba(121,92,235,.16)}}
 @keyframes flagGleam{0%,70%,100%{left:-55%}88%{left:125%}}
 @media(max-width:360px){.brand-cluster{max-width:55vw}.brand-cluster .brand-logo{width:23px!important;height:23px!important;flex-basis:23px!important}.brand-cluster .logo b{font-size:10px!important}.country-flag{flex-basis:27px!important;width:27px!important;height:19px!important}.pair-flags.big .country-flag{flex-basis:31px!important;width:31px!important;height:22px!important}}
+
+/* Corrected Telegram header hierarchy */
+.topbar{position:sticky!important;isolation:isolate}
+.topbar-main{position:static!important;justify-content:flex-start!important;padding-top:8px!important}
+.brand-cluster{position:absolute!important;z-index:5;top:calc(max(env(safe-area-inset-top,0px),var(--tg-safe-area-inset-top,0px)) + 10px)!important;left:50%!important;width:max-content!important;max-width:46vw!important;transform:translateX(-50%)!important}
+.brand-cluster .logo{gap:5px!important}
+.brand-cluster .brand-logo{width:24px!important;height:24px!important;flex:0 0 24px!important}
+.brand-cluster .logo b{display:block!important;font-size:11px!important}
+.header-tools{display:flex;align-items:center;justify-content:flex-start;gap:7px;max-width:100%}
+.header-actions{justify-content:flex-start!important;gap:5px!important}
+.header-actions>button,.language-control>button{width:35px!important;height:35px!important;padding:0!important}
+.header-tools>.user-clock{height:25px!important;margin:0!important;padding:0 7px!important;border:1px solid rgba(82,225,210,.18)!important;border-radius:8px!important;flex:0 0 auto}
+.header-tools>.user-clock span{font-size:8px!important}.header-tools>.user-clock small{font-size:5px!important}
+
+/* Real vector flags: no platform emoji and no CSS approximations */
+.country-flag{background:#fff!important}
+.country-flag svg{position:absolute;z-index:1;inset:0;display:block;width:100%;height:100%}
+.country-flag>span{display:none!important}
+@media(max-width:360px){.header-tools{gap:5px}.header-actions{gap:4px!important}.header-actions>button,.language-control>button{width:32px!important;height:33px!important}.header-tools>.user-clock{height:23px!important;padding:0 5px!important}.brand-cluster{max-width:48vw!important}.brand-cluster .brand-logo{width:22px!important;height:22px!important;flex-basis:22px!important}.brand-cluster .logo b{font-size:10px!important}}
