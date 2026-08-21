@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { TG, TG_ID, apiFetch, patchJson, postJson } from "./api";
 
-const PAIRS=[["EUR/USD","🇪🇺","🇺🇸"],["GBP/USD","🇬🇧","🇺🇸"],["USD/JPY","🇺🇸","🇯🇵"],["USD/CHF","🇺🇸","🇨🇭"],["AUD/USD","🇦🇺","🇺🇸"],["USD/CAD","🇺🇸","🇨🇦"],["NZD/USD","🇳🇿","🇺🇸"],["EUR/GBP","🇪🇺","🇬🇧"],["EUR/JPY","🇪🇺","🇯🇵"],["GBP/JPY","🇬🇧","🇯🇵"]];
+const PAIRS=[["EUR/USD","eu","us"],["GBP/USD","gb","us"],["USD/JPY","us","jp"],["USD/CHF","us","ch"],["AUD/USD","au","us"],["USD/CAD","us","ca"],["NZD/USD","nz","us"],["EUR/GBP","eu","gb"],["EUR/JPY","eu","jp"],["GBP/JPY","gb","jp"]];
 const MANUAL_TF=["15s","1m","3m","5m","15m"],AUTO_TF=["15s","1m","3m"];
 const AUTO_STRATEGIES=[{id:"smart_confluence",icon:"✦",name:"Mixed Smart",desc:"Быстрый поиск по всем стратегиям + повторное подтверждение перед входом",tone:"gold"},{id:"trend_pulse",icon:"↗",name:"Trend Pulse",desc:"EMA 9/21/50/200 · ADX/DMI · MACD · RSI",tone:"violet"},{id:"range_reversal",icon:"↔",name:"Range Reversal",desc:"Bollinger · RSI · слабый ADX · rejection",tone:"cyan"},{id:"volatility_breakout",icon:"⚡",name:"Volatility Breakout",desc:"Donchian · ATR expansion · DMI · momentum",tone:"orange"}];
 const PROFIT_STRATEGIES=[{id:"smart_confluence",icon:"✦",name:"Smart Confluence",desc:"Выбирает сильнейший подтверждённый сетап по всему рынку",tone:"gold"},{id:"mixed_smart",icon:"✦",name:"Mixed Smart",desc:"Быстрый поиск по всем стратегиям + повторное подтверждение перед входом",tone:"gold"},...AUTO_STRATEGIES.filter(x=>x.id!=="smart_confluence")];
@@ -26,8 +26,10 @@ function Pill({children,tone="neutral"}){return <span className={`pill ${tone}`}
 function Button({children,kind="primary",className="",...props}){return <button type="button" className={`btn ${kind} ${className}`} {...props}>{children}</button>}
 function ErrorBox({value}){return value?<div className="notice error">{value}</div>:null}
 function SectionTitle({eyebrow,title,text,right}){return <div className="section-title"><div>{eyebrow&&<small>{eyebrow}</small>}<h2>{title}</h2>{text&&<p>{text}</p>}</div>{right}</div>}
-function PairFlags({pair,big=false}){const item=PAIRS.find(([n])=>n===pair)||[pair,"🌐","🌐"];return <span className={`pair-flags ${big?"big":""}`}><i>{item[1]}</i><i>{item[2]}</i></span>}
-function PairPicker({value,onChange}){return <div className="pair-carousel">{PAIRS.map(([name,a,b])=><button type="button" key={name} className={`pair-tile ${value===name?"active":""}`} onClick={()=>onChange(name)}><span className="flag-stack"><i>{a}</i><i>{b}</i></span><b>{name}</b><small>OTC</small></button>)}</div>}
+const FLAG_LABELS={eu:"Европейский союз",us:"США",gb:"Великобритания",jp:"Япония",ch:"Швейцария",au:"Австралия",ca:"Канада",nz:"Новая Зеландия"};
+function FlagIcon({code}){return <i className={`country-flag flag-${code}`} role="img" aria-label={FLAG_LABELS[code]||code}><span/></i>}
+function PairFlags({pair,big=false}){const item=PAIRS.find(([n])=>n===pair)||[pair,"eu","us"];return <span className={`pair-flags ${big?"big":""}`}><FlagIcon code={item[1]}/><FlagIcon code={item[2]}/></span>}
+function PairPicker({value,onChange}){return <div className="pair-carousel">{PAIRS.map(([name,a,b])=><button type="button" key={name} className={`pair-tile ${value===name?"active":""}`} onClick={()=>onChange(name)}><span className="flag-stack"><FlagIcon code={a}/><FlagIcon code={b}/></span><b>{name}</b><small>OTC</small></button>)}</div>}
 function Segmented({items,value,onChange,disabled}){return <div className="segmented">{items.map(item=>{const key=typeof item==="string"?item:item.value,label=typeof item==="string"?item:item.label;return <button type="button" key={key} disabled={disabled} className={value===key?"active":""} onClick={()=>onChange(key)}>{label}</button>})}</div>}
 function AnalysisAnimation({pair,timeframe}){return <div className="analysis-card"><div className="radar"><span/><i/><b/></div><div><small>LIVE MARKET ANALYSIS</small><h3><PairFlags pair={pair}/> {pair} · {timeframe}</h3><p>Проверяю тренд, momentum, volatility, ADX/DMI, RSI, MACD, Bollinger и Donchian уровни…</p><div className="scan-lines"><span/><span/><span/></div></div></div>}
 function Direction({value}){const buy=value==="BUY";return <span className={`direction ${buy?"buy":"sell"}`}>{buy?"▲ CALL":"▼ PUT"}</span>}
