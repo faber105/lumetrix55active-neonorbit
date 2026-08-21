@@ -46,7 +46,7 @@ function AutoTab({enabled,isAdmin}){
   const[state,setState]=useState(null),[position,setPosition]=useState(null),[error,setError]=useState(""),[busy,setBusy]=useState(""),[toast,setToast]=useState("");
   const lastStage=useRef(null);
   const load=useCallback(async(refresh=false)=>{if(!isAdmin)return;try{const data=await apiFetch(`/api/auto/state?drive=false&_=${Date.now()}${refresh?"&refresh=true":""}`);setState(data);setError("");const pid=data?.session?.active_position_id||data?.runtime?.position_id;if(pid){try{setPosition(await apiFetch(`/api/live/position/${pid}?count=60`))}catch{setPosition(null)}}else setPosition(null);const stage=data?.session?.stage;if(stage&&stage!==lastStage.current&&["OPEN","CLOSED","MARTINGALE","COMPLETED","STOPPED"].includes(stage)){setToast(data?.session?.last_message||stage);setTimeout(()=>setToast(""),3000)}lastStage.current=stage}catch(e){setError(safeMessage(e))}},[isAdmin]);
-  usePolling(load,2500,Boolean(TG_ID&&isAdmin&&enabled));
+  usePolling(load,state?.active?1000:2500,Boolean(TG_ID&&isAdmin&&enabled));
   const engineTick=useCallback(async()=>{if(!isAdmin||!enabled)return;try{await postJson("/api/auto/tick")}catch{}},[isAdmin,enabled]);
   usePolling(engineTick,1000,Boolean(TG_ID&&isAdmin&&enabled&&state?.active));
   const toggleStrategy=id=>setStrategies(current=>{if(current.includes(id))return current.length===1?current:current.filter(x=>x!==id);if(current.length>=2){TG?.HapticFeedback?.notificationOccurred?.("warning");return current}return [...current,id]});

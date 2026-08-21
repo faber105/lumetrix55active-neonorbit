@@ -334,7 +334,7 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             client = _build_trading_client()
             if not await asyncio.wait_for(client.connect(persistent=False), timeout=20):
                 raise RuntimeError("Pocket Option demo trading connection failed")
-            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=4)
+            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=(0.20 if confirmed and not exact_entry else 0.8)), timeout=4)
             payout = payout_for_asset(snapshot, signal["asset"])
             if payout is None or payout < MIN_AUTO_PAYOUT:
                 await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")

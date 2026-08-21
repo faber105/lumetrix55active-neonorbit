@@ -346,7 +346,7 @@ async def _closed_broker_deals() -> dict[str, dict]:
         try:
             if not await client.connect(persistent=False):
                 return {}
-            deals = await client._client.get_closed_deals(listen_seconds=0.9)
+            deals = await client._client.get_closed_deals(listen_seconds=0.20)
         finally:
             await client.disconnect()
         return {_deal_id(row): row for row in deals if isinstance(row, dict) and _deal_id(row)}
