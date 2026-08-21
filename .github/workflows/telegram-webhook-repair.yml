@@ -11,29 +11,88 @@ on:
       - '.github/workflows/telegram-webhook-repair.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
-      - name: Wait for production and repair webhook
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Probe production and repair Telegram webhook
+        id: probe
         env:
           REPAIR_URL: https://lumetrix55active-neonorbit.vercel.app/api/internal/telegram-repair
         shell: bash
         run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            echo "Webhook repair attempt $i/30"
-            if RESPONSE=$(curl --fail --silent --show-error \
+          set +e
+          rm -f /tmp/repair_body /tmp/repair_err
+          RESULT="failed"
+          HTTP_CODE="000"
+          BODY=""
+          CURL_ERROR=""
+
+          for i in $(seq 1 40); do
+            echo "Webhook repair attempt $i/40"
+            : > /tmp/repair_body
+            : > /tmp/repair_err
+            HTTP_CODE=$(curl --silent --show-error \
+              --output /tmp/repair_body \
+              --write-out '%{http_code}' \
               --connect-timeout 5 --max-time 25 \
-              -X POST "$REPAIR_URL"); then
-              echo "$RESPONSE"
-              python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data' <<<"$RESPONSE"
-              exit 0
+              -X POST "$REPAIR_URL" 2>/tmp/repair_err)
+            CURL_RC=$?
+            BODY=$(cat /tmp/repair_body 2>/dev/null)
+            CURL_ERROR=$(cat /tmp/repair_err 2>/dev/null)
+            echo "HTTP=$HTTP_CODE curl_rc=$CURL_RC body=$BODY error=$CURL_ERROR"
+
+            if [ "$CURL_RC" -eq 0 ] && [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+              if BODY="$BODY" python3 - <<'PY'
+          import json, os, sys
+          try:
+              data = json.loads(os.environ.get('BODY') or '{}')
+          except Exception:
+              sys.exit(1)
+          sys.exit(0 if data.get('ok') is True else 1)
+          PY
+              then
+                RESULT="ok"
+                break
+              fi
             fi
             sleep 6
           done
-          echo "Production webhook repair did not become ready in time"
-          exit 1
+
+          mkdir -p diagnostics
+          {
+            echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "source_commit=${GITHUB_SHA}"
+            echo "result=${RESULT}"
+            echo "http_code=${HTTP_CODE}"
+            echo "curl_error=${CURL_ERROR}"
+            echo "response=${BODY}"
+          } > diagnostics/telegram-repair-status.txt
+
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Publish sanitized diagnostics branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp diagnostics/telegram-repair-status.txt /tmp/telegram-repair-status.txt
+          git checkout --orphan diagnostics-webhook
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p diagnostics
+          cp /tmp/telegram-repair-status.txt diagnostics/telegram-repair-status.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add diagnostics/telegram-repair-status.txt
+          git commit -m "Update Telegram webhook diagnostics"
+          git push --force origin diagnostics-webhook
+
+      - name: Require successful repair
+        if: steps.probe.outputs.result != 'ok'
+        run: exit 1
