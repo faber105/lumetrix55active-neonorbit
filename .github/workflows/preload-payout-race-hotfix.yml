@@ -1,0 +1,105 @@
+name: AlphaPulse Preload Payout Race Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/preload-payout-race-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve prepared entries through transient Pocket telemetry gaps
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/services/auto_trade.py')
+          text = path.read_text()
+          needle = '''            payout = payout_for_asset(snapshot, signal["asset"])
+            if payout is None or payout < MIN_AUTO_PAYOUT:
+'''
+          replacement = '''            payout = payout_for_asset(snapshot, signal["asset"])
+            # A 0.20s fast telemetry read is usually enough, but immediately after
+            # a 5m boundary Pocket can publish the new payout a fraction later.
+            # Retry only the missing-payout case; an explicit payout below 92%
+            # remains a hard rejection.
+            if payout is None and confirmed and not exact_entry:
+                retry_snapshot = await asyncio.wait_for(
+                    client.account_snapshot(listen_seconds=0.55), timeout=4
+                )
+                retry_payout = payout_for_asset(retry_snapshot, signal["asset"])
+                if retry_payout is not None:
+                    snapshot = retry_snapshot
+                    payout = retry_payout
+            if payout is None or payout < MIN_AUTO_PAYOUT:
+'''
+          if needle in text:
+              text = text.replace(needle, replacement, 1)
+          elif 'Retry only the missing-payout case' not in text:
+              raise SystemExit('auto_trade payout retry target not found')
+          path.write_text(text)
+
+          path = Path('backend/services/multi_strategy.py')
+          text = path.read_text()
+          old = '''    retryable = trade_status == "FAILED" or (
+        trade_status == "SKIPPED" and reason == "max_open_positions"
+    )
+'''
+          new = '''    payout_missing = trade_status == "PAYOUT_TOO_LOW" and trade.get("payout") is None
+    retryable = trade_status in {"FAILED", "DUPLICATE"} or payout_missing or (
+        trade_status == "SKIPPED" and reason == "max_open_positions"
+    )
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif 'payout_missing = trade_status == "PAYOUT_TOO_LOW"' not in text:
+              raise SystemExit('multi_strategy retry target not found')
+
+          old_clock = '''    try:
+        entry = preload_next._to_naive_utc(candidate.get("entry_time"))
+        lateness = max(0.0, (session_engine.utcnow() - entry).total_seconds())
+    except Exception:
+        # session_engine has no public clock contract; fall back to preload helper's
+        # imported utcnow through its module namespace.
+        try:
+            entry = preload_next._to_naive_utc(candidate.get("entry_time"))
+            lateness = max(0.0, (preload_next.utcnow() - entry).total_seconds())
+        except Exception:
+            return result
+'''
+          new_clock = '''    try:
+        entry = preload_next._to_naive_utc(candidate.get("entry_time"))
+        lateness = max(0.0, (preload_next.utcnow() - entry).total_seconds())
+    except Exception:
+        return result
+'''
+          if old_clock in text:
+              text = text.replace(old_clock, new_clock, 1)
+          elif 'session_engine.utcnow()' in text:
+              raise SystemExit('multi_strategy clock target changed unexpectedly')
+          path.write_text(text)
+          PY
+
+      - name: Validate Python imports
+        run: python3 -m compileall -q backend api bot
+
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/auto_trade.py backend/services/multi_strategy.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Retry transient Pocket payout gaps for prepared AUTO entries'
+          git push
