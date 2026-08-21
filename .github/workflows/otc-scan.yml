@@ -16,9 +16,6 @@ permissions:
   contents: read
   id-token: write
 
-# Overlapping invocations are safe because the backend atomically claims a
-# session tick in Neon. Never cancel an already-running scanner on deploy: that
-# created 60+ second blind gaps exactly when scheduled candle entries were due.
 concurrency:
   group: alphapulsesbot-scanner-${{ github.event_name }}
   cancel-in-progress: false
@@ -28,31 +25,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 7
     steps:
-      - name: Trigger 5-second scanner window
+      - name: Run adaptive AUTO scanner window
         env:
-          SCAN_URL: https://alphapulse-runtime-staging.vercel.app/api/internal/scan
+          SCAN_URL: https://lumetrix55active-neonorbit.vercel.app/api/internal/auto-tick
           EVENT_NAME: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
-          # Give a backend push enough time to become READY, while an existing
-          # scanner window remains alive because deployments no longer cancel it.
-          if [ "$EVENT_NAME" = "push" ]; then sleep 45; fi
-          for i in $(seq 1 59); do
+          if [ "$EVENT_NAME" = "push" ]; then sleep 35; fi
+
+          DEADLINE=$(( $(date +%s) + 285 ))
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             START=$(date +%s)
             TOKEN_JSON=$(curl --fail --silent --show-error \
               --connect-timeout 5 --max-time 15 \
               -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulsesbot-scanner")
             TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$TOKEN_JSON")
-            curl --fail --silent --show-error --retry 1 \
-              --connect-timeout 5 --max-time 25 \
+
+            RESPONSE=$(curl --fail --silent --show-error --retry 1 \
+              --connect-timeout 5 --max-time 30 \
               -X POST "$SCAN_URL" \
               -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json"
-            if [ "$i" -lt 59 ]; then
-              ELAPSED=$(( $(date +%s) - START ))
-              SLEEP_FOR=$(( 5 - ELAPSED ))
-              if [ "$SLEEP_FOR" -gt 0 ]; then sleep "$SLEEP_FOR"; fi
-            fi
+              -H "Content-Type: application/json")
+
+            POLL_AFTER=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(max(1.0,min(20.0,float(d.get("poll_after",5.0)))))' <<<"$RESPONSE" 2>/dev/null || echo 5)
+            ELAPSED=$(( $(date +%s) - START ))
+            SLEEP_FOR=$(python3 -c 'import sys; print(max(0.0,float(sys.argv[1])-float(sys.argv[2])))' "$POLL_AFTER" "$ELAPSED")
+            python3 -c 'import sys,time; time.sleep(float(sys.argv[1]))' "$SLEEP_FOR"
           done
