@@ -8,9 +8,31 @@ from sqlalchemy import select
 from backend.models.db_models import AsyncSessionLocal, MLState, utcnow
 
 FEATURE_COUNT = 12
-MIN_SAMPLES_FOR_INFLUENCE = int(os.getenv('ML_MIN_SAMPLES', '40'))
-LEARNING_RATE = float(os.getenv('ML_LEARNING_RATE', '0.035'))
-L2 = float(os.getenv('ML_L2', '0.0005'))
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+MIN_SAMPLES_FOR_INFLUENCE = _env_int('ML_MIN_SAMPLES', 40)
+LEARNING_RATE = _env_float('ML_LEARNING_RATE', 0.035)
+L2 = _env_float('ML_L2', 0.0005)
 
 
 class OnlineStrategyModel:
