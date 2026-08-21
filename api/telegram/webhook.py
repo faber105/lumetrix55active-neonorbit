@@ -119,7 +119,7 @@ async def _process_update(payload: dict, token: str) -> dict:
     os.environ["TELEGRAM_BOT_TOKEN"] = token
     os.environ["BOT_TOKEN"] = token
     os.environ["BACKEND_URL"] = str(os.getenv("BACKEND_URL") or DEFAULT_BASE_URL).strip().rstrip("/")
-    os.environ["MINI_APP_URL"] = os.environ["BACKEND_URL"]
+    os.environ["MINI_APP_URL"] = f"{os.environ['BACKEND_URL']}?v=20260821-2405"
 
     try:
         from bot.main import feed_update
