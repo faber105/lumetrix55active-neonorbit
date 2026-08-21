@@ -1,0 +1,120 @@
+name: AlphaPulse AUTO Session Continuity Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/auto-session-continuity-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch AUTO engine and live journal
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path_str: str, old: str, new: str, label: str):
+              path = Path(path_str)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          # 1) State reads must stay fast. Heavy market scans run through the
+          # adaptive tick endpoint instead of blocking every UI refresh.
+          replace_once(
+              'backend/routers/auto.py',
+              'from backend.services.session_driver import drive_session_tick\n',
+              'from backend.services.session_driver import drive_session_tick\nfrom backend.services.cpu_guard import adaptive_drive_session_tick\n',
+              'auto router adaptive import',
+          )
+          replace_once(
+              'backend/routers/auto.py',
+              '@router.get("/state")\nasync def state(refresh: bool = Query(False), drive: bool = Query(True), _: TelegramMiniAppUser = Depends(admin_user)):\n    tick_result = None\n    if drive:\n        try:\n            tick_result = await drive_session_tick()\n        except Exception as exc:\n            tick_result = {"status": "ERROR", "error": type(exc).__name__}\n',
+              '@router.get("/state")\nasync def state(refresh: bool = Query(False), drive: bool = Query(False), _: TelegramMiniAppUser = Depends(admin_user)):\n    tick_result = None\n    if drive:\n        try:\n            tick_result = await adaptive_drive_session_tick()\n        except Exception as exc:\n            tick_result = {"status": "ERROR", "error": type(exc).__name__}\n',
+              'read-only auto state',
+          )
+          replace_once(
+              'backend/routers/auto.py',
+              '@router.post("/tick")\nasync def tick(_: TelegramMiniAppUser = Depends(admin_user)):\n    return await drive_session_tick()\n',
+              '@router.post("/tick")\nasync def tick(_: TelegramMiniAppUser = Depends(admin_user)):\n    return await adaptive_drive_session_tick()\n',
+              'adaptive auto tick',
+          )
+
+          # 2) COUNT mode means "keep going until N wins". Exhausting one
+          # martingale chain must start a fresh series instead of stopping the
+          # whole session after its first losing chain.
+          replace_once(
+              'backend/services/session_engine.py',
+              '            if session["mode"] == "count":\n                status, stage, reason, ended = "STOPPED", "STOPPED", "MARTINGALE_EXHAUSTED", utcnow()\n                message = "Серия закрыта в минус · лимит перекрытий исчерпан"\n            elif failed >= int(session["max_failed_series"]):\n',
+              '            if session["mode"] == "count":\n                stage = "SCANNING"\n                message = "Серия закрыта в минус · лимит перекрытий исчерпан · начинаю новую серию и продолжаю до заданного числа WIN"\n            elif failed >= int(session["max_failed_series"]):\n',
+              'count session continuation',
+          )
+
+          # 3) When a preloaded candidate has priority, reconcile/settle the
+          # currently open position first. Otherwise PREPARED/WAIT_CLOSE could
+          # keep returning before the normal session tick updates CLOSED -> next scan.
+          replace_once(
+              'backend/services/session_driver.py',
+              'from backend.services.pocketoption_otc import OTC_ASSETS\n',
+              'from backend.services.pocketoption_otc import OTC_ASSETS\nfrom backend.services.positions import reconcile_positions\n',
+              'driver reconcile import',
+          )
+          replace_once(
+              'backend/services/session_driver.py',
+              'from backend.services.session_engine import _active, _load_signal, _register_open, _update\n',
+              'from backend.services.session_engine import _active, _load_signal, _register_open, _settle, _update\n',
+              'driver settle import',
+          )
+          replace_once(
+              'backend/services/session_driver.py',
+              '            session = await _active()\n\n            # First priority: an ordinary pending signal that is already waiting\n',
+              '            session = await _active()\n\n            # Always reconcile broker truth before preload priority can short-circuit\n            # the normal engine. This guarantees OPEN -> CLOSED -> SCANNING/MARTINGALE\n            # progression even when the next setup was prepared in advance.\n            if session and session.get("active_position_id"):\n                try:\n                    await reconcile_positions()\n                    session = await _settle(session)\n                except Exception:\n                    # A transient broker refresh error must not kill the session.\n                    session = (await _active()) or session\n                if session and session.get("status") != "ACTIVE":\n                    return {\n                        "status": str(session.get("status") or "STOPPED"),\n                        "session_id": session_id,\n                        "driver": "postgres-advisory-lock",\n                    }\n\n            # First priority: an ordinary pending signal that is already waiting\n',
+              'driver settle before preload',
+          )
+
+          # 4) Mini App: journal/state polling is read-only and therefore remains
+          # responsive while a separate adaptive engine tick keeps the session moving.
+          replace_once(
+              'miniapp/src/App.jsx',
+              'const data=await apiFetch(`/api/auto/state${refresh?"?refresh=true":""}`);',
+              'const data=await apiFetch(`/api/auto/state?drive=false${refresh?"&refresh=true":""}`);',
+              'miniapp read-only state polling',
+          )
+          replace_once(
+              'miniapp/src/App.jsx',
+              '  usePolling(load,750,Boolean(TG_ID&&isAdmin&&enabled));\n',
+              '  usePolling(load,650,Boolean(TG_ID&&isAdmin&&enabled));\n  const engineTick=useCallback(async()=>{if(!isAdmin||!enabled)return;try{await postJson("/api/auto/tick")}catch{}},[isAdmin,enabled]);\n  usePolling(engineTick,1000,Boolean(TG_ID&&isAdmin&&enabled&&state?.active));\n',
+              'miniapp independent adaptive tick',
+          )
+          PY
+
+      - name: Validate Python
+        run: python -m compileall -q backend api bot
+
+      - name: Build Mini App
+        run: |
+          npm --prefix miniapp install --no-audit --no-fund
+          npm --prefix miniapp run build
+
+      - name: Commit continuity fix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/routers/auto.py backend/services/session_engine.py backend/services/session_driver.py miniapp/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'Keep AUTO sessions running after every trade'
+          git push
