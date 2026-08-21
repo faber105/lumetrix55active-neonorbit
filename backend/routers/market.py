@@ -70,7 +70,10 @@ async def candles(
         raise HTTPException(400, 'Unsupported timeframe')
     try:
         rows = await market_data.get_candles(asset, timeframe, count)
-        current_price = await market_data.latest_price(asset)
+        # Keep the marker and scale tied to the exact candle set/timeframe
+        # returned below. A separate latest_price() call always used 1m data
+        # and could visually disagree with 15s/3m/5m/15m charts.
+        current_price = float(rows[-1]['close']) if rows else await market_data.latest_price(asset)
     except MarketDataUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     return {
