@@ -1,82 +1,155 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 EXPECTED_BOT_ID = "8347664656"
 DEFAULT_BASE_URL = "https://lumetrix55active-neonorbit.vercel.app"
+DIAG_KEY = "__vercel_build_telegram_diag__"
+
+
+def _safe_error(exc: Exception, token: str) -> str:
+    text = str(exc or "")
+    if token:
+        text = text.replace(token, "<redacted>")
+    return text[:500]
 
 
 def _api(token: str, method: str, data: dict | None = None) -> dict:
     url = f"https://api.telegram.org/bot{token}/{method}"
     encoded = urllib.parse.urlencode(data or {}).encode("utf-8") if data is not None else None
     request = urllib.request.Request(url, data=encoded, method="POST" if data is not None else "GET")
-    with urllib.request.urlopen(request, timeout=20) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        raise RuntimeError(f"Telegram {method} HTTP {exc.code}: {raw[:250]}") from None
+    body = json.loads(raw)
     if not body.get("ok"):
-        raise RuntimeError(f"Telegram {method} failed")
+        raise RuntimeError(f"Telegram {method} returned ok=false: {str(body.get('description') or '')[:250]}")
     return body
 
 
-def main() -> int:
+async def _persist_diag(payload: dict) -> None:
+    raw = str(os.getenv("DATABASE_URL") or "").strip()
+    if not raw:
+        return
+    try:
+        import asyncpg
+        from sqlalchemy.engine import make_url
+
+        url = make_url(raw)
+        conn = await asyncpg.connect(
+            host=url.host,
+            port=url.port or 5432,
+            user=url.username,
+            password=url.password,
+            database=url.database,
+            ssl="require" if url.host and "neon.tech" in url.host else None,
+            statement_cache_size=0,
+            timeout=12,
+        )
+        try:
+            body = json.dumps(
+                {"at": datetime.now(timezone.utc).isoformat(), **payload},
+                ensure_ascii=False,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ml_state(strategy, payload, samples, updated_at)
+                VALUES($1, $2, 0, NOW())
+                ON CONFLICT(strategy)
+                DO UPDATE SET payload=EXCLUDED.payload, updated_at=NOW()
+                """,
+                DIAG_KEY,
+                body,
+            )
+        finally:
+            await conn.close()
+    except Exception as exc:
+        print(f"Cannot persist Telegram build diagnostic: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _run_setup() -> dict:
     token = str(os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+    diag = {
+        "token_present": bool(token),
+        "token_bot_id": token.split(":", 1)[0] if token and ":" in token else (token[:20] if token else None),
+        "database_present": bool(str(os.getenv("DATABASE_URL") or "").strip()),
+        "backend_env_present": bool(str(os.getenv("BACKEND_URL") or os.getenv("PUBLIC_BACKEND_URL") or "").strip()),
+        "success": False,
+    }
+
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in Vercel Production environment")
-    token_bot_id = token.split(":", 1)[0]
-    if token_bot_id != EXPECTED_BOT_ID:
-        raise RuntimeError(f"TELEGRAM_BOT_TOKEN belongs to unexpected bot id {token_bot_id!r}")
+        diag.update(error_type="MissingToken", error="TELEGRAM_BOT_TOKEN is missing in Vercel Production environment")
+        return diag
+
+    if diag["token_bot_id"] != EXPECTED_BOT_ID:
+        diag.update(error_type="WrongBotId", error=f"token belongs to bot id {diag['token_bot_id']!r}")
+        return diag
 
     explicit = str(os.getenv("PUBLIC_BACKEND_URL") or os.getenv("BACKEND_URL") or "").strip().rstrip("/")
     base_url = explicit or DEFAULT_BASE_URL
-    if not base_url.startswith("https://"):
-        raise RuntimeError("BACKEND_URL must be https://")
-
-    # api/index.py is Vercel's FastAPI catch-all for /api/*.
+    diag["base_url"] = base_url
     webhook_url = f"{base_url}/api/telegram/webhook"
-    secret = hashlib.sha256(f"alphapulsesbot:{token}".encode("utf-8")).hexdigest()
+    diag["target_webhook"] = webhook_url
 
-    me = _api(token, "getMe").get("result") or {}
-    actual_id = str(me.get("id") or "")
-    if actual_id != EXPECTED_BOT_ID:
-        raise RuntimeError(f"Telegram getMe returned unexpected bot id {actual_id!r}")
+    try:
+        if not base_url.startswith("https://"):
+            raise RuntimeError("BACKEND_URL must be https://")
 
-    _api(
-        token,
-        "setWebhook",
-        {
-            "url": webhook_url,
-            "secret_token": secret,
-            "drop_pending_updates": "false",
-            "allowed_updates": json.dumps(["message", "callback_query"]),
-        },
-    )
-    info = _api(token, "getWebhookInfo").get("result") or {}
-    actual = str(info.get("url") or "")
-    if actual != webhook_url:
-        raise RuntimeError(f"Webhook mismatch: expected {webhook_url}, got {actual}")
+        secret = hashlib.sha256(f"alphapulsesbot:{token}".encode("utf-8")).hexdigest()
+        me = _api(token, "getMe").get("result") or {}
+        actual_id = str(me.get("id") or "")
+        diag["getme_bot_id"] = actual_id
+        diag["getme_username"] = str(me.get("username") or "")[:100] or None
+        if actual_id != EXPECTED_BOT_ID:
+            raise RuntimeError(f"Telegram getMe returned unexpected bot id {actual_id!r}")
 
-    print(
-        "Telegram webhook verified:",
-        json.dumps(
+        _api(
+            token,
+            "setWebhook",
             {
-                "bot_id": actual_id,
-                "url": actual,
-                "pending_update_count": int(info.get("pending_update_count") or 0),
-                "last_error_message": info.get("last_error_message"),
+                "url": webhook_url,
+                "secret_token": secret,
+                "drop_pending_updates": "false",
+                "allowed_updates": json.dumps(["message", "callback_query"]),
             },
-            ensure_ascii=False,
-        ),
-    )
+        )
+        info = _api(token, "getWebhookInfo").get("result") or {}
+        actual = str(info.get("url") or "")
+        diag.update(
+            actual_webhook=actual,
+            pending_update_count=int(info.get("pending_update_count") or 0),
+            last_error_message=str(info.get("last_error_message") or "")[:300] or None,
+        )
+        if actual != webhook_url:
+            raise RuntimeError(f"Webhook mismatch: expected {webhook_url}, got {actual}")
+        diag["success"] = True
+    except Exception as exc:
+        diag.update(error_type=type(exc).__name__, error=_safe_error(exc, token))
+    return diag
+
+
+def main() -> int:
+    diag = _run_setup()
+    try:
+        asyncio.run(_persist_diag(diag))
+    except Exception as exc:
+        print(f"Diagnostic persistence runner failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    print("Telegram build diagnostic:", json.dumps(diag, ensure_ascii=False))
+    # Keep the deployment alive even when Telegram setup fails. The sanitized
+    # failure is persisted to Neon and can be repaired without losing production.
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"Telegram webhook build setup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        raise
+    raise SystemExit(main())
