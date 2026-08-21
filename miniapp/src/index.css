@@ -62,3 +62,31 @@ main{position:relative;z-index:2;width:min(100%,720px);margin:0 auto;padding:16p
 .pair-flags{flex:0 0 auto;gap:5px;min-width:max-content}.pair-flags i{display:inline-grid;place-items:center;width:24px;height:24px;overflow:visible;margin:0!important;border:1px solid rgba(255,255,255,.09);border-radius:50%;background:#171c28;font-size:16px!important;line-height:1}.pair-flags.big i{width:31px;height:31px;font-size:21px!important}.pair-flags i+i{margin-left:0!important}.flag-stack{gap:4px;height:30px}.flag-stack i{flex:0 0 27px;margin:0!important}.flag-stack i+i{margin-left:0!important}.market-pair{min-width:0;flex-wrap:nowrap}.market-pair>div{min-width:0}.market-pair h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.market-overview-head{display:grid;grid-template-columns:minmax(0,1fr) auto}.market-payout{min-width:58px}.market-quote-row{min-width:0}.market-quote-row>div{overflow:hidden}
 @media(max-width:520px){.user-clock{height:24px;padding:0 5px}.user-clock span{font-size:8px}.user-clock small{font-size:5px}.home-intro h1{font-size:23px}.market-pair{gap:7px}.market-pair h2{font-size:15px}.pair-flags.big i{width:27px;height:27px;font-size:18px!important}.market-payout b{font-size:23px}.market-quote-row{gap:6px}.market-quote-row small{font-size:7px}.market-quote-row b{font-size:13px}.market-quote-row strong{font-size:10px}}
 @media(max-width:360px){.user-clock span{font-size:7px}.user-clock small{font-size:4px}.pair-flags.big i{width:25px;height:25px}.market-pair h2{font-size:14px}}
+
+/* Telegram title slot + consistent animated market flags */
+.topbar{position:sticky}
+.topbar-main{position:relative;justify-content:flex-end!important;padding-top:8px}
+.brand-cluster{position:absolute!important;z-index:3;top:calc(max(env(safe-area-inset-top,0px),var(--tg-safe-area-inset-top,0px)) + 11px);left:50%;width:max-content;max-width:52vw;transform:translateX(-50%)}
+.brand-cluster .logo{gap:5px!important;max-width:100%}
+.brand-cluster .brand-logo{width:25px!important;height:25px!important;flex:0 0 25px}
+.brand-cluster .logo b{font-size:11px!important;letter-spacing:-.035em}
+.brand-cluster .user-clock{height:21px!important;margin-left:1px!important;padding:0 5px!important;border-radius:7px!important}
+.brand-cluster .user-clock span{font-size:7px!important}.brand-cluster .user-clock small{font-size:4px!important}
+.header-actions{position:relative;z-index:4}
+
+.country-flag{position:relative!important;display:inline-block!important;flex:0 0 29px!important;width:29px!important;height:20px!important;margin:0!important;overflow:hidden!important;border:1px solid rgba(255,255,255,.3)!important;border-radius:5px!important;background:#fff;box-shadow:0 4px 10px rgba(0,0,0,.25),inset 0 0 0 1px rgba(0,0,0,.06);font-size:0!important;line-height:0;transform-origin:50% 80%;animation:flagBreathe 3.6s ease-in-out infinite}
+.country-flag:nth-child(2){animation-delay:.4s}
+.country-flag:after{content:"";position:absolute;z-index:5;inset:-20% auto -20% -55%;width:36%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);transform:skewX(-18deg);animation:flagGleam 4.8s ease-in-out infinite}
+.country-flag>span,.country-flag>span:before,.country-flag>span:after{position:absolute;display:block;content:""}
+.pair-flags.big .country-flag{flex-basis:35px!important;width:35px!important;height:24px!important;border-radius:6px!important}
+.flag-stack{height:24px!important;gap:6px!important}.flag-stack .country-flag{flex-basis:29px!important}
+.flag-eu{background:#164194}.flag-eu>span{inset:4px 7px;border:2px dotted #ffd83d;border-radius:50%}
+.flag-us{background:repeating-linear-gradient(to bottom,#b22234 0 2px,#fff 2px 4px)}.flag-us>span{left:0;top:0;width:43%;height:54%;background:#3c3b6e}.flag-us>span:after{content:"···";inset:-1px 1px auto;color:#fff;font:700 5px/5px sans-serif;letter-spacing:0}
+.flag-gb{background:linear-gradient(33deg,transparent 41%,#fff 41% 47%,#c8102e 47% 53%,#fff 53% 59%,transparent 59%),linear-gradient(-33deg,transparent 41%,#fff 41% 47%,#c8102e 47% 53%,#fff 53% 59%,transparent 59%),linear-gradient(90deg,transparent 38%,#fff 38% 44%,#c8102e 44% 56%,#fff 56% 62%,transparent 62%),linear-gradient(transparent 33%,#fff 33% 40%,#c8102e 40% 60%,#fff 60% 67%,transparent 67%),#15377b}
+.flag-jp{background:#fff}.flag-jp>span{width:9px;height:9px;left:50%;top:50%;border-radius:50%;background:#bc002d;transform:translate(-50%,-50%)}
+.flag-ch{background:#d52b1e}.flag-ch>span{width:5px;height:14px;left:50%;top:50%;background:#fff;transform:translate(-50%,-50%)}.flag-ch>span:after{width:14px;height:5px;left:50%;top:50%;background:#fff;transform:translate(-50%,-50%)}
+.flag-ca{background:linear-gradient(90deg,#d52b1e 0 25%,#fff 25% 75%,#d52b1e 75%)}.flag-ca>span:after{content:"◆";left:50%;top:50%;color:#d52b1e;font:700 8px/1 sans-serif;transform:translate(-50%,-50%)}
+.flag-au,.flag-nz{background:#102a66}.flag-au>span,.flag-nz>span{left:3px;top:3px;width:10px;height:7px;background:linear-gradient(32deg,transparent 42%,#fff 42% 48%,#d4213d 48% 55%,#fff 55% 61%,transparent 61%),linear-gradient(-32deg,transparent 42%,#fff 42% 48%,#d4213d 48% 55%,#fff 55% 61%,transparent 61%),linear-gradient(90deg,transparent 40%,#fff 40% 46%,#d4213d 46% 56%,#fff 56% 62%,transparent 62%),linear-gradient(transparent 34%,#fff 34% 41%,#d4213d 41% 59%,#fff 59% 66%,transparent 66%)}.flag-au>span:after,.flag-nz>span:after{content:"✦";left:15px;top:5px;color:#fff;font:700 7px/1 sans-serif;text-shadow:5px 5px 0 #fff}.flag-nz>span:after{color:#ef3340;text-shadow:5px 5px 0 #ef3340}
+@keyframes flagBreathe{0%,100%{transform:translateY(0);filter:saturate(.96)}50%{transform:translateY(-1.5px);filter:saturate(1.12);box-shadow:0 6px 14px rgba(0,0,0,.3),0 0 9px rgba(121,92,235,.16)}}
+@keyframes flagGleam{0%,70%,100%{left:-55%}88%{left:125%}}
+@media(max-width:360px){.brand-cluster{max-width:55vw}.brand-cluster .brand-logo{width:23px!important;height:23px!important;flex-basis:23px!important}.brand-cluster .logo b{font-size:10px!important}.country-flag{flex-basis:27px!important;width:27px!important;height:19px!important}.pair-flags.big .country-flag{flex-basis:31px!important;width:31px!important;height:22px!important}}
