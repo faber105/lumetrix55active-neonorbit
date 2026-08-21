@@ -30,7 +30,7 @@
     }
   ],
   "functions": {
-    "api/main.py": {
+    "api/index.py": {
       "maxDuration": 300,
       "includeFiles": "miniapp/dist/**"
     }
