@@ -11,6 +11,24 @@ from urllib.parse import parse_qsl
 from fastapi import Header, HTTPException
 
 
+BUILTIN_ADMIN_IDS = {7591614041}
+
+
+def admin_ids() -> set[int]:
+    values = {int(os.getenv("ADMIN_ID", "0") or 0), *BUILTIN_ADMIN_IDS}
+    for raw in (os.getenv("ADMIN_IDS", ""), os.getenv("SECONDARY_ADMIN_IDS", "")):
+        for item in raw.replace(";", ",").split(","):
+            try:
+                values.add(int(item.strip()))
+            except (TypeError, ValueError):
+                continue
+    return {value for value in values if value > 0}
+
+
+def is_admin_id(telegram_id: int) -> bool:
+    return int(telegram_id) in admin_ids()
+
+
 @dataclass(frozen=True)
 class TelegramMiniAppUser:
     id: int
@@ -83,7 +101,6 @@ async def admin_user(
     x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
 ) -> TelegramMiniAppUser:
     user = _verify_init_data(x_telegram_init_data or "")
-    admin_id = int(os.getenv("ADMIN_ID", "0") or 0)
-    if admin_id <= 0 or user.id != admin_id:
+    if not is_admin_id(user.id):
         raise HTTPException(403, "Admin access required")
     return user
