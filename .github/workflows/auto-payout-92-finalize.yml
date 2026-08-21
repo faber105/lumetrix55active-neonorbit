@@ -1,0 +1,75 @@
+name: AlphaPulse AUTO Payout 92 Finalizer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/auto-payout-92-finalize.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Finalize strict payout scanning and journal
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('backend/services/session_engine.py')
+          text = p.read_text()
+          old = '        scanned_assets=all_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,'
+          new = '        scanned_assets=scan_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,'
+          if old not in text:
+              raise SystemExit('final runtime scanned_assets target missing')
+          text = text.replace(old, new, 1)
+          # The actual scan uses live Pocket payout state, refreshed at most 1s ago.
+          old_snapshot = '    snapshot = await get_demo_account_snapshot()\n    balance = snapshot.get("balance")'
+          new_snapshot = '    snapshot = await get_demo_account_snapshot(max_age=1.0)\n    balance = snapshot.get("balance")'
+          if old_snapshot not in text:
+              raise SystemExit('session snapshot target missing')
+          text = text.replace(old_snapshot, new_snapshot, 1)
+          text = text.replace('"Сигнал пропущен · продолжаю анализ всех пар"', '"Сигнал пропущен · продолжаю анализ пар с payout ≥92%"')
+          text = text.replace('f"Вход пропущен: {trade.get(\'status\')} · продолжаю анализ всех пар"', 'f"Вход пропущен: {trade.get(\'status\')} · продолжаю анализ пар с payout ≥92%"')
+          text = text.replace('f"WIN +{pnl:.2f} · анализирую все пары для следующего входа"', 'f"WIN +{pnl:.2f} · анализирую пары с payout ≥92% для следующего входа"')
+          text = text.replace('"Полная минусовая серия учтена · анализирую все пары дальше"', '"Полная минусовая серия учтена · анализирую пары с payout ≥92% дальше"')
+          p.write_text(text)
+
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text()
+          old = '    snapshot = await get_demo_account_snapshot()\n    all_assets = list(OTC_ASSETS.keys())'
+          new = '    snapshot = await get_demo_account_snapshot(max_age=1.0)\n    all_assets = list(OTC_ASSETS.keys())'
+          if old not in text:
+              raise SystemExit('preload snapshot target missing')
+          text = text.replace(old, new, 1)
+          text = text.replace('заранее анализирую следующий вход', 'заранее анализирую следующий вход только среди payout ≥92%')
+          p.write_text(text)
+
+          session = Path('backend/services/session_engine.py').read_text()
+          preload = Path('backend/services/preload_next.py').read_text()
+          auto = Path('backend/services/auto_trade.py').read_text()
+          assert 'MIN_AUTO_PAYOUT = 92.0' in auto
+          assert 'scanned_assets=scan_assets, scanned_count=len(scan_assets)' in session
+          assert 'scan_best_candidates(timeframe, scan_assets)' in session
+          assert 'scan_best_candidates(timeframe, eligible_assets)' in preload
+          assert 'get_demo_account_snapshot(max_age=1.0)' in session
+          assert 'get_demo_account_snapshot(max_age=1.0)' in preload
+          PY
+      - name: Validate Python
+        run: python3 -m compileall -q backend api bot
+      - name: Commit final payout filter
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/session_engine.py backend/services/preload_next.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Keep AUTO scans and journal on 92 payout universe'
+          git push
