@@ -258,6 +258,21 @@ async def drive_session_tick(*, min_interval_seconds: float = TICK_MIN_INTERVAL_
                 result.setdefault("driver", "postgres-advisory-lock")
                 return result
 
+            # If the current deal is still open, reconciliation/pre-analysis is
+            # enough for this tick. Do not launch another whole-market scan while
+            # holding an open position. This path stays inside the advisory lock.
+            session = (await _active()) or session
+            if session and session.get("active_position_id"):
+                result = {
+                    "status": "OPEN",
+                    "position_id": session.get("active_position_id"),
+                    "session_id": session_id,
+                    "driver": "postgres-advisory-lock",
+                }
+                if preload:
+                    result["preload"] = preload
+                return result
+
             # Only when no prepared entry is outstanding may the normal engine
             # refresh the market universe and search for a brand-new setup.
             universe = await _refresh_live_otc_universe()

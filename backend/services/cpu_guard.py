@@ -118,10 +118,10 @@ async def adaptive_drive_session_tick() -> dict:
     # session engine reconciles broker truth and, once closed, immediately moves
     # on to the next analysis cycle.
     if session.get("active_position_id"):
-        result = await session_tick()
+        result = await _full_drive_session_tick(min_interval_seconds=0.5)
         if isinstance(result, dict):
             result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))
-            result.setdefault("cpu_mode", "position-watch")
+            result.setdefault("cpu_mode", "position-watch-locked")
         return result
 
     interval = float(_ANALYSIS_INTERVAL.get(timeframe, 40.0))
