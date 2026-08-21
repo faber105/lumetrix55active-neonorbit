@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from typing import Iterable
 
-from backend.services import auto_trade, preload_next, session_engine
+from backend.services import auto_trade, positions as positions_service, preload_next, session_engine
+from backend.services.pocket_demo_trading import DirectDemoTradingClient
+from backend.services.pocketoption_otc import market_data
 from backend.services.preload_journal import preload_cycle as _base_preload_cycle
 from backend.services.signal_engine import SMART_EXECUTION_STRATEGIES, signal_engine
 
@@ -22,6 +25,134 @@ auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 12.0
 # confidence, but there is no second session-level 82% confidence cutoff.
 session_engine.PROFIT_MIN_CONFIDENCE = 0.0
 preload_next.PROFIT_MIN_CONFIDENCE = 0.0
+
+# Low-latency PROFIT/preload continuation. The ordinary reconciliation path used
+# to make one relatively long closed-deals probe and then wait for the next
+# serverless tick. At a 5m boundary that could turn a prepared next entry into a
+# 4-8 second late close. Keep the normal engine intact, but make its broker probe
+# short and let the preload path burst-poll until Pocket publishes the result.
+_ORIGINAL_CLOSED_BROKER_DEALS = positions_service._closed_broker_deals
+_ORIGINAL_PRELOAD_EXECUTE = preload_next.execute_confirmed_signal
+_ORIGINAL_PRELOAD_CONSUME = preload_next._consume_when_closed
+_ORIGINAL_BUILD_TRADING_CLIENT = auto_trade._build_trading_client
+
+
+async def _fast_closed_broker_deals() -> dict[str, dict]:
+    try:
+        await market_data._refresh_private_ssid()
+        if not market_data.configured:
+            return {}
+        client = DirectDemoTradingClient(market_data.ssid)
+        try:
+            if not await client.connect(persistent=False):
+                return {}
+            deals = await client._client.get_closed_deals(listen_seconds=0.18)
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        return {
+            positions_service._deal_id(row): row
+            for row in deals or []
+            if isinstance(row, dict) and positions_service._deal_id(row)
+        }
+    except Exception:
+        # A transient fast-path failure must not break settlement. The normal
+        # implementation remains the final fallback.
+        return await _ORIGINAL_CLOSED_BROKER_DEALS()
+
+
+positions_service._closed_broker_deals = _fast_closed_broker_deals
+
+
+async def _preload_reconcile_burst(limit: int = 100) -> dict:
+    """Poll broker truth several times per second only at a prepared entry boundary."""
+    deadline = asyncio.get_running_loop().time() + 4.6
+    last: dict = {"closed": 0, "checked": 0, "errors": []}
+    while True:
+        last = await positions_service.reconcile_positions(limit=limit)
+        if int(last.get("closed") or 0) > 0:
+            return last
+        if int(last.get("checked") or 0) <= 0:
+            return last
+        if asyncio.get_running_loop().time() >= deadline:
+            return last
+        await asyncio.sleep(0.06)
+
+
+preload_next.reconcile_positions = _preload_reconcile_burst
+
+
+def _fast_preload_client():
+    client = _ORIGINAL_BUILD_TRADING_CLIENT()
+    original_snapshot = client.account_snapshot
+
+    async def fast_snapshot(listen_seconds: float = 1.2):
+        # execute_confirmed_signal uses 0.8s here. The prepared signal already has
+        # a payout snapshot, so 0.18s is enough for the mandatory live re-check
+        # without delaying the order another ~0.6s.
+        window = 0.18 if 0.75 <= float(listen_seconds) <= 0.85 else float(listen_seconds)
+        return await original_snapshot(listen_seconds=window)
+
+    client.account_snapshot = fast_snapshot
+    return client
+
+
+async def _fast_execute_confirmed_signal(signal: dict) -> dict:
+    previous_builder = auto_trade._build_trading_client
+    auto_trade._build_trading_client = _fast_preload_client
+    try:
+        return await _ORIGINAL_PRELOAD_EXECUTE(signal)
+    finally:
+        auto_trade._build_trading_client = previous_builder
+
+
+preload_next.execute_confirmed_signal = _fast_execute_confirmed_signal
+
+
+async def _resilient_preload_consume(session: dict, candidate: dict) -> dict | None:
+    """Do not discard a prepared setup on a one-tick Pocket race after settlement."""
+    result = await _ORIGINAL_PRELOAD_CONSUME(session, candidate)
+    if not isinstance(result, dict):
+        return result
+
+    status = str(result.get("status") or "")
+    trade = result.get("trade") if isinstance(result.get("trade"), dict) else {}
+    trade_status = str(trade.get("status") or status)
+    reason = str(trade.get("reason") or "")
+    retryable = trade_status == "FAILED" or (
+        trade_status == "SKIPPED" and reason == "max_open_positions"
+    )
+    if not retryable or not candidate.get("entry_time") or not candidate.get("signal_id"):
+        return result
+
+    try:
+        entry = preload_next._to_naive_utc(candidate.get("entry_time"))
+        lateness = max(0.0, (session_engine.utcnow() - entry).total_seconds())
+    except Exception:
+        # session_engine has no public clock contract; fall back to preload helper's
+        # imported utcnow through its module namespace.
+        try:
+            entry = preload_next._to_naive_utc(candidate.get("entry_time"))
+            lateness = max(0.0, (preload_next.utcnow() - entry).total_seconds())
+        except Exception:
+            return result
+
+    if lateness > 8.0:
+        return result
+
+    await preload_next._save_candidate(int(session["id"]), status="WAIT_CLOSE")
+    await session_engine._event(
+        int(session["id"]),
+        "PRELOAD_RETRY",
+        "Pocket завершает прошлую сделку · заранее найденный вход сохранён и повторяется без нового 5m ожидания",
+        {"signal_id": int(candidate["signal_id"]), "status": trade_status, "reason": reason or None, "lateness": round(lateness, 2)},
+    )
+    return {"status": "WAIT_CLOSE", "block": True, "retry": True, "trade": trade}
+
+
+preload_next._consume_when_closed = _resilient_preload_consume
 
 
 def split_strategy_key(value: object) -> list[str]:
@@ -201,7 +332,17 @@ async def preload_cycle() -> dict | None:
         selected = split_strategy_key(session.get("strategy"))
         token = _SELECTED_SCAN_STRATEGIES.set(_execution_strategies(selected))
     try:
-        return await _base_preload_cycle()
+        result = await _base_preload_cycle()
+        if isinstance(result, dict):
+            raw_status = str(result.get("status") or "")
+            if raw_status == "PRELOAD_WAIT_CLOSE":
+                result = {**result, "raw_status": raw_status, "status": "WAIT_CLOSE"}
+            elif raw_status == "PRELOAD_ACTIVE":
+                preparation = result.get("preparation") if isinstance(result.get("preparation"), dict) else {}
+                prepared_status = str(preparation.get("status") or "")
+                if prepared_status in {"PREPARED", "WAIT_CLOSE"}:
+                    result = {**result, "raw_status": raw_status, "status": prepared_status}
+        return result
     finally:
         if token is not None:
             _SELECTED_SCAN_STRATEGIES.reset(token)
