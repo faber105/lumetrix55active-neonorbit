@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Trigger due VIP scan
         env:
-          VIP_URL: https://alphapulse-runtime-staging.vercel.app/api/internal/vip-scan
+          VIP_URL: https://lumetrix55active-neonorbit.vercel.app/api/internal/vip-scan
         shell: bash
         run: |
           set -euo pipefail
