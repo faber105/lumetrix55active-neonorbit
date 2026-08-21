@@ -1,0 +1,302 @@
+name: AlphaPulse Fast Pocket Settlement Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fast-settlement-preload-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch fast Pocket settlement path
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) Add a dedicated short-burst broker reconciliation path. It keeps one
+          # Pocket connection alive around expiry instead of reconnecting once per tick.
+          path = Path('backend/services/positions.py')
+          text = path.read_text()
+          marker = '\n\nasync def reconcile_positions(limit: int = 100) -> dict:\n'
+          if 'async def reconcile_auto_position_fast(' not in text:
+              if marker not in text:
+                  raise SystemExit('positions.py reconcile marker not found')
+              helper = r'''
+
+async def reconcile_auto_position_fast(
+    position_id: int,
+    *,
+    wait_seconds: float = 4.8,
+    poll_interval: float = 0.12,
+) -> dict:
+    """Resolve one AUTO position from Pocket with a tight expiry-time polling burst.
+
+    This path is used when a pre-analyzed next entry is waiting for the previous
+    Pocket result. It keeps a single broker connection open and polls the exact
+    broker order several times per second for a few seconds after expiry.
+    """
+    import asyncio
+    import time
+
+    async with AsyncSessionLocal() as db:
+        position = await db.get(PaperPosition, int(position_id))
+        if position is None:
+            return {"status": "MISSING", "position_id": int(position_id)}
+        if position.status != "OPEN":
+            return {"status": "CLOSED", "position_id": int(position_id), "result": position.result.value}
+        if position.source != "auto":
+            return {"status": "UNSUPPORTED", "position_id": int(position_id)}
+        expiry_time = position.expiry_time
+        direction = position.direction
+        execution = (
+            await db.execute(
+                select(TradeExecution)
+                .where(TradeExecution.position_id == position.id)
+                .order_by(desc(TradeExecution.created_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        execution_id = int(execution.id) if execution is not None else None
+        broker_id = str(execution.broker_order_id) if execution and execution.broker_order_id else None
+
+    if not broker_id:
+        return {"status": "BROKER_ID_PENDING", "position_id": int(position_id)}
+
+    seconds_to_expiry = (expiry_time - _now()).total_seconds()
+    if seconds_to_expiry > 1.25:
+        return {
+            "status": "NOT_DUE",
+            "position_id": int(position_id),
+            "seconds_to_expiry": round(seconds_to_expiry, 3),
+        }
+    if seconds_to_expiry > 0:
+        await asyncio.sleep(seconds_to_expiry)
+
+    try:
+        await market_data._refresh_private_ssid()
+        if not market_data.configured:
+            return {"status": "MARKET_UNAVAILABLE", "position_id": int(position_id)}
+        client = DirectDemoTradingClient(market_data.ssid)
+        connected = await client.connect(persistent=False)
+        if not connected:
+            return {"status": "CONNECT_FAILED", "position_id": int(position_id)}
+    except Exception as exc:
+        logger.warning("Pocket fast settlement connect failed position=%s: %s", position_id, type(exc).__name__)
+        return {"status": "CONNECT_FAILED", "position_id": int(position_id), "error": type(exc).__name__}
+
+    deadline = time.monotonic() + max(0.5, float(wait_seconds))
+    attempts = 0
+    deal = None
+    try:
+        while time.monotonic() <= deadline:
+            attempts += 1
+            try:
+                rows = await client._client.get_closed_deals(
+                    listen_seconds=max(0.08, min(0.30, float(poll_interval)))
+                )
+            except Exception as exc:
+                logger.warning("Pocket fast settlement poll failed position=%s: %s", position_id, type(exc).__name__)
+                rows = []
+            for row in rows or []:
+                if isinstance(row, dict) and _deal_id(row) == broker_id:
+                    deal = row
+                    break
+            if deal is not None:
+                break
+            await asyncio.sleep(max(0.05, min(0.25, float(poll_interval))))
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+    if deal is None:
+        return {
+            "status": "BROKER_RESULT_PENDING",
+            "position_id": int(position_id),
+            "attempts": attempts,
+        }
+
+    result, broker_close = _broker_outcome(deal, direction)
+    if result is None:
+        return {
+            "status": "BROKER_RESULT_UNPARSED",
+            "position_id": int(position_id),
+            "attempts": attempts,
+        }
+
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            locked = (
+                await db.execute(
+                    select(PaperPosition)
+                    .where(PaperPosition.id == int(position_id), PaperPosition.status == "OPEN")
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one_or_none()
+            if locked is None:
+                return {"status": "ALREADY_CLOSED", "position_id": int(position_id)}
+            locked.result = result
+            if broker_close is not None:
+                locked.close_price = float(broker_close)
+            locked.status = "CLOSED"
+            locked.closed_at = _deal_close_time(deal) or utcnow()
+            if execution_id is not None:
+                execution = await db.get(TradeExecution, execution_id)
+                if execution is not None:
+                    execution.status = result.value
+                    execution.error = None
+
+    logger.warning(
+        "Pocket fast settlement resolved position=%s result=%s attempts=%s",
+        position_id,
+        result.value,
+        attempts,
+    )
+    return {
+        "status": "CLOSED",
+        "position_id": int(position_id),
+        "result": result.value,
+        "attempts": attempts,
+    }
+'''
+              text = text.replace(marker, helper + marker, 1)
+              path.write_text(text)
+
+          # 2) Use the fast result path for a prepared next entry, and do not throw
+          # away the prepared signal on a transient race immediately after expiry.
+          path = Path('backend/services/preload_next.py')
+          text = path.read_text()
+          text = text.replace(
+              'from backend.services.positions import reconcile_positions',
+              'from backend.services.positions import reconcile_auto_position_fast, reconcile_positions',
+              1,
+          )
+          old = '''    await reconcile_positions()\n    current = await _active()\n'''
+          new = '''    current = await _active()\n    if current and current.get("active_position_id"):\n        await reconcile_auto_position_fast(\n            int(current["active_position_id"]), wait_seconds=4.8, poll_interval=0.12\n        )\n    else:\n        await reconcile_positions()\n    current = await _active()\n'''
+          if old not in text and 'wait_seconds=4.8, poll_interval=0.12' not in text:
+              raise SystemExit('preload_next.py reconciliation target not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    await _save_candidate(int(session["id"]), status="CANCELLED")\n    return {"status": str(trade.get("status") or "PRELOAD_FAILED"), "block": True, "trade": trade}\n'''
+          new = '''    trade_status = str(trade.get("status") or "PRELOAD_FAILED")\n    trade_reason = str(trade.get("reason") or "")\n    lateness = max(0.0, (utcnow() - entry).total_seconds())\n    retryable = (\n        trade_status in {"FAILED", "DUPLICATE"}\n        or (trade_status == "SKIPPED" and trade_reason == "max_open_positions")\n    )\n    if retryable and lateness <= 8.0:\n        await _save_candidate(int(session["id"]), status="WAIT_CLOSE")\n        await _event(\n            int(session["id"]),\n            "PRELOAD_RETRY",\n            "Pocket ещё завершает предыдущую сделку · повторяю заранее найденный вход без нового 5m ожидания",\n            {"status": trade_status, "reason": trade_reason or None, "lateness": round(lateness, 2)},\n        )\n        return {"status": "PRELOAD_RETRY", "block": True, "trade": trade, "retry_in": 0.35}\n\n    await _save_candidate(int(session["id"]), status="CANCELLED")\n    await _event(\n        int(session["id"]),\n        "PRELOAD_CANCELLED",\n        "Заранее найденный вход отменён только после окончательной проверки Pocket",\n        {"status": trade_status, "reason": trade_reason or None, "lateness": round(lateness, 2)},\n    )\n    return {"status": trade_status, "block": True, "trade": trade}\n'''
+          if old not in text and 'PRELOAD_RETRY' not in text:
+              raise SystemExit('preload_next.py cancel target not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 3) Resolve broker truth with the tight path before the preload candidate
+          # is consumed. This removes the old 4-8 second OPEN -> CLOSED gap.
+          path = Path('backend/services/session_driver.py')
+          text = path.read_text()
+          text = text.replace(
+              'from backend.services.positions import reconcile_positions',
+              'from backend.services.positions import reconcile_auto_position_fast, reconcile_positions',
+              1,
+          )
+          old = '''            session = await _active()\n\n            # Always reconcile broker truth before preload priority can short-circuit\n'''
+          new = '''            session = await _active()\n            had_preload_priority = await _preload_is_priority(session_id)\n\n            # Always reconcile broker truth before preload priority can short-circuit\n'''
+          if old not in text and 'had_preload_priority = await _preload_is_priority(session_id)' not in text.split('session = await _active()',1)[-1][:300]:
+              raise SystemExit('session_driver.py priority insertion target not found')
+          text = text.replace(old, new, 1)
+
+          old = '''                try:\n                    await reconcile_positions()\n                    session = await _settle(session)\n'''
+          new = '''                try:\n                    if had_preload_priority:\n                        await reconcile_auto_position_fast(\n                            int(session["active_position_id"]), wait_seconds=4.8, poll_interval=0.12\n                        )\n                    else:\n                        await reconcile_positions()\n                    session = await _settle(session)\n'''
+          if old not in text and 'if had_preload_priority:' not in text:
+              raise SystemExit('session_driver.py reconcile target not found')
+          text = text.replace(old, new, 1)
+          # Reuse the value computed before reconciliation instead of querying twice.
+          text = text.replace(
+              '            had_preload_priority = await _preload_is_priority(session_id)\n            preload = None\n',
+              '            preload = None\n',
+              1,
+          )
+          path.write_text(text)
+
+          # 4) Adaptive background scanner speeds up automatically near expiry and
+          # when a prepared entry is waiting, without rescanning the full market.
+          path = Path('backend/services/cpu_guard.py')
+          text = path.read_text()
+          text = text.replace(
+              'from backend.models.db_models import AsyncSessionLocal, utcnow',
+              'from backend.models.db_models import AsyncSessionLocal, PaperPosition, utcnow',
+              1,
+          )
+          text = text.replace(
+              '_PENDING_FAST = {"WAIT_ENTRY", "SCHEDULED", "OPENING", "PRELOAD_PRIORITY", "PREPARED", "WAIT_CLOSE"}',
+              '_PENDING_FAST = {"WAIT_ENTRY", "SCHEDULED", "OPENING", "PRELOAD_PRIORITY", "PRELOAD_ACTIVE", "PRELOAD_WAIT_CLOSE", "PRELOAD_RETRY", "PREPARED", "WAIT_CLOSE"}',
+              1,
+          )
+          helper_marker = '\n\ndef _poll_for(timeframe: str, status: str | None = None) -> float:\n'
+          if 'async def _seconds_to_position_expiry(' not in text:
+              if helper_marker not in text:
+                  raise SystemExit('cpu_guard.py poll helper marker not found')
+              helper = r'''
+
+async def _seconds_to_position_expiry(position_id: int | None) -> float | None:
+    if not position_id:
+        return None
+    try:
+        async with AsyncSessionLocal() as db:
+            position = await db.get(PaperPosition, int(position_id))
+        if position is None or not position.expiry_time:
+            return None
+        return (position.expiry_time - utcnow()).total_seconds()
+    except Exception:
+        return None
+'''
+              text = text.replace(helper_marker, helper + helper_marker, 1)
+
+          old = '''    # Exact entry path must never be throttled.\n    if session.get("pending_signal_id") or await _has_priority_preload(sid):\n        result = await _full_drive_session_tick(min_interval_seconds=0.5)\n        if isinstance(result, dict):\n            result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "exact-entry")\n        return result\n'''
+          new = '''    # Exact entry / preloaded continuation must never be throttled.\n    priority_preload = await _has_priority_preload(sid)\n    if session.get("pending_signal_id") or priority_preload:\n        seconds_to_expiry = await _seconds_to_position_expiry(session.get("active_position_id"))\n        result = await _full_drive_session_tick(min_interval_seconds=0.5)\n        if isinstance(result, dict):\n            if priority_preload and seconds_to_expiry is not None:\n                # Two-second lightweight watch while the prepared setup waits;\n                # switch to one-second cadence for the final 20 seconds.\n                result["poll_after"] = 1.0 if seconds_to_expiry <= 20.0 else 2.0\n            else:\n                result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "exact-entry")\n        return result\n'''
+          if old not in text and 'priority_preload = await _has_priority_preload(sid)' not in text:
+              raise SystemExit('cpu_guard.py exact path target not found')
+          text = text.replace(old, new, 1)
+
+          old = '''    if session.get("active_position_id"):\n        result = await _full_drive_session_tick(min_interval_seconds=0.5)\n        if isinstance(result, dict):\n            result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "position-watch-locked")\n        return result\n'''
+          new = '''    if session.get("active_position_id"):\n        seconds_to_expiry = await _seconds_to_position_expiry(session.get("active_position_id"))\n        result = await _full_drive_session_tick(min_interval_seconds=0.5)\n        if isinstance(result, dict):\n            if seconds_to_expiry is not None and seconds_to_expiry <= 20.0:\n                result["poll_after"] = 1.0\n            else:\n                result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "position-watch-locked")\n        return result\n'''
+          if old not in text and 'seconds_to_expiry = await _seconds_to_position_expiry' not in text.split('# An already-open deal',1)[-1]:
+              raise SystemExit('cpu_guard.py position path target not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          # 5) Keep the normal 2.5s journal refresh, but switch the Mini App to 1s
+          # in the final 20 seconds so Pocket result/next-open appears immediately.
+          path = Path('miniapp/src/App.jsx')
+          text = path.read_text()
+          old = '  usePolling(load,2500,Boolean(TG_ID&&isAdmin&&enabled));\n  const engineTick=useCallback(async()=>{if(!isAdmin||!enabled)return;try{await postJson("/api/auto/tick")}catch{}},[isAdmin,enabled]);\n  usePolling(engineTick,1000,Boolean(TG_ID&&isAdmin&&enabled&&state?.active));'
+          new = '  const secondsToExpiry=Number(position?.seconds_to_expiry??999999),settlementHot=Boolean(state?.active&&secondsToExpiry<=20);\n  usePolling(load,settlementHot?1000:2500,Boolean(TG_ID&&isAdmin&&enabled));\n  const engineTick=useCallback(async()=>{if(!isAdmin||!enabled)return;try{await postJson("/api/auto/tick")}catch{}},[isAdmin,enabled]);\n  usePolling(engineTick,settlementHot?500:1000,Boolean(TG_ID&&isAdmin&&enabled&&state?.active));'
+          if old not in text and 'settlementHot=Boolean' not in text:
+              raise SystemExit('App.jsx AUTO polling target not found')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+      - name: Validate backend syntax
+        run: python3 -m compileall -q backend api bot
+
+      - name: Build Mini App
+        run: |
+          npm --prefix miniapp install --no-audit --no-fund
+          npm --prefix miniapp run build
+
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/positions.py backend/services/preload_next.py backend/services/session_driver.py backend/services/cpu_guard.py miniapp/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'Close Pocket trades faster and consume preloaded entries immediately'
+          git push
