@@ -1,0 +1,66 @@
+name: AlphaPulse Runtime Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'backend/**'
+      - 'bot/**'
+      - '.github/workflows/runtime-diagnostic.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Wait for Vercel production
+        run: sleep 45
+      - name: Probe production runtime
+        shell: bash
+        run: |
+          set +e
+          BASE='https://lumetrix55active-neonorbit.vercel.app'
+          HEALTH_BODY=$(mktemp)
+          REPAIR_BODY=$(mktemp)
+          HEALTH_CODE=$(curl -sS -o "$HEALTH_BODY" -w '%{http_code}' --connect-timeout 8 --max-time 45 "$BASE/api/health")
+          REPAIR_CODE=$(curl -sS -o "$REPAIR_BODY" -w '%{http_code}' --connect-timeout 8 --max-time 45 -X POST "$BASE/api/internal/telegram-repair")
+          python3 - "$HEALTH_CODE" "$REPAIR_CODE" "$HEALTH_BODY" "$REPAIR_BODY" <<'PY'
+          import json, pathlib, sys, datetime
+          hc, rc, hp, rp = sys.argv[1:]
+          def safe(path):
+              text = pathlib.Path(path).read_text(errors='replace')[:3000]
+              # Runtime diagnostic must never persist HTML containing deployment metadata.
+              if '<html' in text.lower() or '<!doctype' in text.lower():
+                  return text[:600]
+              try:
+                  obj=json.loads(text)
+                  allowed={k:obj.get(k) for k in ('status','service','version','telegram_configured','database_configured','backend_url','error_type','error','detail','ok','target','actual','pending_update_count','last_error_message') if k in obj}
+                  return allowed
+              except Exception:
+                  return text[:600]
+          out={
+              'at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'health_status': int(hc or 0),
+              'health': safe(hp),
+              'repair_status': int(rc or 0),
+              'repair': safe(rp),
+          }
+          pathlib.Path('runtime_diagnostics.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          PY
+      - name: Commit diagnostic result
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-runtime-diag'
+          git config user.email 'actions@users.noreply.github.com'
+          git add runtime_diagnostics.json
+          git diff --cached --quiet && exit 0
+          git commit -m 'Record production runtime diagnostic'
+          git push
