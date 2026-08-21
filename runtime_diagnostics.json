@@ -1,5 +1,5 @@
 {
-  "at": "2026-08-21T15:07:04.626448+00:00",
+  "at": "2026-08-21T15:11:22.364345+00:00",
   "health_status": 200,
   "health": {
     "status": "ok",
@@ -9,8 +9,6 @@
     "database_configured": true,
     "backend_url": "https://lumetrix55active-neonorbit.vercel.app"
   },
-  "repair_status": 405,
-  "repair": {
-    "detail": "Method Not Allowed"
-  }
+  "repair_status": 500,
+  "repair": "Internal Server Error"
 }
