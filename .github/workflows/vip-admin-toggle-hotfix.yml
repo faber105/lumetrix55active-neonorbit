@@ -1,0 +1,70 @@
+name: AlphaPulse VIP Admin Toggle Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/vip-admin-toggle-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch VIP toggle into admin Mini App
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('miniapp/src/App.jsx')
+          text = path.read_text()
+          pattern = r'function AdminTab\(\{state,patchAdmin,refresh\}\)\{.*?\}\n\nexport default function App'
+          replacement = r'''function AdminTab({state,patchAdmin,refresh}){
+            const[busy,setBusy]=useState("");
+            const[error,setError]=useState("");
+            const setAuto=async value=>{
+              setBusy("auto");setError("");
+              try{await patchAdmin({trade_account_mode:"demo",auto_trade_enabled:value});TG?.HapticFeedback?.notificationOccurred?.("success")}
+              catch(e){setError(safeMessage(e));TG?.HapticFeedback?.notificationOccurred?.("error")}
+              finally{setBusy("")}
+            };
+            const setVip=async value=>{
+              setBusy("vip");setError("");
+              try{await patchAdmin({vip_enabled:value});TG?.HapticFeedback?.notificationOccurred?.("success")}
+              catch(e){setError(safeMessage(e));TG?.HapticFeedback?.notificationOccurred?.("error")}
+              finally{setBusy("")}
+            };
+            const vipMinutes=Math.max(1,Math.round(Number(state?.vip_interval_seconds||300)/60));
+            const vipStatus=state?.vip_enabled
+              ? `Включены · цикл ${vipMinutes} мин${state?.last_vip_status?` · ${state.last_vip_status}`:""}`
+              : "Выключены — новые VIP сигналы не создаются";
+            return <div className="page-stack"><SectionTitle eyebrow="ADMIN" title="Управление"/><ErrorBox value={error}/><section className="glass admin-simple"><div className="admin-row"><div><span className="admin-icon">A</span><div><b>Автотрейдинг</b><small>Главный переключатель AUTO</small></div></div><Toggle value={Boolean(state?.auto_trade_enabled)} disabled={Boolean(busy)} onChange={setAuto}/></div><div className="admin-row"><div><span className="admin-icon">◆</span><div><b>VIP сигналы</b><small>{vipStatus}</small></div></div><Toggle value={Boolean(state?.vip_enabled)} disabled={Boolean(busy)} onChange={setVip}/></div></section><section className="glass system-card"><div><small>POCKET</small><b>{state?.market?.configured?"CONNECTED":"OFFLINE"}</b></div><div><small>ACCOUNT</small><b>{String(state?.trade_account||"—").toUpperCase()}</b></div><div><small>BALANCE</small><b>{money(state?.pocket_balance)}</b></div><button type="button" onClick={refresh}>↻ Обновить</button></section></div>
+          }
+
+          export default function App'''
+          updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit(f'AdminTab patch target not found exactly once: {count}')
+          path.write_text(updated)
+          PY
+      - name: Build Mini App
+        run: |
+          npm --prefix miniapp install --no-audit --no-fund
+          npm --prefix miniapp run build
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add miniapp/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'Fix VIP toggle in admin panel'
+          git push
