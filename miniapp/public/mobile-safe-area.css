@@ -3,15 +3,18 @@
   --ap-tg-bottom:max(env(safe-area-inset-bottom,0px),var(--tg-safe-area-inset-bottom,0px),var(--tg-content-safe-area-inset-bottom,0px));
 }
 html,body,#root{min-height:100%;background:#070a12}
-body{padding-top:max(14px,var(--ap-tg-top));}
+body{padding-top:0;}
 .app{
   min-height:calc(100dvh - max(14px,var(--ap-tg-top)));
   padding-bottom:calc(108px + var(--ap-tg-bottom))!important;
 }
 .topbar{
   top:0!important;
-  padding-top:14px!important;
+  padding-top:calc(10px + max(var(--ap-tg-top),var(--ap-safe-top,0px),var(--ap-content-safe-top,0px)))!important;
   min-height:68px;
+}
+.telegram-fullscreen .topbar{
+  padding-top:calc(46px + max(var(--ap-tg-top),var(--ap-safe-top,0px)))!important;
 }
 main{padding-top:22px!important;padding-bottom:76px!important;}
 .bottom-nav{
@@ -34,8 +37,8 @@ main{padding-top:22px!important;padding-bottom:76px!important;}
   min-height:48px!important;
 }
 @media (max-width:600px){
-  body{padding-top:max(18px,var(--ap-tg-top));}
-  .topbar{padding-top:16px!important;padding-bottom:12px!important;}
+  body{padding-top:0;}
+  .topbar{padding-top:calc(10px + max(var(--ap-tg-top),var(--ap-safe-top,0px),var(--ap-content-safe-top,0px)))!important;padding-bottom:12px!important;}
   main{padding-top:20px!important;}
   .bottom-nav{bottom:calc(6px + var(--ap-tg-bottom))!important;}
 }
