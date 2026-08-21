@@ -1,0 +1,60 @@
+name: AlphaPulse AUTO Journal Live Refresh Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/auto-journal-live-refresh-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Make AUTO journal refresh every 2.5 seconds
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('miniapp/src/App.jsx')
+          text = path.read_text()
+
+          old_poll = 'usePolling(load,650,Boolean(TG_ID&&isAdmin&&enabled));'
+          new_poll = 'usePolling(load,2500,Boolean(TG_ID&&isAdmin&&enabled));'
+          if old_poll in text:
+              text = text.replace(old_poll, new_poll, 1)
+          elif new_poll not in text:
+              raise SystemExit('AUTO journal polling target not found')
+
+          old_fetch = 'apiFetch(`/api/auto/state?drive=false${refresh?"&refresh=true":""}`)'
+          new_fetch = 'apiFetch(`/api/auto/state?drive=false&_=${Date.now()}${refresh?"&refresh=true":""}`)'
+          if old_fetch in text:
+              text = text.replace(old_fetch, new_fetch, 1)
+          elif new_fetch not in text:
+              raise SystemExit('AUTO state fetch target not found')
+
+          path.write_text(text)
+          PY
+
+      - name: Build Mini App
+        run: |
+          npm --prefix miniapp install --no-audit --no-fund
+          npm --prefix miniapp run build
+
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add miniapp/src/App.jsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'Refresh AUTO session journal every 2.5 seconds'
+          git push
