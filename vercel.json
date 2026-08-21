@@ -15,58 +15,6 @@
     {
       "source": "/health",
       "destination": "/api/health"
-    },
-    {
-      "source": "/api/auth/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/home/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/signals/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/market/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/stats/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/settings/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/live/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/auto/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/auto-preload/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/admin/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/admin-stats/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/api/internal/:path*",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/ws/:path*",
-      "destination": "/api/index"
     }
   ],
   "headers": [
