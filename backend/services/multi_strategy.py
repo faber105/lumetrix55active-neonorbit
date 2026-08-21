@@ -35,6 +35,7 @@ _ORIGINAL_CLOSED_BROKER_DEALS = positions_service._closed_broker_deals
 _ORIGINAL_PRELOAD_EXECUTE = preload_next.execute_confirmed_signal
 _ORIGINAL_PRELOAD_CONSUME = preload_next._consume_when_closed
 _ORIGINAL_BUILD_TRADING_CLIENT = auto_trade._build_trading_client
+_PRELOAD_READY_CLIENT: DirectDemoTradingClient | None = None
 
 
 async def _fast_closed_broker_deals() -> dict[str, dict]:
@@ -67,30 +68,91 @@ positions_service._closed_broker_deals = _fast_closed_broker_deals
 
 
 async def _preload_reconcile_burst(limit: int = 100) -> dict:
-    """Poll broker truth several times per second only at a prepared entry boundary."""
+    """Poll one Pocket socket several times per second at a prepared 5m boundary."""
+    global _PRELOAD_READY_CLIENT
     deadline = asyncio.get_running_loop().time() + 4.6
     last: dict = {"closed": 0, "checked": 0, "errors": []}
-    while True:
-        last = await positions_service.reconcile_positions(limit=limit)
-        if int(last.get("closed") or 0) > 0:
-            return last
-        if int(last.get("checked") or 0) <= 0:
-            return last
-        if asyncio.get_running_loop().time() >= deadline:
-            return last
-        await asyncio.sleep(0.06)
+    client: DirectDemoTradingClient | None = None
+    previous_closed_reader = positions_service._closed_broker_deals
+
+    try:
+        await market_data._refresh_private_ssid()
+        if market_data.configured:
+            client = DirectDemoTradingClient(market_data.ssid)
+            if not await client.connect(persistent=False):
+                client = None
+    except Exception:
+        client = None
+
+    if client is None:
+        # Keep the fast reconnecting fallback if one persistent connection cannot
+        # be established on this invocation.
+        while True:
+            last = await positions_service.reconcile_positions(limit=limit)
+            if int(last.get("closed") or 0) > 0 or int(last.get("checked") or 0) <= 0:
+                return last
+            if asyncio.get_running_loop().time() >= deadline:
+                return last
+            await asyncio.sleep(0.06)
+
+    async def _same_socket_closed_deals() -> dict[str, dict]:
+        try:
+            deals = await client._client.get_closed_deals(listen_seconds=0.08)
+        except Exception:
+            return {}
+        return {
+            positions_service._deal_id(row): row
+            for row in deals or []
+            if isinstance(row, dict) and positions_service._deal_id(row)
+        }
+
+    positions_service._closed_broker_deals = _same_socket_closed_deals
+    keep_for_entry = False
+    try:
+        while True:
+            last = await positions_service.reconcile_positions(limit=limit)
+            if int(last.get("closed") or 0) > 0:
+                # The same authenticated socket is immediately reused to place the
+                # pre-analyzed order, removing another full Pocket handshake.
+                _PRELOAD_READY_CLIENT = client
+                keep_for_entry = True
+                return last
+            if int(last.get("checked") or 0) <= 0:
+                return last
+            if asyncio.get_running_loop().time() >= deadline:
+                return last
+            await asyncio.sleep(0.03)
+    finally:
+        positions_service._closed_broker_deals = previous_closed_reader
+        if not keep_for_entry:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 preload_next.reconcile_positions = _preload_reconcile_burst
 
 
 def _fast_preload_client():
-    client = _ORIGINAL_BUILD_TRADING_CLIENT()
+    global _PRELOAD_READY_CLIENT
+    client = _PRELOAD_READY_CLIENT
+    _PRELOAD_READY_CLIENT = None
+    if client is None or not client.is_connected:
+        client = _ORIGINAL_BUILD_TRADING_CLIENT()
+
     original_snapshot = client.account_snapshot
 
     async def fast_snapshot(listen_seconds: float = 1.2):
-        # Keep the fast prepared-entry path, but never shorten an already-fast
-        # explicit telemetry request any further.
+        # When the socket came directly from the settlement burst, updateAssets was
+        # captured during the same boundary. Reuse that fresh payout snapshot
+        # immediately; otherwise perform the short normal telemetry read.
+        try:
+            cached = client._client.snapshot()
+            if cached.get("payouts"):
+                return cached
+        except Exception:
+            pass
         window = 0.18 if 0.75 <= float(listen_seconds) <= 0.85 else float(listen_seconds)
         return await original_snapshot(listen_seconds=window)
 
@@ -110,9 +172,25 @@ async def _fast_execute_confirmed_signal(signal: dict) -> dict:
 preload_next.execute_confirmed_signal = _fast_execute_confirmed_signal
 
 
+async def _dispose_unused_ready_client() -> None:
+    global _PRELOAD_READY_CLIENT
+    client = _PRELOAD_READY_CLIENT
+    _PRELOAD_READY_CLIENT = None
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 async def _resilient_preload_consume(session: dict, candidate: dict) -> dict | None:
     """Do not discard a prepared setup on a one-tick Pocket race after settlement."""
     result = await _ORIGINAL_PRELOAD_CONSUME(session, candidate)
+    # If the original path never reached order execution (target completed, hard
+    # payout rejection, etc.), release the connection retained by the burst.
+    if _PRELOAD_READY_CLIENT is not None:
+        await _dispose_unused_ready_client()
+
     if not isinstance(result, dict):
         return result
 
