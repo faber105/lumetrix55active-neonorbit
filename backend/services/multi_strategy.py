@@ -356,10 +356,71 @@ async def _event(session_id, stage, message, payload=None):
     await _ORIGINAL_EVENT(session_id, stage, message, payload)
 
 
+async def _stop_if_balance_too_low(session: dict | None) -> dict | None:
+    """Stop AUTO before searching/opening when the next stake exceeds live balance."""
+    if not session or str(session.get("status") or "") != "ACTIVE":
+        return session
+    # Never stop while a position is still open: Pocket balance can temporarily
+    # exclude the stake. Settlement refreshes balance and calls this guard again.
+    if session.get("active_position_id"):
+        return session
+
+    try:
+        balance = float(session.get("current_balance"))
+    except (TypeError, ValueError):
+        return session
+
+    try:
+        required = round(
+            float(session_engine._next_amount(session, session_engine.MIN_AUTO_PAYOUT)),
+            2,
+        )
+    except Exception:
+        return session
+
+    if balance + 1e-9 >= required:
+        return session
+
+    message = (
+        f"Недостаточно средств · баланс {balance:.2f}, для следующей сделки нужно "
+        f"{required:.2f} · сессия остановлена"
+    )
+    session_id = int(session["id"])
+    await session_engine._update(
+        session_id,
+        status="STOPPED",
+        stage="STOPPED",
+        stop_reason="INSUFFICIENT_FUNDS",
+        last_message=message,
+        ended_at=session_engine.utcnow(),
+        pending_signal_id=None,
+        active_position_id=None,
+        current_balance=balance,
+    )
+    await session_engine.reset_trade_runtime("INSUFFICIENT_FUNDS", message)
+    await _ORIGINAL_EVENT(
+        session_id,
+        "STOPPED",
+        message,
+        {"reason": "INSUFFICIENT_FUNDS", "balance": balance, "required_amount": required},
+    )
+    latest = await session_engine._latest()
+    if latest:
+        return latest
+    return {
+        **session,
+        "status": "STOPPED",
+        "stage": "STOPPED",
+        "stop_reason": "INSUFFICIENT_FUNDS",
+        "last_message": message,
+    }
+
+
 async def _settle(session):
-    """After a confirmed LOSS, arm martingale immediately and persist its stake."""
+    """After settlement, stop if balance cannot cover the next level; otherwise arm martingale."""
     previous_level = int(session.get("current_level") or 0)
     settled = await _ORIGINAL_SETTLE(session)
+    settled = await _stop_if_balance_too_low(settled)
     if not settled or str(settled.get("status")) != "ACTIVE":
         return settled
 
@@ -392,6 +453,14 @@ signal_engine.scan_best_candidates = _scan_best_candidates
 
 async def session_tick() -> dict:
     session = await session_engine._active()
+    session = await _stop_if_balance_too_low(session)
+    if session and str(session.get("status") or "") != "ACTIVE":
+        return {
+            "status": "STOPPED",
+            "reason": str(session.get("stop_reason") or "INSUFFICIENT_FUNDS"),
+            "session_id": int(session["id"]),
+        }
+
     token = None
     if session and str(session.get("mode")) == "count":
         selected = split_strategy_key(session.get("strategy"))
