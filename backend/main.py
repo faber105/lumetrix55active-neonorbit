@@ -10,6 +10,7 @@ from backend.github_oidc import verify as verify_oidc
 from backend.routers import admin, admin_stats, auth, auto, home, live, market, preload, settings, signals, stats, websocket
 from backend.services.database import init_db
 from backend.services.pocketoption_otc import market_data
+from backend.services import auto_recovery as _auto_recovery
 from backend.services.scanner import scan_tick
 from backend.services.vip_runtime_fix import run_due_vip
 from backend.services.session_engine import ensure_schema
