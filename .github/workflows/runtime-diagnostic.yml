@@ -16,13 +16,13 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Wait for Vercel production
-        run: sleep 45
+        run: sleep 90
       - name: Probe production runtime
         shell: bash
         run: |
@@ -37,7 +37,6 @@ jobs:
           hc, rc, hp, rp = sys.argv[1:]
           def safe(path):
               text = pathlib.Path(path).read_text(errors='replace')[:3000]
-              # Runtime diagnostic must never persist HTML containing deployment metadata.
               if '<html' in text.lower() or '<!doctype' in text.lower():
                   return text[:600]
               try:
