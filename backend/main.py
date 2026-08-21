@@ -11,6 +11,7 @@ from backend.routers import admin, admin_stats, auth, auto, home, live, market, 
 from backend.services.database import init_db
 from backend.services.pocketoption_otc import market_data
 from backend.services.scanner import scan_tick
+from backend.services.vip_runtime_fix import run_due_vip
 from backend.services.session_engine import ensure_schema
 from backend.services.preload_next import ensure_preload_schema
 # Force the bot to call the same live production backend instead of any stale env URL.
@@ -58,6 +59,11 @@ async def internal_scan(authorization:str|None=Header(default=None)):
     if bot is None:raise HTTPException(503,'Telegram is not configured in this deployment')
     if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Bearer token required')
     await verify_oidc(authorization.split(' ',1)[1]);return await scan_tick(bot)
+@app.post('/api/internal/vip-scan')
+async def internal_vip_scan(authorization:str|None=Header(default=None)):
+    if bot is None:raise HTTPException(503,'Telegram is not configured in this deployment')
+    if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Bearer token required')
+    await verify_oidc(authorization.split(' ',1)[1]);return await run_due_vip(bot)
 DIST_DIR=Path(__file__).resolve().parents[1]/'miniapp'/'dist';ASSETS_DIR=DIST_DIR/'assets'
 @app.get('/assets/{asset_path:path}',include_in_schema=False)
 async def miniapp_asset(asset_path:str):

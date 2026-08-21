@@ -1,0 +1,36 @@
+name: AlphaPulse VIP Scanner
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: alphapulsesbot-vip-scanner
+  cancel-in-progress: false
+
+jobs:
+  vip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger due VIP scan
+        env:
+          VIP_URL: https://alphapulse-runtime-staging.vercel.app/api/internal/vip-scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN_JSON=$(curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 15 \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulsesbot-scanner")
+          TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$TOKEN_JSON")
+          curl --fail --silent --show-error --retry 1 \
+            --connect-timeout 5 --max-time 60 \
+            -X POST "$VIP_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json"
