@@ -1,0 +1,65 @@
+name: AlphaPulse AUTO Driver Locking Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/auto-session-lock-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Serialize all AUTO mutation paths
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path_str, old, new, label):
+              path = Path(path_str)
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, got {count}')
+              path.write_text(text.replace(old, new, 1))
+
+          # The full driver already owns the PostgreSQL advisory lock. Once an
+          # open position has been reconciled and optional preload work has run,
+          # return immediately instead of falling into a fresh full-market scan.
+          replace_once(
+              'backend/services/session_driver.py',
+              '            if preload and preload.get("block"):\n                result = dict(preload)\n                if preload.get("status") == "OPEN" and preload.get("preloaded"):\n                    await _reset_preload_after_open(session_id)\n                result.setdefault("session_id", session_id)\n                result.setdefault("driver", "postgres-advisory-lock")\n                return result\n\n            # Only when no prepared entry is outstanding may the normal engine\n',
+              '            if preload and preload.get("block"):\n                result = dict(preload)\n                if preload.get("status") == "OPEN" and preload.get("preloaded"):\n                    await _reset_preload_after_open(session_id)\n                result.setdefault("session_id", session_id)\n                result.setdefault("driver", "postgres-advisory-lock")\n                return result\n\n            # If the current deal is still open, reconciliation/pre-analysis is\n            # enough for this tick. Do not launch another whole-market scan while\n            # holding an open position. This path stays inside the advisory lock.\n            session = (await _active()) or session\n            if session and session.get("active_position_id"):\n                result = {\n                    "status": "OPEN",\n                    "position_id": session.get("active_position_id"),\n                    "session_id": session_id,\n                    "driver": "postgres-advisory-lock",\n                }\n                if preload:\n                    result["preload"] = preload\n                return result\n\n            # Only when no prepared entry is outstanding may the normal engine\n',
+              'driver open-position fast return',
+          )
+
+          # Never call session_tick directly from the adaptive wrapper. The UI
+          # and GitHub scanner may tick at the same time; every mutation must pass
+          # through the driver's PostgreSQL advisory lock to prevent double settle,
+          # duplicate journal updates, or two entries being opened concurrently.
+          replace_once(
+              'backend/services/cpu_guard.py',
+              '    if session.get("active_position_id"):\n        result = await session_tick()\n        if isinstance(result, dict):\n            result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "position-watch")\n        return result\n',
+              '    if session.get("active_position_id"):\n        result = await _full_drive_session_tick(min_interval_seconds=0.5)\n        if isinstance(result, dict):\n            result.setdefault("poll_after", _poll_for(timeframe, result.get("status")))\n            result.setdefault("cpu_mode", "position-watch-locked")\n        return result\n',
+              'locked adaptive position watch',
+          )
+          PY
+      - name: Validate Python
+        run: python -m compileall -q backend api bot
+      - name: Commit locking fix
+        shell: bash
+        run: |
+          git config user.name 'alphapulse-hotfix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/services/session_driver.py backend/services/cpu_guard.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Serialize AUTO ticks and keep position watch lightweight'
+          git push
