@@ -8,6 +8,7 @@ on:
       - 'api/**'
       - 'backend/**'
       - 'bot/**'
+      - 'vercel.json'
       - '.github/workflows/runtime-diagnostic.yml'
 
 permissions:
