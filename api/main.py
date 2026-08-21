@@ -101,7 +101,7 @@ if production_host:
 else:
     production_base_url = "https://lumetrix55active-neonorbit.vercel.app"
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
-production_mini_app_url = f"{production_base_url.rstrip('/')}?v=20260821-2450"
+production_mini_app_url = f"{production_base_url.rstrip('/')}?v=20260821-2500"
 os.environ["MINI_APP_URL"] = production_mini_app_url
 
 from backend.services import pocketoption_otc as _po_service

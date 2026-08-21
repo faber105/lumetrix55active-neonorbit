@@ -27,7 +27,7 @@ logger = logging.getLogger("alphapulse.bot")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 BACKEND_URL = os.getenv("BACKEND_URL", "https://alphapulse-otc.vercel.app").rstrip("/")
-MINI_APP_BUILD = "20260821-2450"
+MINI_APP_BUILD = "20260821-2500"
 _mini_app_base = os.getenv("MINI_APP_URL", BACKEND_URL).rstrip("/")
 MINI_APP_URL = _mini_app_base if "?v=" in _mini_app_base or "&v=" in _mini_app_base else f"{_mini_app_base}{'&' if '?' in _mini_app_base else '?'}v={MINI_APP_BUILD}"
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "change_me")

@@ -109,3 +109,21 @@ main{position:relative;z-index:2;width:min(100%,720px);margin:0 auto;padding:16p
 .country-flag svg{position:absolute;z-index:1;inset:0;display:block;width:100%;height:100%}
 .country-flag>span{display:none!important}
 @media(max-width:360px){.header-tools{gap:5px}.header-actions{gap:4px!important}.header-actions>button,.language-control>button{width:32px!important;height:33px!important}.header-tools>.user-clock{height:23px!important;padding:0 5px!important}.brand-cluster{max-width:48vw!important}.brand-cluster .brand-logo{width:22px!important;height:22px!important;flex-basis:22px!important}.brand-cluster .logo b{font-size:10px!important}}
+
+/* Compact header matched to Telegram's native controls */
+.topbar-main{display:block!important;width:min(100%,720px)!important;margin:0 auto!important;padding-top:4px!important}
+.brand-cluster{top:max(58px,calc(env(safe-area-inset-top,0px) + 12px))!important;left:50%!important;max-width:48vw!important}
+.brand-cluster .logo{height:28px!important;gap:5px!important}
+.brand-cluster .brand-logo{width:23px!important;height:23px!important;flex-basis:23px!important}
+.brand-cluster .logo b{font-size:11px!important;font-weight:800!important}
+.header-tools{width:100%!important;display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:6px!important;white-space:nowrap}
+.header-actions{flex:0 0 auto!important;display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:4px!important;margin:0!important}
+.header-actions>button{width:30px!important;height:30px!important;min-width:30px!important;border-radius:9px!important;padding:0!important}
+.language-control>button{width:42px!important;height:30px!important;min-width:42px!important;border-radius:9px!important;padding:0 4px!important;gap:2px!important}
+.header-actions .header-icon{width:15px!important;height:15px!important}
+.language-control .header-icon{display:none!important}
+.language-control>button span{font-size:8px!important}.language-control>button b{font-size:10px!important}
+.header-tools>.user-clock{display:inline-flex!important;height:30px!important;margin:0!important;padding:0 2px!important;border:0!important;border-radius:0!important;color:#d8fff8!important;background:transparent!important;box-shadow:none!important}
+.header-tools>.user-clock span{font-size:8px!important}.header-tools>.user-clock small{font-size:5px!important}
+.topbar>.market-status{min-height:30px!important;margin-top:8px!important;padding:0 11px!important;border-radius:9px!important;font-size:8px!important}
+@media(max-width:360px){.brand-cluster{top:max(56px,calc(env(safe-area-inset-top,0px) + 11px))!important}.brand-cluster .brand-logo{width:21px!important;height:21px!important;flex-basis:21px!important}.brand-cluster .logo b{font-size:10px!important}.header-tools{gap:4px!important}.header-actions>button{width:28px!important;height:28px!important;min-width:28px!important}.language-control>button{width:39px!important;height:28px!important;min-width:39px!important}.header-tools>.user-clock{height:28px!important}.header-tools>.user-clock span{font-size:7px!important}.header-tools>.user-clock small{font-size:4px!important}}
