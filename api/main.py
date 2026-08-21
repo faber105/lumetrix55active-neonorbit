@@ -101,7 +101,8 @@ if production_host:
 else:
     production_base_url = "https://lumetrix55active-neonorbit.vercel.app"
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
-os.environ["MINI_APP_URL"] = production_base_url.rstrip("/")
+production_mini_app_url = f"{production_base_url.rstrip('/')}?v=20260821-2405"
+os.environ["MINI_APP_URL"] = production_mini_app_url
 
 from backend.services import pocketoption_otc as _po_service
 from backend.services.pocket_telemetry import TelemetryPocketOptionClient
@@ -196,6 +197,6 @@ _backend_main.repair_telegram_webhook = _idempotent_repair_telegram_webhook
 
 try:
     _bot_main = importlib.import_module("bot.main")
-    _bot_main.MINI_APP_URL = production_base_url.rstrip("/")
+    _bot_main.MINI_APP_URL = production_mini_app_url
 except Exception:
     pass
