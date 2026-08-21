@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import Iterable
 
-from backend.services import auto_trade, session_engine
+from backend.services import auto_trade, preload_next, session_engine
 from backend.services.preload_journal import preload_cycle as _base_preload_cycle
 from backend.services.signal_engine import SMART_EXECUTION_STRATEGIES, signal_engine
 
@@ -16,6 +16,12 @@ _SELECTED_SCAN_STRATEGIES: ContextVar[tuple[str, ...] | None] = ContextVar(
 # especially a martingale recovery entry, is not discarded only because the
 # request reached the broker a couple of seconds after the candle boundary.
 auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 4.0)
+
+# PROFIT / "к цели" uses the AUTO payout setting as the hard admission gate.
+# Strategy evaluators still decide whether a setup exists and rank candidates by
+# confidence, but there is no second session-level 82% confidence cutoff.
+session_engine.PROFIT_MIN_CONFIDENCE = 0.0
+preload_next.PROFIT_MIN_CONFIDENCE = 0.0
 
 
 def split_strategy_key(value: object) -> list[str]:
