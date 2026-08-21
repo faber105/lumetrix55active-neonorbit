@@ -20,6 +20,7 @@ from aiogram.types import InlineKeyboardButton, TelegramObject, Update, WebAppIn
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from backend.models.db_models import AsyncSessionLocal, MLState
+from backend.telegram_auth import admin_ids, is_admin_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alphapulse.bot")
@@ -40,7 +41,7 @@ blocked: Dict[int, float] = {}
 
 
 def is_rate_limited(telegram_id: int) -> bool:
-    if telegram_id == ADMIN_ID:
+    if is_admin_id(telegram_id):
         return False
     now = time.time()
     if telegram_id in blocked:
@@ -152,7 +153,7 @@ async def cmd_start(message: types.Message):
     user = await create_user(telegram_id, message.from_user.username or "", message.from_user.full_name or "")
     if not user:
         await message.answer("Сервер недоступен. Попробуйте позже."); return
-    if telegram_id == ADMIN_ID and user.get("status") != "VERIFIED":
+    if is_admin_id(telegram_id) and user.get("status") != "VERIFIED":
         await set_status(telegram_id, "VERIFIED"); user = await get_user(telegram_id) or user
     status = user.get("status", "NEW")
     if status == "BLOCKED":
@@ -176,8 +177,9 @@ async def request_verification(callback: types.CallbackQuery):
         remaining = MIN_CLICK - (datetime.now(timezone.utc) - clicked).total_seconds()
         if remaining > 0: await callback.message.answer(f"Подождите ещё {int(remaining)} сек. после перехода."); return
     await api("POST", f"/api/auth/attempt?telegram_id={telegram_id}&secret={ADMIN_SECRET}"); await set_status(telegram_id, "PENDING"); await callback.message.answer("✅ Заявка отправлена на проверку.")
-    try: await bot.send_message(ADMIN_ID, "🔔 <b>Новая заявка</b>\n"+f"ID: <code>{telegram_id}</code>\n@{callback.from_user.username or '—'}\n/verify {telegram_id} | /block {telegram_id}")
-    except Exception: pass
+    for recipient_id in admin_ids():
+        try: await bot.send_message(recipient_id, "🔔 <b>Новая заявка</b>\n"+f"ID: <code>{telegram_id}</code>\n@{callback.from_user.username or '—'}\n/verify {telegram_id} | /block {telegram_id}")
+        except Exception: pass
 
 @dp.callback_query(F.data == "support")
 async def support_callback(callback: types.CallbackQuery):
@@ -185,7 +187,7 @@ async def support_callback(callback: types.CallbackQuery):
 
 @dp.message(Command("verify"))
 async def admin_verify(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if not is_admin_id(message.from_user.id): return
     parts = (message.text or "").split()
     if len(parts) != 2 or not parts[1].isdigit(): await message.answer("/verify ID"); return
     telegram_id = int(parts[1]); ok = await set_status(telegram_id, "VERIFIED"); await message.answer(f"Верифицирован: {telegram_id}" if ok else "Ошибка")
@@ -195,36 +197,36 @@ async def admin_verify(message: types.Message):
 
 @dp.message(Command("block"))
 async def admin_block(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if not is_admin_id(message.from_user.id): return
     parts=(message.text or "").split()
     if len(parts)!=2 or not parts[1].isdigit(): await message.answer("/block ID"); return
     telegram_id=int(parts[1]); ok=await set_status(telegram_id,"BLOCKED"); await message.answer(f"Заблокирован: {telegram_id}" if ok else "Ошибка")
 
 @dp.message(Command("pending"))
 async def admin_pending(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if not is_admin_id(message.from_user.id): return
     users=await api("GET",f"/api/auth/users?secret={ADMIN_SECRET}") or []; pending_users=[u for u in users if u["status"]=="PENDING"]
     if not pending_users: await message.answer("Нет заявок на верификацию."); return
     for user in pending_users: await message.answer(f"Пользователь: {user.get('full_name','')}\nUsername: @{user.get('username') or '—'}\nID: <code>{user['telegram_id']}</code>",reply_markup=kb_user_actions(user["telegram_id"]))
 
 @dp.message(Command("users"))
 async def admin_users(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if not is_admin_id(message.from_user.id): return
     users=await api("GET",f"/api/auth/users?secret={ADMIN_SECRET}") or []; lines=["Все пользователи:",""]+[f"{u['status']} | {u['telegram_id']} @{u.get('username') or '—'}" for u in users[:30]]; await message.answer("\n".join(lines))
 
 @dp.message(Command("stats"))
 async def admin_stats(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
+    if not is_admin_id(message.from_user.id): return
     users=await api("GET",f"/api/auth/users?secret={ADMIN_SECRET}") or []; await message.answer("Статистика:\n"+f"Всего: {len(users)}\nВерифицированы: {sum(u['status']=='VERIFIED' for u in users)}\nНа проверке: {sum(u['status']=='PENDING' for u in users)}\nЗаблокированы: {sum(u['status']=='BLOCKED' for u in users)}")
 
 @dp.callback_query(F.data.startswith("verify_"))
 async def admin_verify_callback(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
+    if not is_admin_id(callback.from_user.id): return
     telegram_id=int(callback.data.split("_")[1]); ok=await set_status(telegram_id,"VERIFIED"); await callback.answer("Верифицирован" if ok else "Ошибка")
 
 @dp.callback_query(F.data.startswith("block_"))
 async def admin_block_callback(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
+    if not is_admin_id(callback.from_user.id): return
     telegram_id=int(callback.data.split("_")[1]); ok=await set_status(telegram_id,"BLOCKED"); await callback.answer("Заблокирован" if ok else "Ошибка")
 
 @dp.message(F.text == "VIP Сигналы")
