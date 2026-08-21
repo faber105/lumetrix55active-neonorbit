@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 from pathlib import Path
@@ -67,9 +68,6 @@ async def _load_runtime_secrets_from_db() -> None:
                 continue
             if candidate.database != original.database:
                 os.environ["DATABASE_URL"] = candidate.render_as_string(hide_password=False)
-            # Neon is the canonical runtime-secret store. Always prefer these values
-            # over manually copied Vercel env values so a stale/typoed secret cannot
-            # break Telegram or Pocket after an account migration.
             if bot_token:
                 os.environ["TELEGRAM_BOT_TOKEN"] = bot_token
                 os.environ["BOT_TOKEN"] = bot_token
@@ -105,9 +103,6 @@ else:
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
 os.environ["MINI_APP_URL"] = production_base_url.rstrip("/")
 
-# Market data stays read-only. The telemetry subclass additionally records the
-# authenticated Pocket balance and live `updateAssets` payout table; it never has
-# an order method.
 from backend.services import pocketoption_otc as _po_service
 from backend.services.pocket_telemetry import TelemetryPocketOptionClient
 
@@ -118,8 +113,6 @@ def _make_direct_market_client(self):
 
 _po_service.PocketOptionOTCService._make_client = _make_direct_market_client
 
-# Broker execution is still hard-limited to DEMO. The wrapper sends one order,
-# requires `successopenOrder`, and does not retry uncertain broker responses.
 from backend.services import auto_trade as _auto_trade
 from backend.services.pocket_demo_trading import DirectDemoTradingClient
 
@@ -131,3 +124,9 @@ def _make_direct_demo_trading_client():
 _auto_trade._build_trading_client = _make_direct_demo_trading_client
 
 from backend.main import app
+
+try:
+    _bot_main = importlib.import_module("bot.main")
+    _bot_main.MINI_APP_URL = production_base_url.rstrip("/")
+except Exception:
+    pass
