@@ -187,7 +187,16 @@ async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
 @router.post("/start")
 async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admin_user)):
     try:
-        return _decorate_live_state(await start_session(data.model_dump()))
+        payload = await start_session(data.model_dump())
+        first_tick = None
+        if data.mode == "profit":
+            try:
+                first_tick = await drive_session_tick(min_interval_seconds=0.5)
+            except Exception as exc:
+                first_tick = {"status": "ERROR", "error": type(exc).__name__}
+            payload = await session_state()
+            payload["driver"] = first_tick
+        return _decorate_live_state(payload)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
