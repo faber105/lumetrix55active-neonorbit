@@ -19,12 +19,7 @@ auto_trade.ENTRY_GRACE_SECONDS = max(float(auto_trade.ENTRY_GRACE_SECONDS), 4.0)
 
 
 def split_strategy_key(value: object) -> list[str]:
-    """Return a canonical 1-2 strategy selection.
-
-    Mixed Smart and Smart Confluence both expand to the same full smart execution
-    pool. Treat selecting them together as one Mixed Smart pool instead of carrying
-    a redundant two-strategy key through every AUTO/preload cycle.
-    """
+    """Return 1-2 unique AUTO strategies stored as a '+' separated DB key."""
     raw = [part.strip() for part in str(value or "smart_confluence").split("+") if part.strip()]
     unique: list[str] = []
     for strategy in raw:
@@ -34,8 +29,6 @@ def split_strategy_key(value: object) -> list[str]:
         unique = ["smart_confluence"]
     if len(unique) > 2:
         raise ValueError("Choose from 1 to 2 AUTO strategies")
-    if "mixed_smart" in unique and "smart_confluence" in unique:
-        return ["mixed_smart"]
     return unique
 
 
