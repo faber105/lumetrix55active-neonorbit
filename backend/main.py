@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from backend.github_oidc import verify as verify_oidc
-from backend.routers import admin, auth, auto, home, live, market, preload, settings, signals, stats, websocket
+from backend.routers import admin, admin_stats, auth, auto, home, live, market, preload, settings, signals, stats, websocket
 from backend.services.database import init_db
 from backend.services.pocketoption_otc import market_data
 from backend.services.scanner import scan_tick
@@ -44,7 +44,7 @@ async def miniapp_cache_headers(request,call_next):
     response=await call_next(request)
     if request.method=='GET' and request.url.path in {'/','/index.html'}:response.headers['Cache-Control']='no-store, max-age=0';response.headers['Pragma']='no-cache';response.headers['Expires']='0'
     return response
-app.include_router(auth.router,prefix='/api/auth',tags=['auth']);app.include_router(home.router,prefix='/api/home',tags=['home']);app.include_router(signals.router,prefix='/api/signals',tags=['signals']);app.include_router(market.router,prefix='/api/market',tags=['market']);app.include_router(stats.router,prefix='/api/stats',tags=['stats']);app.include_router(settings.router,prefix='/api/settings',tags=['settings']);app.include_router(live.router,prefix='/api/live',tags=['live']);app.include_router(auto.router,prefix='/api/auto',tags=['auto']);app.include_router(preload.router,prefix='/api/auto-preload',tags=['auto-preload']);app.include_router(admin.router,prefix='/api/admin',tags=['admin']);app.include_router(websocket.router,prefix='/ws',tags=['websocket'])
+app.include_router(auth.router,prefix='/api/auth',tags=['auth']);app.include_router(home.router,prefix='/api/home',tags=['home']);app.include_router(signals.router,prefix='/api/signals',tags=['signals']);app.include_router(market.router,prefix='/api/market',tags=['market']);app.include_router(stats.router,prefix='/api/stats',tags=['stats']);app.include_router(settings.router,prefix='/api/settings',tags=['settings']);app.include_router(live.router,prefix='/api/live',tags=['live']);app.include_router(auto.router,prefix='/api/auto',tags=['auto']);app.include_router(preload.router,prefix='/api/auto-preload',tags=['auto-preload']);app.include_router(admin.router,prefix='/api/admin',tags=['admin']);app.include_router(admin_stats.router,prefix='/api/admin-stats',tags=['admin-stats']);app.include_router(websocket.router,prefix='/ws',tags=['websocket'])
 @app.get('/health')
 async def health():
     return {'status':'ok','service':'alphapulsesbot','version':'3.0','scanner':'github-actions-5s-session-window','telegram_configured':TELEGRAM_ENABLED,'database_configured':bool(os.getenv('DATABASE_URL','').strip()),'source':{'provider':os.getenv('VERCEL_GIT_PROVIDER','manual'),'repository':'/'.join(p for p in (os.getenv('VERCEL_GIT_REPO_OWNER',''),os.getenv('VERCEL_GIT_REPO_SLUG','')) if p) or 'unknown','ref':os.getenv('VERCEL_GIT_COMMIT_REF','unknown'),'sha':os.getenv('VERCEL_GIT_COMMIT_SHA','unknown')},'market':await market_data.health()}

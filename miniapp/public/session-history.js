@@ -1,194 +1,40 @@
 (() => {
-  const MODAL_ID = 'ap-session-report';
-  const STYLE_ID = 'ap-session-report-style';
-  let activeId = null;
-
-  const initData = () => {
-    try {
-      return window.Telegram?.WebApp?.initData || new URLSearchParams(location.hash.replace(/^#/, '')).get('tgWebAppData') || new URLSearchParams(location.search).get('tgWebAppData') || '';
-    } catch { return ''; }
-  };
-
-  async function request(path) {
-    const headers = {};
-    const tg = initData();
-    if (tg) headers['X-Telegram-Init-Data'] = tg;
-    const response = await fetch(path, { headers, cache: 'no-store' });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.detail || body?.error || `HTTP ${response.status}`);
-    return body;
-  }
-
-  const num = v => Number.isFinite(Number(v)) ? Number(v) : 0;
-  const money = v => Number.isFinite(Number(v)) ? Number(v).toFixed(2) : '—';
-  const signed = v => Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}` : '—';
-  const local = v => {
-    if (!v) return '—';
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString([], { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
-  };
-  const esc = v => String(v ?? '—').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
-
-  function addStyle() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-      .session-history article[data-session-enhanced="1"]{cursor:pointer;position:relative;padding-right:34px!important;transition:.16s transform,.16s border-color}
-      .session-history article[data-session-enhanced="1"]:active{transform:scale(.985)}
-      .session-history article[data-session-enhanced="1"]::after{content:'›';position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:27px;opacity:.5}
-      .session-history article[data-session-enhanced="1"] .ap-more{display:block;margin-top:5px;font-size:11px;opacity:.62}
-      #${MODAL_ID}{position:fixed;inset:0;z-index:99999;background:#070a12;overflow:auto;-webkit-overflow-scrolling:touch;padding:calc(14px + var(--ap-safe-top,0px)) 14px calc(95px + var(--ap-safe-bottom,0px));color:#f5f7ff}
-      #${MODAL_ID} .ap-report-head{position:sticky;top:0;z-index:2;background:rgba(7,10,18,.94);backdrop-filter:blur(18px);display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0 14px}
-      #${MODAL_ID} .ap-back{border:0;border-radius:13px;background:rgba(255,255,255,.08);color:white;padding:10px 13px;font-weight:750}
-      #${MODAL_ID} .ap-title{flex:1;min-width:0} #${MODAL_ID} .ap-title small{display:block;opacity:.55;font-size:10px;letter-spacing:.08em} #${MODAL_ID} .ap-title b{display:block;font-size:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      #${MODAL_ID} .ap-status{border-radius:999px;padding:7px 9px;background:rgba(124,131,255,.15);font-size:10px;font-weight:800}
-      #${MODAL_ID} .ap-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:10px 0}
-      #${MODAL_ID} .ap-card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.075);border-radius:15px;padding:12px;min-width:0}
-      #${MODAL_ID} .ap-card small{display:block;opacity:.55;font-size:9px;letter-spacing:.06em;margin-bottom:5px} #${MODAL_ID} .ap-card b{font-size:15px;word-break:break-word}
-      #${MODAL_ID} .ap-positive{color:#2fe2a2} #${MODAL_ID} .ap-negative{color:#ff6f87}
-      #${MODAL_ID} .ap-section{margin-top:18px} #${MODAL_ID} .ap-section h3{font-size:15px;margin:0 0 9px}
-      #${MODAL_ID} .ap-leg{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.065);border-radius:15px;padding:12px;margin-bottom:9px}
-      #${MODAL_ID} .ap-leg-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px} #${MODAL_ID} .ap-leg-top b{font-size:14px} #${MODAL_ID} .ap-result{font-size:11px;font-weight:850;border-radius:999px;padding:5px 8px;background:rgba(255,255,255,.07)}
-      #${MODAL_ID} .ap-leg-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px} #${MODAL_ID} .ap-leg-grid div{background:rgba(255,255,255,.035);border-radius:10px;padding:8px} #${MODAL_ID} .ap-leg-grid small{display:block;opacity:.5;font-size:9px} #${MODAL_ID} .ap-leg-grid b{font-size:12px}
-      #${MODAL_ID} .ap-event{display:grid;grid-template-columns:72px 74px 1fr;gap:8px;align-items:start;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.055)} #${MODAL_ID} .ap-event time{font-size:10px;opacity:.5} #${MODAL_ID} .ap-event i{font-style:normal;font-size:9px;font-weight:800;opacity:.75} #${MODAL_ID} .ap-event p{margin:0;font-size:12px;line-height:1.35}
-      #${MODAL_ID} .ap-loading,#${MODAL_ID} .ap-error{padding:28px 8px;text-align:center;opacity:.72}
-      @media (min-width:700px){#${MODAL_ID} .ap-grid{grid-template-columns:repeat(4,minmax(0,1fr))}#${MODAL_ID}{max-width:780px;left:50%;right:auto;width:100%;transform:translateX(-50%)}}
-    `;
-    document.head.appendChild(style);
-  }
-
-  function closeReport() {
-    document.getElementById(MODAL_ID)?.remove();
-    activeId = null;
-  }
-
-  function card(label, value, cls='') {
-    return `<div class="ap-card"><small>${esc(label)}</small><b class="${cls}">${esc(value)}</b></div>`;
-  }
-
-  function resultClass(result) {
-    const r = String(result || '').toUpperCase();
-    return r === 'WIN' ? 'ap-positive' : r === 'LOSS' ? 'ap-negative' : '';
-  }
-
-  function renderReport(root, data) {
-    const s = data?.session || {};
-    const m = data?.metrics || {};
-    const legs = Array.isArray(data?.legs) ? data.legs : [];
-    const events = Array.isArray(data?.events) ? data.events : [];
-    const balanceAfter = m.end_balance ?? s.current_balance;
-    const balanceBefore = m.start_balance ?? s.start_balance;
-    const change = m.balance_change ?? (balanceBefore != null && balanceAfter != null ? num(balanceAfter) - num(balanceBefore) : null);
-    const pnlClass = num(m.net_profit ?? s.profit) >= 0 ? 'ap-positive' : 'ap-negative';
-    const changeClass = num(change) >= 0 ? 'ap-positive' : 'ap-negative';
-
-    root.innerHTML = `
-      <div class="ap-report-head">
-        <button type="button" class="ap-back">‹ Назад</button>
-        <div class="ap-title"><small>AUTO SESSION REPORT</small><b>Сессия #${esc(s.id)}</b></div>
-        <span class="ap-status">${esc(s.status)}</span>
-      </div>
-      <div class="ap-grid">
-        ${card('Баланс до сессии', money(balanceBefore))}
-        ${card('Баланс после сессии', money(balanceAfter))}
-        ${card('Изменение баланса', change == null ? '—' : signed(change), changeClass)}
-        ${card('P/L сессии', signed(m.net_profit ?? s.profit), pnlClass)}
-      </div>
-      <div class="ap-grid">
-        ${card('WIN', m.wins ?? 0, 'ap-positive')}
-        ${card('LOSS', m.losses ?? 0, 'ap-negative')}
-        ${card('DRAW', m.draws ?? 0)}
-        ${card('Winrate', m.winrate == null ? '—' : `${m.winrate}%`)}
-        ${card('Всего ставок', m.closed ?? s.total_legs ?? legs.length)}
-        ${card('Сумма всех ставок', money(m.total_staked))}
-        ${card('Перекрытий', m.covered_trades ?? 0)}
-        ${card('Минус-серий', s.failed_series ?? 0)}
-        ${card('Стартовая ставка', money(s.base_amount))}
-        ${card('Макс. перекрытий', s.max_martingale ?? 0)}
-        ${card('Стратегия', s.strategy || '—')}
-        ${card('Таймфрейм', s.timeframe || '—')}
-        ${card('Режим', s.mode === 'count' ? 'По WIN' : 'До профита')}
-        ${card('Цель WIN', s.target_wins ?? '—')}
-        ${card('Цель профита', s.target_profit != null ? money(s.target_profit) : '—')}
-        ${card('Причина завершения', s.stop_reason || s.status || '—')}
-      </div>
-      <div class="ap-grid">
-        ${card('Начало', local(s.created_at))}
-        ${card('Завершение', local(s.ended_at || s.updated_at))}
-        ${card('Валовая прибыль', `+${money(m.gross_wins)}`, 'ap-positive')}
-        ${card('Валовый убыток', `-${money(m.gross_losses)}`, 'ap-negative')}
-      </div>
-      <section class="ap-section"><h3>Все сделки сессии (${legs.length})</h3>
-        ${legs.length ? legs.map((leg, i) => `
-          <article class="ap-leg">
-            <div class="ap-leg-top"><b>#${i+1} · ${esc(leg.pair || leg.asset)}</b><span class="ap-result ${resultClass(leg.result)}">${esc(leg.result)}</span></div>
-            <div class="ap-leg-grid">
-              <div><small>Направление</small><b>${esc(leg.direction)}</b></div>
-              <div><small>Ставка</small><b>${money(leg.amount)}</b></div>
-              <div><small>Payout</small><b>${leg.payout == null ? '—' : `${money(leg.payout)}%`}</b></div>
-              <div><small>P/L</small><b class="${num(leg.pnl)>=0?'ap-positive':'ap-negative'}">${signed(leg.pnl)}</b></div>
-              <div><small>Уровень перекрытия</small><b>${esc(leg.martingale_level ?? 0)}</b></div>
-              <div><small>Серия</small><b>${esc(leg.series_no ?? '—')}</b></div>
-              <div><small>Открыта</small><b>${local(leg.opened_at || leg.created_at)}</b></div>
-              <div><small>Закрыта</small><b>${local(leg.closed_at)}</b></div>
-            </div>
-          </article>`).join('') : '<div class="ap-card">Сделок в этой сессии нет.</div>'}
-      </section>
-      <section class="ap-section"><h3>Полная хронология работы бота (${events.length})</h3>
-        ${events.length ? events.map(ev => `<div class="ap-event"><time>${esc(local(ev.created_at).split(', ').pop())}</time><i>${esc(ev.stage)}</i><p>${esc(ev.message)}</p></div>`).join('') : '<div class="ap-card">Событий нет.</div>'}
-      </section>
-    `;
-    root.querySelector('.ap-back')?.addEventListener('click', closeReport);
-  }
-
-  async function openReport(sessionId) {
-    if (!sessionId || activeId === sessionId) return;
-    activeId = sessionId;
-    addStyle();
-    let root = document.getElementById(MODAL_ID);
-    if (!root) {
-      root = document.createElement('div');
-      root.id = MODAL_ID;
-      document.body.appendChild(root);
-    }
-    root.innerHTML = `<div class="ap-report-head"><button type="button" class="ap-back">‹ Назад</button><div class="ap-title"><small>AUTO SESSION REPORT</small><b>Сессия #${esc(sessionId)}</b></div></div><div class="ap-loading">Загружаю полный отчёт сессии…</div>`;
-    root.querySelector('.ap-back')?.addEventListener('click', closeReport);
-    try {
-      const data = await request(`/api/auto/history/${encodeURIComponent(sessionId)}?_=${Date.now()}`);
-      renderReport(root, data);
-    } catch (e) {
-      root.innerHTML = `<div class="ap-report-head"><button type="button" class="ap-back">‹ Назад</button><div class="ap-title"><small>AUTO SESSION REPORT</small><b>Сессия #${esc(sessionId)}</b></div></div><div class="ap-error">Не удалось открыть отчёт: ${esc(e.message)}</div>`;
-      root.querySelector('.ap-back')?.addEventListener('click', closeReport);
-    }
-  }
-
-  function enhanceHistory() {
-    addStyle();
-    document.querySelectorAll('.session-history article').forEach(article => {
-      if (article.dataset.sessionEnhanced === '1') return;
-      const text = article.textContent || '';
-      const match = text.match(/#(\d+)/);
-      if (!match) return;
-      const id = match[1];
-      article.dataset.sessionEnhanced = '1';
-      article.setAttribute('role', 'button');
-      article.setAttribute('tabindex', '0');
-      article.title = 'Открыть полный отчёт сессии';
-      const main = article.querySelector('div');
-      if (main && !main.querySelector('.ap-more')) {
-        const hint = document.createElement('small');
-        hint.className = 'ap-more';
-        hint.textContent = 'Нажми, чтобы посмотреть полный отчёт →';
-        main.appendChild(hint);
-      }
-      article.addEventListener('click', () => openReport(id));
-      article.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openReport(id); } });
-    });
-  }
-
-  const observer = new MutationObserver(enhanceHistory);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeReport(); });
-  setTimeout(enhanceHistory, 0);
+  const MODAL_ID='ap-session-report-v2', TOOLBAR_ID='ap-stats-toolbar-v2', STYLE_ID='ap-stats-v2-style';
+  let filter={kind:'today'}, refreshTimer=null, busy=false;
+  const initData=()=>{try{return window.Telegram?.WebApp?.initData||new URLSearchParams(location.hash.replace(/^#/,'')).get('tgWebAppData')||new URLSearchParams(location.search).get('tgWebAppData')||''}catch{return ''}};
+  async function request(path,options={}){const headers={...(options.headers||{})};const tg=initData();if(tg)headers['X-Telegram-Init-Data']=tg;const r=await fetch(path,{...options,headers,cache:'no-store'});const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b?.detail||b?.error||`HTTP ${r.status}`);return b}
+  const esc=v=>String(v??'—').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+  const num=v=>Number.isFinite(Number(v))?Number(v):0, money=v=>Number.isFinite(Number(v))?Number(v).toFixed(2):'—', signed=v=>Number.isFinite(Number(v))?`${Number(v)>=0?'+':''}${Number(v).toFixed(2)}`:'—';
+  const local=v=>{if(!v)return'—';const d=new Date(v);return Number.isNaN(d.getTime())?'—':d.toLocaleString([],{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})};
+  const strategy=v=>({smart_confluence:'Smart Confluence',mixed_smart:'Mixed Smart',trend_pulse:'Trend Pulse',range_reversal:'Range Reversal',volatility_breakout:'Volatility Breakout',ema_trend:'EMA Trend',bollinger_reversal:'Bollinger Reversal',atr_breakout:'ATR Breakout'}[String(v||'')]||String(v||'—').split('+').map(x=>({smart_confluence:'Smart Confluence',mixed_smart:'Mixed Smart',trend_pulse:'Trend Pulse',range_reversal:'Range Reversal',volatility_breakout:'Volatility Breakout'}[x]||x)).join(' + '));
+  const mode=v=>v==='count'?'По WIN-сделкам':'До профита';
+  function addStyle(){if(document.getElementById(STYLE_ID))return;const s=document.createElement('style');s.id=STYLE_ID;s.textContent=`
+    #${TOOLBAR_ID}{display:grid;gap:12px;margin:0 0 15px;padding:14px;border:1px solid rgba(130,145,255,.18);border-radius:18px;background:linear-gradient(145deg,rgba(124,131,255,.11),rgba(255,255,255,.025));animation:apRise .28s ease both}
+    #${TOOLBAR_ID} .ap-filter-row{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}#${TOOLBAR_ID} .ap-filter-row::-webkit-scrollbar{display:none}
+    #${TOOLBAR_ID} button,#${TOOLBAR_ID} input{border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.055);color:#fff;border-radius:11px;min-height:38px;padding:8px 11px;font-weight:700;font-size:11px;white-space:nowrap}
+    #${TOOLBAR_ID} button.active{background:rgba(124,131,255,.24);border-color:rgba(124,131,255,.55);box-shadow:0 0 20px rgba(124,131,255,.11)}
+    #${TOOLBAR_ID} .ap-custom{display:grid;grid-template-columns:1fr 1fr auto;gap:7px}#${TOOLBAR_ID} input{width:100%;min-width:0;color-scheme:dark}
+    #${TOOLBAR_ID} .ap-clear{background:rgba(255,91,119,.10);border-color:rgba(255,91,119,.24);color:#ff91a4}
+    .session-history.ap-v2{display:grid;gap:10px}.session-history.ap-v2 article{display:grid!important;grid-template-columns:1fr auto;gap:12px;padding:14px!important;border-radius:16px!important;background:linear-gradient(145deg,rgba(255,255,255,.052),rgba(255,255,255,.025))!important;border:1px solid rgba(255,255,255,.075)!important;cursor:pointer;animation:apRise .3s ease both;transition:.18s transform,.18s border-color,.18s background}
+    .session-history.ap-v2 article:active{transform:scale(.985)}.session-history.ap-v2 article:hover{border-color:rgba(124,131,255,.35)!important}.ap-session-main{min-width:0;display:grid;gap:6px}.ap-session-top{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.ap-session-id{font-size:14px;font-weight:850}.ap-badge{font-size:9px;padding:4px 7px;border-radius:999px;background:rgba(124,131,255,.14);color:#cbd0ff;font-weight:850}.ap-badge.profit{background:rgba(47,226,162,.11);color:#73efc1}.ap-session-meta{font-size:11px;opacity:.68;line-height:1.4}.ap-session-time{font-size:10px;opacity:.48}.ap-session-side{text-align:right;display:grid;align-content:center;gap:6px}.ap-pnl{font-size:15px;font-weight:900}.ap-pos{color:#38e1a2}.ap-neg{color:#ff748d}.ap-wl{font-size:10px;opacity:.65}
+    .stats-cards.ap-today-cards>div{animation:apPulseIn .28s ease both}.ap-empty{padding:28px 10px;text-align:center;opacity:.6;border:1px dashed rgba(255,255,255,.1);border-radius:14px}
+    #${MODAL_ID}{position:fixed;inset:0;z-index:99999;background:radial-gradient(circle at 80% 0,rgba(124,131,255,.12),transparent 38%),#070a12;color:#f7f8ff;overflow:auto;-webkit-overflow-scrolling:touch;padding:calc(12px + var(--ap-safe-top,0px)) 12px calc(90px + var(--ap-safe-bottom,0px));animation:apFade .2s ease both}
+    #${MODAL_ID} .ap-shell{max-width:820px;margin:auto}#${MODAL_ID} .ap-head{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:10px;padding:8px 0 12px;background:rgba(7,10,18,.93);backdrop-filter:blur(18px)}#${MODAL_ID} .ap-back{width:42px;height:42px;border:0;border-radius:13px;background:rgba(255,255,255,.08);color:#fff;font-size:22px}#${MODAL_ID} .ap-title{flex:1;min-width:0}#${MODAL_ID} .ap-title small{display:block;font-size:9px;letter-spacing:.12em;color:#8992ff}#${MODAL_ID} .ap-title b{font-size:19px}#${MODAL_ID} .ap-status{font-size:9px;font-weight:900;border-radius:999px;padding:6px 8px;background:rgba(124,131,255,.16)}
+    #${MODAL_ID} .ap-hero{padding:16px;border-radius:19px;border:1px solid rgba(124,131,255,.18);background:linear-gradient(145deg,rgba(124,131,255,.12),rgba(255,255,255,.025));margin-bottom:11px}#${MODAL_ID} .ap-hero-row{display:flex;justify-content:space-between;gap:10px;align-items:end}#${MODAL_ID} .ap-hero h2{margin:4px 0;font-size:22px}#${MODAL_ID} .ap-hero p{margin:0;opacity:.62;font-size:11px;line-height:1.5}#${MODAL_ID} .ap-hero .big{font-size:24px;font-weight:950}
+    #${MODAL_ID} .ap-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}#${MODAL_ID} .ap-card{padding:11px;border-radius:14px;background:rgba(255,255,255,.042);border:1px solid rgba(255,255,255,.065);min-width:0}#${MODAL_ID} .ap-card small{display:block;font-size:9px;opacity:.52;margin-bottom:5px}#${MODAL_ID} .ap-card b{font-size:13px;word-break:break-word}#${MODAL_ID} .ap-section{margin-top:17px}#${MODAL_ID} .ap-section h3{font-size:14px;margin:0 0 8px}
+    #${MODAL_ID} .ap-leg{padding:12px;border-radius:15px;background:rgba(255,255,255,.037);border:1px solid rgba(255,255,255,.06);margin-bottom:8px;animation:apRise .25s ease both}#${MODAL_ID} .ap-legtop{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}#${MODAL_ID} .ap-leggrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}#${MODAL_ID} .ap-leggrid div{background:rgba(255,255,255,.03);border-radius:9px;padding:7px}#${MODAL_ID} .ap-leggrid small{display:block;font-size:8px;opacity:.48}#${MODAL_ID} .ap-leggrid b{font-size:11px}
+    @keyframes apRise{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}@keyframes apPulseIn{from{opacity:.4;transform:scale(.98)}to{opacity:1;transform:none}}@keyframes apFade{from{opacity:0}to{opacity:1}}@media(min-width:700px){#${MODAL_ID} .ap-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+  `;document.head.appendChild(s)}
+  function bounds(){const now=new Date(),start=new Date(now),end=new Date(now);start.setHours(0,0,0,0);end.setHours(0,0,0,0);if(filter.kind==='today')end.setDate(end.getDate()+1);else if(filter.kind==='yesterday'){start.setDate(start.getDate()-1)}else if(filter.kind==='7d'){start.setDate(start.getDate()-6);end.setDate(end.getDate()+1)}else if(filter.kind==='30d'){start.setDate(start.getDate()-29);end.setDate(end.getDate()+1)}else if(filter.kind==='date'&&filter.value){const p=filter.value.split('-').map(Number);start.setFullYear(p[0],p[1]-1,p[2]);start.setHours(0,0,0,0);end.setTime(start.getTime());end.setDate(end.getDate()+1)}else if(filter.kind==='month'&&filter.value){const p=filter.value.split('-').map(Number);start.setFullYear(p[0],p[1]-1,1);start.setHours(0,0,0,0);end.setTime(start.getTime());end.setMonth(end.getMonth()+1)}else end.setDate(end.getDate()+1);return{from:start.toISOString(),to:end.toISOString()}}
+  function periodLabel(){if(filter.kind==='today')return'Сегодня';if(filter.kind==='yesterday')return'Вчера';if(filter.kind==='7d')return'Последние 7 дней';if(filter.kind==='30d')return'Последние 30 дней';if(filter.kind==='date'&&filter.value)return new Date(`${filter.value}T00:00:00`).toLocaleDateString();if(filter.kind==='month'&&filter.value)return new Date(`${filter.value}-01T00:00:00`).toLocaleDateString([],{month:'long',year:'numeric'});return'Период'}
+  function toolbar(host){let bar=document.getElementById(TOOLBAR_ID);if(bar)return bar;bar=document.createElement('div');bar.id=TOOLBAR_ID;bar.innerHTML=`<div class="ap-filter-row"><button data-k="today" class="active">Сегодня</button><button data-k="yesterday">Вчера</button><button data-k="7d">7 дней</button><button data-k="30d">30 дней</button></div><div class="ap-custom"><input class="ap-date" type="date"><input class="ap-month" type="month"><button class="ap-clear">Очистить</button></div>`;host.parentElement?.insertBefore(bar,host);bar.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{filter={kind:b.dataset.k};bar.querySelectorAll('[data-k]').forEach(x=>x.classList.toggle('active',x===b));load(true)});bar.querySelector('.ap-date').onchange=e=>{if(!e.target.value)return;filter={kind:'date',value:e.target.value};bar.querySelectorAll('[data-k]').forEach(x=>x.classList.remove('active'));load(true)};bar.querySelector('.ap-month').onchange=e=>{if(!e.target.value)return;filter={kind:'month',value:e.target.value};bar.querySelectorAll('[data-k]').forEach(x=>x.classList.remove('active'));load(true)};bar.querySelector('.ap-clear').onclick=clearStats;return bar}
+  function summary(rows){const wins=rows.reduce((a,x)=>a+num(x.wins_count),0),losses=rows.reduce((a,x)=>a+num(x.losses_count),0),trades=wins+losses+rows.reduce((a,x)=>a+num(x.draws_count),0),profit=rows.reduce((a,x)=>a+num(x.profit),0),wr=wins+losses?Math.round(wins/(wins+losses)*1000)/10:null;const cards=document.querySelector('.stats-cards');if(!cards)return;cards.classList.add('ap-today-cards');cards.innerHTML=[['Сессии',rows.length,periodLabel()],['AUTO сделки',trades,`${wins}W / ${losses}L`],['Winrate',wr==null?'—':`${wr}%`,periodLabel()],['P/L',signed(profit),periodLabel()]].map(([a,b,c])=>`<div><small>${esc(a)}</small><b class="${a==='P/L'?(profit>=0?'ap-pos':'ap-neg'):''}">${esc(b)}</b><span>${esc(c)}</span></div>`).join('')}
+  function render(rows){const host=document.querySelector('.session-history');if(!host)return;host.classList.add('ap-v2');host.innerHTML=rows.length?rows.map((x,i)=>`<article data-id="${x.id}" style="animation-delay:${Math.min(i*25,250)}ms"><div class="ap-session-main"><div class="ap-session-top"><span class="ap-session-id">Сессия #${x.id}</span><span class="ap-badge ${x.mode==='profit'?'profit':''}">${esc(mode(x.mode))}</span><span class="ap-badge">${esc(strategy(x.strategy))}</span></div><div class="ap-session-meta">${esc(x.timeframe)} · ${x.leg_count||0} сделок · ${x.covered_count||0} перекрытий · ${x.winrate==null?'—':`${x.winrate}% WR`}</div><div class="ap-session-time">Начало ${esc(local(x.created_at))}<br>Выход ${esc(local(x.ended_at||x.updated_at))}</div></div><div class="ap-session-side"><span class="ap-pnl ${num(x.profit)>=0?'ap-pos':'ap-neg'}">${esc(signed(x.profit))}</span><span class="ap-wl">${x.wins_count||0}W / ${x.losses_count||0}L</span><span class="ap-wl">${esc(x.status)}</span></div></article>`).join(''):`<div class="ap-empty">За выбранный период AUTO-сессий нет.</div>`;host.querySelectorAll('article[data-id]').forEach(a=>a.onclick=()=>openReport(a.dataset.id));const section=host.closest('section');const h=section?.querySelector('h2');if(h)h.textContent=`Сессии · ${periodLabel()}`;summary(rows)}
+  async function load(force=false){const host=document.querySelector('.session-history');if(!host||busy)return;addStyle();toolbar(host);busy=true;try{const b=bounds(),q=new URLSearchParams({from:b.from,to:b.to,limit:'1000'});const rows=await request(`/api/admin-stats/sessions?${q}&_=${Date.now()}`);render(Array.isArray(rows)?rows:[])}catch(e){host.innerHTML=`<div class="ap-empty">Ошибка статистики: ${esc(e.message)}</div>`}finally{busy=false}}
+  async function clearStats(){if(busy)return;const b=bounds(),label=periodLabel();if(!window.confirm(`Удалить завершённую AUTO-статистику за «${label}»? Активная сессия останется.`))return;busy=true;try{const q=new URLSearchParams({from:b.from,to:b.to});const r=await request(`/api/admin-stats/sessions?${q}`,{method:'DELETE'});window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.('success');alert(`Удалено сессий: ${r.deleted||0}`)}catch(e){alert(`Ошибка очистки: ${e.message}`)}finally{busy=false;load(true)}}
+  function duration(a,b){const x=new Date(a),y=new Date(b||Date.now());if(Number.isNaN(x)||Number.isNaN(y))return'—';let s=Math.max(0,Math.round((y-x)/1000)),h=Math.floor(s/3600);s%=3600;const m=Math.floor(s/60);s%=60;return`${h?`${h}ч `:''}${m}м ${s}с`}
+  function card(l,v,c=''){return`<div class="ap-card"><small>${esc(l)}</small><b class="${c}">${esc(v)}</b></div>`}
+  async function openReport(id){addStyle();let root=document.getElementById(MODAL_ID);if(!root){root=document.createElement('div');root.id=MODAL_ID;document.body.appendChild(root)}root.innerHTML=`<div class="ap-shell"><div class="ap-head"><button class="ap-back">×</button><div class="ap-title"><small>ПОЛНЫЙ ОТЧЁТ AUTO</small><b>Сессия #${esc(id)}</b></div></div><div class="ap-empty">Загружаю отчёт…</div></div>`;root.querySelector('.ap-back').onclick=()=>root.remove();try{const d=await request(`/api/auto/history/${id}?_=${Date.now()}`),s=d.session||{},m=d.metrics||{},legs=d.legs||[];root.innerHTML=`<div class="ap-shell"><div class="ap-head"><button class="ap-back">×</button><div class="ap-title"><small>ПОЛНЫЙ ОТЧЁТ AUTO</small><b>Сессия #${esc(id)}</b></div><span class="ap-status">${esc(s.status)}</span></div><div class="ap-hero"><small>${esc(mode(s.mode))} · ${esc(strategy(s.strategy))}</small><div class="ap-hero-row"><div><h2>${esc(s.timeframe)} · ${esc(duration(s.created_at,s.ended_at||s.updated_at))}</h2><p>Старт: ${esc(local(s.created_at))}<br>Выход: ${esc(local(s.ended_at||s.updated_at))}</p></div><div class="big ${num(m.net_profit??s.profit)>=0?'ap-pos':'ap-neg'}">${esc(signed(m.net_profit??s.profit))}</div></div></div><div class="ap-grid">${card('Баланс до',money(m.start_balance??s.start_balance))}${card('Баланс после',money(m.end_balance??s.current_balance))}${card('WIN / LOSS',`${m.wins||0} / ${m.losses||0}`)}${card('Winrate',m.winrate==null?'—':`${m.winrate}%`)}${card('Всего ставок',m.closed??legs.length)}${card('Сумма ставок',money(m.total_staked))}${card('Перекрытий',m.covered_trades||0)}${card('Минус-серий',`${s.failed_series||0}/${s.max_failed_series||0}`)}${card('Режим',mode(s.mode))}${card('Стратегия',strategy(s.strategy))}${card('Базовая ставка',money(s.base_amount))}${card('Макс. перекрытий',s.max_martingale||0)}${card('Gross +',`+${money(m.gross_wins)}`,'ap-pos')}${card('Gross -',`-${money(m.gross_losses)}`,'ap-neg')}${card('Причина остановки',s.stop_reason||'—')}${card('Статус',s.status||'—')}</div><section class="ap-section"><h3>Все сделки (${legs.length})</h3>${legs.length?legs.map((x,i)=>`<article class="ap-leg"><div class="ap-legtop"><b>#${i+1} · ${esc(x.pair||x.asset)} · ${esc(x.direction)}</b><b class="${String(x.result).toUpperCase()==='WIN'?'ap-pos':String(x.result).toUpperCase()==='LOSS'?'ap-neg':''}">${esc(x.result)}</b></div><div class="ap-leggrid"><div><small>Ставка</small><b>${money(x.amount)}</b></div><div><small>Payout</small><b>${money(x.payout)}%</b></div><div><small>P/L</small><b class="${num(x.pnl)>=0?'ap-pos':'ap-neg'}">${signed(x.pnl)}</b></div><div><small>Перекрытие</small><b>${x.martingale_level||0}</b></div><div><small>Открытие</small><b>${esc(local(x.opened_at||x.created_at))}</b></div><div><small>Закрытие</small><b>${esc(local(x.closed_at))}</b></div></div></article>`).join(''):'<div class="ap-empty">Сделок нет.</div>'}</section></div>`;root.querySelector('.ap-back').onclick=()=>root.remove()}catch(e){root.querySelector('.ap-empty').textContent=`Ошибка: ${e.message}`}}
+  function tick(){const host=document.querySelector('.session-history');if(host&&!document.getElementById(TOOLBAR_ID))load(true);if(!host){document.getElementById(TOOLBAR_ID)?.remove();document.getElementById(MODAL_ID)?.remove()}}
+  document.addEventListener('click',()=>setTimeout(tick,30),true);refreshTimer=setInterval(tick,1200);setTimeout(tick,250);document.addEventListener('keydown',e=>{if(e.key==='Escape')document.getElementById(MODAL_ID)?.remove()});
 })();
