@@ -16,7 +16,18 @@ function range(values) {
 const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
 
 export default function CandleChart({ candles = [], entryPrice = null, currentPrice = null, height = 250 }) {
-  const data = candles.slice(-40);
+  const data = [...new Map(candles
+    .map((c) => ({
+      ...c,
+      time: Number(c?.time),
+      open: Number(c?.open),
+      high: Number(c?.high),
+      low: Number(c?.low),
+      close: Number(c?.close),
+    }))
+    .filter((c) => Number.isFinite(c.time) && [c.open, c.high, c.low, c.close].every(Number.isFinite))
+    .sort((a, b) => a.time - b.time)
+    .map((c) => [c.time, c])).values()].slice(-40);
   const width = 720;
   const pad = { l: 18, r: 78, t: 18, b: 34 };
   const plotW = width - pad.l - pad.r;
@@ -36,7 +47,8 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
   const timeLabel = (value) => {
     const n = Number(value);
     if (!Number.isFinite(n)) return "";
-    return new Date(n * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const timestamp = n > 1e12 ? n : n * 1000;
+    return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
   if (!data.length) {
@@ -58,7 +70,7 @@ export default function CandleChart({ candles = [], entryPrice = null, currentPr
 
   return (
     <div className="chart-shell">
-      <svg className="chart-svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
+      <svg className="chart-svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Свечной график выбранного актива">
         <rect x="0" y="0" width={width} height={height} rx="16" fill="#0f1522" />
         {grid}
         {data.map((c, index) => {
