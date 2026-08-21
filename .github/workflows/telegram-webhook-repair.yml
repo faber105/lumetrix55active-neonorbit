@@ -34,7 +34,7 @@ jobs:
           curl --fail --silent --show-error \
             --connect-timeout 5 --max-time 20 \
             -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-            --data-urlencode "url=https://alphapulse-runtime-staging.vercel.app/telegram/webhook" \
+            --data-urlencode "url=https://lumetrix55active-neonorbit.vercel.app/telegram/webhook" \
             --data-urlencode "secret_token=${SECRET}" \
             --data-urlencode "drop_pending_updates=false"
           echo
