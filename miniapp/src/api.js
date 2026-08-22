@@ -61,27 +61,106 @@ function normalizeTimeValue(value, key = "") {
   return value;
 }
 
-export async function apiFetch(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    ...options,
-    mode: "cors",
-    cache: options.cache || "no-store",
-    headers: telegramHeaders(options.headers || {}),
-  });
-  let body = null;
+const inflightGets = new Map();
+const memoryCache = new Map();
+const CACHE_RULES = [
+  [/^\/api\/admin\/state(?:\?|$)/, 30000, "ap_cache_admin"],
+  [/^\/api\/auto\/state(?:\?|$)/, 900, "ap_cache_auto_state"],
+  [/^\/api\/auto-preload\/state(?:\?|$)/, 1200, "ap_cache_auto_preload"],
+];
+
+function cacheRule(path) {
+  return CACHE_RULES.find(([pattern]) => pattern.test(path)) || null;
+}
+
+function readPersistentCache(key, maxAge) {
+  if (!key) return null;
   try {
-    body = await response.json();
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || Date.now() - Number(parsed.at || 0) > maxAge) return null;
+    return normalizeTimeValue(parsed.value);
   } catch {
-    body = null;
+    return null;
   }
-  if (!response.ok) {
-    const message = body?.detail || body?.error || `${response.status} ${response.statusText}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.body = body;
-    throw error;
+}
+
+function writePersistentCache(key, value) {
+  if (!key) return;
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), value })); } catch {}
+}
+
+async function requestJson(path, options = {}) {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const timeoutMs = Number(options.timeoutMs || 4500);
+  let timeout = null;
+  let onAbort = null;
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else {
+      onAbort = () => controller.abort(externalSignal.reason);
+      externalSignal.addEventListener("abort", onAbort, { once: true });
+    }
   }
-  return normalizeTimeValue(body);
+  timeout = window.setTimeout(() => controller.abort(new DOMException("API timeout", "TimeoutError")), timeoutMs);
+  try {
+    const response = await fetch(`${API}${path}`, {
+      ...options,
+      signal: controller.signal,
+      mode: "cors",
+      cache: options.cache || "no-store",
+      headers: telegramHeaders(options.headers || {}),
+    });
+    let body = null;
+    try { body = await response.json(); } catch { body = null; }
+    if (!response.ok) {
+      const message = body?.detail || body?.error || `${response.status} ${response.statusText}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    return normalizeTimeValue(body);
+  } finally {
+    if (timeout) window.clearTimeout(timeout);
+    if (externalSignal && onAbort) externalSignal.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function apiFetch(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method !== "GET") return requestJson(path, options);
+
+  const rule = cacheRule(path);
+  const now = Date.now();
+  if (rule) {
+    const [, ttl, storageKey] = rule;
+    const cached = memoryCache.get(storageKey);
+    if (cached && now - cached.at <= ttl) return cached.value;
+    const persisted = readPersistentCache(storageKey, ttl);
+    if (persisted != null) {
+      memoryCache.set(storageKey, { at: now, value: persisted });
+      return persisted;
+    }
+  }
+
+  const key = `${path}|${JSON.stringify(options.headers || {})}`;
+  if (inflightGets.has(key)) return inflightGets.get(key);
+
+  const promise = requestJson(path, options)
+    .then((value) => {
+      if (rule) {
+        const [, , storageKey] = rule;
+        memoryCache.set(storageKey, { at: Date.now(), value });
+        writePersistentCache(storageKey, value);
+      }
+      return value;
+    })
+    .finally(() => inflightGets.delete(key));
+  inflightGets.set(key, promise);
+  return promise;
 }
 
 export function postJson(path, payload = {}, extraHeaders = {}) {
@@ -105,8 +184,9 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   let stopped = false;
   let retryTimer = null;
   let pollTimer = null;
-  let retryDelay = 250;
+  let retryDelay = 500;
   let lastSequence = 0;
+  let pollBusy = false;
 
   const report = (value) => {
     try { onStatus?.(value); } catch {}
@@ -120,29 +200,33 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
       retryTimer = null;
       connect();
     }, retryDelay);
-    retryDelay = Math.min(5000, Math.round(retryDelay * 1.7));
+    retryDelay = Math.min(8000, Math.round(retryDelay * 1.7));
   };
 
   const stopPolling = () => {
     if (pollTimer) window.clearInterval(pollTimer);
     pollTimer = null;
+    pollBusy = false;
   };
 
   const poll = async () => {
-    if (stopped) return;
+    if (stopped || pollBusy) return;
+    pollBusy = true;
     try {
       const state = await apiFetch("/api/auto/state?drive=false");
       onState?.(state);
       report({ connected: true, driving: true, reconnecting: false, transport: "polling" });
     } catch {
       report({ connected: false, driving: false, reconnecting: true, transport: "polling" });
+    } finally {
+      pollBusy = false;
     }
   };
 
   const startPolling = () => {
     if (stopped || pollTimer) return;
     void poll();
-    pollTimer = window.setInterval(poll, 750);
+    pollTimer = window.setInterval(poll, 1200);
   };
 
   const connect = async () => {
@@ -163,7 +247,7 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
     report({ connected: false, driving: false, reconnecting: true, transport: "wss" });
 
     socket.addEventListener("open", () => {
-      retryDelay = 250;
+      retryDelay = 500;
       socket?.send(JSON.stringify({ type: "auth", token: config.token, last_sequence: lastSequence }));
     });
     socket.addEventListener("message", (event) => {
@@ -174,7 +258,10 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
           report({ connected: true, driving: true, reconnecting: false, transport: "wss" });
         } else if (message?.type === "auto_state" && message.data) {
           lastSequence = Math.max(lastSequence, Number(message.data.sequence || 0));
-          onState?.(normalizeTimeValue(message.data));
+          const state = normalizeTimeValue(message.data);
+          memoryCache.set("ap_cache_auto_state", { at: Date.now(), value: state });
+          writePersistentCache("ap_cache_auto_state", state);
+          onState?.(state);
         }
       } catch {}
     });
@@ -198,9 +285,7 @@ export function syncDeviceTimezone() {
   if (!TG_ID) return Promise.resolve(null);
   if (timezoneSyncPromise) return timezoneSyncPromise;
   let name = "";
-  try {
-    name = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {}
+  try { name = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch {}
   const offsetMinutes = -new Date().getTimezoneOffset();
   timezoneSyncPromise = postJson("/api/settings/timezone", {
     name,
@@ -210,5 +295,5 @@ export function syncDeviceTimezone() {
 }
 
 if (TG_ID) {
-  setTimeout(() => { syncDeviceTimezone(); }, 0);
+  setTimeout(() => { syncDeviceTimezone(); }, 1200);
 }
