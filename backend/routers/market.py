@@ -12,6 +12,8 @@ from backend.services.pocketoption_otc import (
     market_data,
 )
 from backend.services.strategies import indicator_snapshot
+from backend.models.db_models import utcnow
+from backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
@@ -61,7 +63,7 @@ async def candles(
     pair: str = Query(...),
     timeframe: str = Query('1m'),
     count: int = Query(60, ge=20, le=120),
-    _: TelegramMiniAppUser = Depends(telegram_user),
+    user: TelegramMiniAppUser = Depends(telegram_user),
 ):
     asset = DISPLAY_TO_ASSET.get(pair.replace(' OTC', '').strip())
     if not asset:
@@ -69,21 +71,19 @@ async def candles(
     if timeframe not in TF_SECONDS:
         raise HTTPException(400, 'Unsupported timeframe')
     try:
-        rows = await market_data.get_candles(asset, timeframe, count)
-        # Keep the marker and scale tied to the exact candle set/timeframe
-        # returned below. A separate latest_price() call always used 1m data
-        # and could visually disagree with 15s/3m/5m/15m charts.
-        current_price = float(rows[-1]['close']) if rows else await market_data.latest_price(asset)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    return {
-        'pair': OTC_ASSETS[asset],
-        'asset': asset,
-        'timeframe': timeframe,
-        'current_price': float(current_price),
-        'server_time': datetime.now(timezone.utc).isoformat(),
-        'candles': rows,
-    }
+        account_id = await ensure_demo_account()
+        payload = {'pair': pair, 'timeframe': timeframe, 'count': count}
+        command = await enqueue_command(
+            account_id=account_id,
+            command_type='MARKET_CANDLES',
+            payload=payload,
+            idempotency_key=f'candles:{int(user.id)}:{asset}:{timeframe}:{count}:{int(utcnow().timestamp() // 2)}',
+        )
+        return await await_command(int(command['id']), account_id)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Windows worker is not responding') from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, 'Windows worker could not load market data') from exc
 
 
 @router.get('/analysis')

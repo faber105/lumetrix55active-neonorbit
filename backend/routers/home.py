@@ -7,10 +7,11 @@ from pydantic import BaseModel
 
 from backend.models.db_models import utcnow
 from backend.services.control import get_control, update_control
-from backend.services.pocketoption_otc import DISPLAY_TO_ASSET, MarketDataUnavailable, OTC_ASSETS, TF_SECONDS
+from backend.services.pocketoption_otc import MarketDataUnavailable, OTC_ASSETS
 from backend.services.scanner import notify_signal
 from backend.services.signal_engine import signal_engine
 from backend.services.signal_store import save_signal
+from backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account
 from backend.telegram_auth import TelegramMiniAppUser, admin_user, telegram_user
 
 router = APIRouter()
@@ -25,36 +26,25 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.post('/analyze')
-async def analyze(req: AnalyzeRequest, _: TelegramMiniAppUser = Depends(telegram_user)):
-    asset = DISPLAY_TO_ASSET.get(req.pair.replace(' OTC', '').strip())
-    if not asset:
-        raise HTTPException(400, 'Unsupported OTC pair')
-    if req.timeframe not in MANUAL_TIMEFRAMES or req.timeframe not in TF_SECONDS:
+async def analyze(req: AnalyzeRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
+    if req.timeframe not in MANUAL_TIMEFRAMES:
         raise HTTPException(400, 'Unsupported timeframe')
+    from backend.services.pocketoption_otc import DISPLAY_TO_ASSET
+    if req.pair.replace(' OTC', '').strip() not in DISPLAY_TO_ASSET:
+        raise HTTPException(400, 'Unsupported OTC pair')
     try:
-        candidate = await signal_engine.evaluate_asset_composite(asset, req.timeframe)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    if not candidate or float(candidate.get('confidence') or 0) < MIN_MANUAL_CONFIDENCE:
-        return {
-            'status': 'NO_SIGNAL',
-            'pair': OTC_ASSETS[asset],
-            'timeframe': req.timeframe,
-            'signal': None,
-            'reason': 'Сейчас нет подтверждённой точки входа. Trend, momentum и volatility-фильтры не дали достаточного совпадения.',
-        }
-    signal, duplicate = await save_signal(candidate, is_vip=False)
-    return {
-        'status': 'SIGNAL',
-        'signal': signal,
-        'duplicate': duplicate,
-        'analysis': {
-            'engine': 'Composite Analysis',
-            'strategy': candidate.get('strategy_label'),
-            'confirmations': candidate.get('confirmations', []),
-            'indicators': candidate.get('indicators', {}),
-        },
-    }
+        account_id = await ensure_demo_account()
+        command = await enqueue_command(
+            account_id=account_id,
+            command_type='ANALYZE_SIGNAL',
+            payload=req.model_dump(),
+            idempotency_key=f'manual:{int(user.id)}:{req.pair}:{req.timeframe}:{int(utcnow().timestamp() // 3)}',
+        )
+        return await await_command(int(command['id']), account_id)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Windows worker is not responding') from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, 'Windows worker could not analyze the market') from exc
 
 
 @router.get('/vip-status')

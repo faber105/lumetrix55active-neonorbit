@@ -16,7 +16,7 @@ The scripts resolve this layout from the repository location, so both `C:\AlphaP
 1. Install current Python, Node.js LTS (with npm) and Git from their official sources.
 2. Run `scripts\windows\bootstrap.ps1` in normal PowerShell.
 3. Run `scripts\windows\install-service.ps1` once from PowerShell **as Administrator**.
-4. Fill `config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Keep `POCKET_OPTION_DEMO=true`.
+4. Fill `config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Add `TELEGRAM_BOT_TOKEN` so scheduled VIP signals can be delivered. Keep `POCKET_OPTION_DEMO=true`.
 5. Start the task: `Start-ScheduledTask -TaskName 'AlphaPulse Worker'`.
 6. Check it with `scripts\windows\status.ps1` and inspect the newest file under `logs\`.
 

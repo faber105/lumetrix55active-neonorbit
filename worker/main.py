@@ -11,6 +11,31 @@ from dotenv import load_dotenv
 logger = logging.getLogger("alphapulse.worker")
 
 
+async def _maintenance_loop(stop_event: asyncio.Event) -> None:
+    from backend.services.reconciler import reconcile_pending
+    from backend.services.vip_runtime_fix import run_due_vip
+
+    telegram_bot = None
+    if str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip():
+        try:
+            from bot.main import bot as telegram_bot
+        except Exception:
+            logger.exception("Telegram bot could not initialize in worker maintenance")
+    while not stop_event.is_set():
+        try:
+            await reconcile_pending()
+        except Exception as exc:
+            logger.warning("Manual signal reconciliation recovered after %s", type(exc).__name__)
+        try:
+            await run_due_vip(telegram_bot)
+        except Exception as exc:
+            logger.warning("VIP maintenance recovered after %s", type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+
+
 def _require_demo_runtime() -> None:
     if str(os.getenv("VERCEL") or "").strip().lower() in {"1", "true", "yes", "on"}:
         raise RuntimeError("The persistent worker cannot run inside Vercel")
@@ -80,6 +105,10 @@ async def run_worker() -> None:
         worker_supervisor(stop_event, account_id),
         name="alphapulse-worker-supervisor",
     )
+    maintenance = asyncio.create_task(
+        _maintenance_loop(stop_event),
+        name="alphapulse-worker-maintenance",
+    )
     realtime_server = None
     realtime_task = None
     if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
@@ -115,6 +144,10 @@ async def run_worker() -> None:
             await realtime_task
         try:
             await supervisor
+        except asyncio.CancelledError:
+            pass
+        try:
+            await maintenance
         except asyncio.CancelledError:
             pass
         await release_lease(account_id)

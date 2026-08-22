@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from backend.main import _health_payload
 from backend.routers import settings
 from backend.services.pocketoption_otc import PocketOptionOTCService
+from backend.services.manual_worker_tasks import analyze_market, candles
 from backend.telegram_auth import TelegramMiniAppUser
 
 
@@ -40,3 +41,10 @@ def test_worker_runtime_can_read_local_pocket_credential(monkeypatch):
     monkeypatch.setenv("APP_RUNTIME_ROLE", "worker")
     monkeypatch.setenv("POCKET_OPTION_SSID", "local-worker-session")
     assert PocketOptionOTCService().configured is True
+
+
+def test_worker_market_tasks_reject_untrusted_symbols_before_network_access():
+    with pytest.raises(ValueError, match="Unsupported OTC pair"):
+        asyncio.run(analyze_market({"pair": "ATTACK/USD", "timeframe": "1m"}))
+    with pytest.raises(ValueError, match="Unsupported OTC pair"):
+        asyncio.run(candles({"pair": "ATTACK/USD", "timeframe": "1m", "count": 60}))

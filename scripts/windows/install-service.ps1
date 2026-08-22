@@ -35,6 +35,7 @@ if (-not (Test-Path -LiteralPath $configFile)) {
     @(
         'DATABASE_URL=',
         'ADMIN_ID=',
+        'TELEGRAM_BOT_TOKEN=',
         'POCKET_OPTION_SSID=',
         'POCKET_OPTION_DEMO=true',
         'WORKER_SHARED_SECRET=',

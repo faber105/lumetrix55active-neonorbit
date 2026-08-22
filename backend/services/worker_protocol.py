@@ -369,6 +369,12 @@ async def _claim_command(account_id: int) -> dict | None:
         return None
     async with AsyncSessionLocal() as db:
         async with db.begin():
+            await db.execute(
+                text("""UPDATE worker_commands SET status='PENDING',claimed_at=NULL,claimed_by=NULL
+                    WHERE account_id=:account AND status='CLAIMED'
+                      AND claimed_at < NOW() - INTERVAL '60 seconds'"""),
+                {"account": int(account_id)},
+            )
             row = (
                 await db.execute(
                     text("""SELECT * FROM worker_commands
@@ -405,6 +411,32 @@ async def _finish_command(command_id: int, *, result: dict | None = None, error:
         await db.commit()
 
 
+async def await_command(command_id: int, account_id: int, *, timeout_seconds: float = 25.0) -> dict:
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + max(1.0, min(30.0, float(timeout_seconds)))
+    while time.monotonic() < deadline:
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    text("""SELECT status,result,error FROM worker_commands
+                        WHERE id=:id AND account_id=:account"""),
+                    {"id": int(command_id), "account": int(account_id)},
+                )
+            ).mappings().first()
+        if not row:
+            raise ValueError("Worker command not found")
+        status = str(row["status"])
+        if status == "COMPLETED":
+            result = row.get("result") or {}
+            return json.loads(result) if isinstance(result, str) else dict(result)
+        if status == "FAILED":
+            raise RuntimeError(str(row.get("error") or "Worker command failed"))
+        await asyncio.sleep(0.2)
+    raise TimeoutError("Windows worker did not answer in time")
+
+
 async def process_one_command(account_id: int) -> dict | None:
     command = await _claim_command(account_id)
     if not command:
@@ -424,9 +456,17 @@ async def process_one_command(account_id: int) -> dict | None:
 
             await set_execution_mode("confirm")
             result = await stop_session(str(payload.get("reason") or "USER_STOP"))
+        elif command_type == "ANALYZE_SIGNAL":
+            from backend.services.manual_worker_tasks import analyze_market
+
+            result = await analyze_market(dict(payload))
+        elif command_type == "MARKET_CANDLES":
+            from backend.services.manual_worker_tasks import candles
+
+            result = await candles(dict(payload))
         else:
             raise ValueError(f"Unsupported worker command: {command_type}")
-        await _finish_command(int(command["id"]), result={"ok": True})
+        await _finish_command(int(command["id"]), result=dict(result or {}))
         return {"status": "COMMAND_COMPLETED", "command_id": int(command["id"]), "result": result}
     except Exception as exc:
         await _finish_command(int(command["id"]), error=f"{type(exc).__name__}: {exc}")
