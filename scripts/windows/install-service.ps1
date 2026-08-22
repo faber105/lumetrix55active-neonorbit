@@ -36,10 +36,11 @@ $existingUser = Get-LocalUser -Name $ServiceUser -ErrorAction SilentlyContinue
 if (-not $existingUser) {
     New-LocalUser -Name $ServiceUser -Password $securePassword -AccountNeverExpires -UserMayNotChangePassword | Out-Null
 } else {
-    # -AccountNeverExpires is a switch parameter in Windows PowerShell. Passing
-    # an explicit $true is treated as an unexpected positional argument.
     Set-LocalUser -Name $ServiceUser -Password $securePassword -AccountNeverExpires
 }
+$localUser = Get-LocalUser -Name $ServiceUser -ErrorAction Stop
+$serviceAccount = "$env:COMPUTERNAME\$ServiceUser"
+$serviceSid = $localUser.SID.Value
 
 if (-not (Test-Path -LiteralPath $configFile)) {
     @(
@@ -65,10 +66,10 @@ $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowe
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $trigger.Delay = 'PT30S'
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-$taskPrincipal = New-ScheduledTaskPrincipal -UserId ".\$ServiceUser" -LogonType Password -RunLevel Limited
+$taskPrincipal = New-ScheduledTaskPrincipal -UserId $serviceSid -LogonType Password -RunLevel Limited
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $taskPrincipal -Description 'AlphaPulse DEMO-only Windows worker'
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $TaskName -InputObject $task -User ".\$ServiceUser" -Password $passwordText -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -InputObject $task -User $serviceAccount -Password $passwordText -Force | Out-Null
 
 powercfg /change standby-timeout-ac 0 | Out-Null
-Write-Host "Installed/refreshed. Fill $configFile, then run: Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Installed/refreshed for $serviceAccount. Fill $configFile, then run: Start-ScheduledTask -TaskName '$TaskName'"
