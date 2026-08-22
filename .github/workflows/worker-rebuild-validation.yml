@@ -1,0 +1,83 @@
+name: Validate Windows worker rebuild
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/worker-rebuild-validation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install 'pytest>=8,<9'
+      - name: Compile Python runtime
+        run: python -m compileall -q backend worker api bot tests
+      - name: Run worker and state-machine tests
+        env:
+          APP_RUNTIME_ROLE: web
+          POCKET_OPTION_DEMO: 'true'
+          ADMIN_ID: '1'
+          WORKER_SHARED_SECRET: 'validation-only-secret-not-used-in-production-1234567890'
+        run: |
+          pytest -q \
+            tests/test_auto_session_config.py \
+            tests/test_command_idempotency.py \
+            tests/test_fake_broker_scenarios.py \
+            tests/test_realtime_tokens.py \
+            tests/test_runtime_role.py \
+            tests/test_security_boundaries.py \
+            tests/test_session_loss_transition.py \
+            tests/test_session_settle_transition.py
+      - name: Verify architecture boundaries
+        run: |
+          grep -q 'if _truthy(os.getenv("VERCEL"))' backend/services/auto_realtime.py
+          grep -q 'if not await owns_lease(account_id)' backend/services/auto_realtime.py
+          grep -q 'OrderUncertainError' backend/services/auto_trade.py
+          grep -q 'reconcile_uncertain_executions' worker/main.py
+          grep -q 'SESSION_STAGES = {' backend/services/session_engine.py
+          grep -q 'USER_STOP_PENDING' backend/services/session_engine.py
+          grep -q 'MIN_AUTO_PAYOUT = 92.0' backend/services/auto_trade.py
+          grep -q 'PRELOAD_OPEN_GRACE_SECONDS = 1.5' backend/services/preload_next.py
+          ! grep -q 'id:"smart_confluence"' miniapp/src/App.jsx
+          grep -q 'workflow_dispatch' .github/workflows/otc-scan.yml
+          ! grep -q 'schedule:' .github/workflows/otc-scan.yml
+          grep -q "'ANALYZE_SIGNAL'" backend/routers/signals.py
+          grep -q "'SCAN_STRATEGY'" backend/routers/signals.py
+          grep -q "'SCAN_BEST'" backend/routers/signals.py
+          grep -q "'RECONCILE_SIGNALS'" backend/routers/signals.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - name: Build Mini App
+        working-directory: miniapp
+        run: |
+          npm ci
+          npm run build
+      - name: Record successful validation
+        run: |
+          mkdir -p validation
+          printf 'Windows worker rebuild validation PASSED\nvalidated_source_commit=%s\nvalidated_at=%s\n' \
+            "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > validation/worker-rebuild-passed.txt
+          git config user.name "AlphaPulse Validation"
+          git config user.email "actions@users.noreply.github.com"
+          git add validation/worker-rebuild-passed.txt
+          git commit -m "Record successful worker rebuild validation"
+          git push origin HEAD:codex-windows-worker-rebuild
