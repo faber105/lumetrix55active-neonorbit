@@ -1,0 +1,83 @@
+name: Final AUTO continuity cleanup
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/final-auto-continuity-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Keep count sessions alive and remove dead mixed code
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('backend/services/session_transitions.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''    failed += 1\n    if failed >= int(session["max_failed_series"]):\n        return {\n            "failed": failed,\n            "level": 0,\n            "series_loss": 0,\n            "status": "STOPPED",\n            "stage": "STOPPED",\n            "reason": "MAX_FAILED_SERIES",\n            "ended": _utcnow(),\n            "message": (\n                f"Сессия завершена · проиграны все перекрытия "\n                f"({max_martingale}/{max_martingale})"\n            ),\n        }\n\n    return {\n        "failed": failed,\n        "level": 0,\n        "series_loss": 0,\n        "status": "ACTIVE",\n        "stage": "SCANNING",\n        "reason": None,\n        "ended": None,\n        "message": "Полная минусовая серия учтена · анализирую пары с payout ≥92% дальше",\n    }\n'''
+          new = '''    failed += 1\n    # In count mode the only terminal target is target_wins. Exhausting one\n    # martingale chain records a failed series, resets recovery and immediately\n    # starts searching for the next confirmed setup. Profit mode keeps its\n    # explicit failed-series safety limit.\n    if str(session.get("mode") or "count") != "count" and failed >= int(session["max_failed_series"]):\n        return {\n            "failed": failed,\n            "level": 0,\n            "series_loss": 0,\n            "status": "STOPPED",\n            "stage": "STOPPED",\n            "reason": "MAX_FAILED_SERIES",\n            "ended": _utcnow(),\n            "message": (\n                f"Сессия завершена · достигнут лимит минусовых серий после "\n                f"перекрытия {max_martingale}/{max_martingale}"\n            ),\n        }\n\n    return {\n        "failed": failed,\n        "level": 0,\n        "series_loss": 0,\n        "status": "ACTIVE",\n        "stage": "SCANNING",\n        "reason": None,\n        "ended": None,\n        "message": (\n            "Полная минусовая серия учтена · перекрытие сброшено · "\n            "продолжаю поиск до достижения цели по WIN"\n            if str(session.get("mode") or "count") == "count"\n            else "Полная минусовая серия учтена · анализирую пары с payout ≥92% дальше"\n        ),\n    }\n'''
+          if old not in text:
+              raise SystemExit('session transition block not found')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          p = Path('backend/services/session_engine.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n', '    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n', 1)
+          text = text.replace('    label = "Mixed Smart Confluence" if mixed_count else ("Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy))\n', '    label = STRATEGY_LABELS.get(strategy, strategy)\n', 1)
+          start = text.find('        if mixed_count:\n            # Second-pass confirmation')
+          if start >= 0:
+              end = text.find('\n        stored, duplicate = await save_signal(candidate_to_save, is_vip=False)', start)
+              if end < 0:
+                  raise SystemExit('session mixed branch end not found')
+              text = text[:start] + text[end+1:]
+          text = text.replace(', "mixed": mixed_count, "confirmed": True}', ', "confirmed": True}', 1)
+          text = text.replace('message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),', 'message="Все пары проанализированы · лучший подтверждённый сетап выбранной стратегии с payout ≥92% найден",', 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n', '    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n', 1)
+          start = text.find('        if mixed_count:\n            try:\n                recheck = await signal_engine.evaluate_asset(')
+          if start >= 0:
+              end = text.find('\n        selected = candidate_to_save\n', start)
+              if end < 0:
+                  end = text.find('\n        try:\n            candidate_entry', start)
+              if end < 0:
+                  raise SystemExit('preload mixed branch end not found')
+              text = text[:start] + text[end:]
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('tests/test_session_loss_transition.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('''    def test_loss_on_last_cover_stops_count_session(self):\n        state = loss_transition(\n            _session(),\n            amount=9.10,\n            failed=0,\n            level=3,\n            series_loss=7.45,\n        )\n\n        self.assertEqual(state["status"], "STOPPED")\n        self.assertEqual(state["stage"], "STOPPED")\n        self.assertEqual(state["reason"], "MAX_FAILED_SERIES")\n        self.assertEqual(state["level"], 0)\n        self.assertEqual(state["series_loss"], 0)\n        self.assertIn("3/3", state["message"])\n\n    def test_zero_cover_session_stops_after_first_loss(self):\n        state = loss_transition(\n            _session(max_martingale=0),\n            amount=1.0,\n            failed=0,\n            level=0,\n            series_loss=0,\n        )\n\n        self.assertEqual(state["status"], "STOPPED")\n        self.assertEqual(state["reason"], "MAX_FAILED_SERIES")\n''','''    def test_loss_on_last_cover_resets_and_continues_count_session(self):\n        state = loss_transition(\n            _session(),\n            amount=9.10,\n            failed=0,\n            level=3,\n            series_loss=7.45,\n        )\n\n        self.assertEqual(state["status"], "ACTIVE")\n        self.assertEqual(state["stage"], "SCANNING")\n        self.assertIsNone(state["reason"])\n        self.assertEqual(state["failed"], 1)\n        self.assertEqual(state["level"], 0)\n        self.assertEqual(state["series_loss"], 0)\n\n    def test_zero_cover_count_session_continues_after_first_loss(self):\n        state = loss_transition(\n            _session(max_martingale=0),\n            amount=1.0,\n            failed=0,\n            level=0,\n            series_loss=0,\n        )\n\n        self.assertEqual(state["status"], "ACTIVE")\n        self.assertIsNone(state["reason"])\n        self.assertEqual(state["failed"], 1)\n''', 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('tests/test_session_settle_transition.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('''def test_four_losses_stop_exactly_after_level_three():\n    state = session()\n    for level, amount in enumerate((1.0, 2.09, 4.36, 9.10)):\n        state["current_level"] = level\n        transition = settle_transition(state, result="LOSS", amount=amount, payout=92)\n        if level < 3:\n            assert transition["status"] == "ACTIVE"\n            assert transition["level"] == level + 1\n            state["current_series_loss"] = transition["series_loss"]\n        else:\n            assert transition["status"] == "STOPPED"\n            assert transition["reason"] == "MAX_FAILED_SERIES"\n''','''def test_four_losses_reset_chain_and_count_session_keeps_running():\n    state = session()\n    for level, amount in enumerate((1.0, 2.09, 4.36, 9.10)):\n        state["current_level"] = level\n        transition = settle_transition(state, result="LOSS", amount=amount, payout=92)\n        if level < 3:\n            assert transition["status"] == "ACTIVE"\n            assert transition["level"] == level + 1\n            state["current_series_loss"] = transition["series_loss"]\n        else:\n            assert transition["status"] == "ACTIVE"\n            assert transition["reason"] is None\n            assert transition["failed"] == 1\n            assert transition["level"] == 0\n            assert transition["series_loss"] == 0\n''', 1)
+          p.write_text(text, encoding='utf-8')
+      - name: Validate continuity cleanup
+        run: |
+          python -m compileall -q backend worker tests
+          pytest -q tests/test_session_loss_transition.py tests/test_session_settle_transition.py tests/test_auto_session_config.py
+          ! grep -q 'mixed_count' backend/services/session_engine.py
+          ! grep -q 'mixed_count' backend/services/preload_next.py
+      - name: Commit cleanup
+        run: |
+          git config user.name "AlphaPulse Continuity Cleanup"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/session_transitions.py backend/services/session_engine.py backend/services/preload_next.py tests/test_session_loss_transition.py tests/test_session_settle_transition.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Keep count AUTO running after exhausted martingale chains"
+          git pull --rebase origin codex-windows-worker-rebuild
+          git push origin HEAD:codex-windows-worker-rebuild
