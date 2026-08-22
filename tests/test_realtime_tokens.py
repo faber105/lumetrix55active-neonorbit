@@ -7,9 +7,9 @@ from backend.services.realtime_tokens import issue_realtime_token, verify_realti
 
 def test_realtime_token_round_trip(monkeypatch):
     monkeypatch.setenv("WORKER_SHARED_SECRET", "a" * 32)
-    token = issue_realtime_token(telegram_id=7591614041, account_id=7)
+    token = issue_realtime_token(telegram_id=123456789, account_id=7)
     payload = verify_realtime_token(token)
-    assert payload["sub"] == 7591614041
+    assert payload["sub"] == 123456789
     assert payload["account_id"] == 7
     assert payload["scope"] == "realtime:read"
 

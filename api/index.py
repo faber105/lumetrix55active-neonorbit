@@ -70,7 +70,6 @@ except Exception as exc:
         return {
             "status": "bootstrap_error",
             "error_type": _ERROR_TYPE,
-            "error": _ERROR_MESSAGE,
         }
 
     @app.post("/api/internal/telegram-repair")

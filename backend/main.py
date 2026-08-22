@@ -1,5 +1,6 @@
 from __future__ import annotations
-import json, logging, os
+import json, logging, os, time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,16 +136,55 @@ async def lifespan(app):
 
 
 app=FastAPI(title='AlphaPulse API',version='3.4',lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,allow_methods=['*'],allow_headers=['*'])
+_allowed_origins = [
+    value.strip().rstrip('/')
+    for value in os.getenv(
+        'ALLOWED_ORIGINS',
+        'https://alphapulse-otc.vercel.app,https://lumetrix55active-neonorbit.vercel.app',
+    ).split(',')
+    if value.strip().startswith('https://')
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
+    allow_methods=['GET','POST','PATCH','DELETE','OPTIONS'],
+    allow_headers=['Content-Type','X-Telegram-Init-Data','X-Idempotency-Key','Authorization'],
+    max_age=600,
+)
+
+_request_windows: dict[str, deque[float]] = defaultdict(deque)
+_MAX_BODY_BYTES = int(os.getenv('MAX_REQUEST_BODY_BYTES','1048576'))
+_RATE_LIMIT_PER_MINUTE = int(os.getenv('RATE_LIMIT_PER_MINUTE','180'))
 
 
 @app.middleware('http')
 async def miniapp_cache_headers(request,call_next):
+    content_length = request.headers.get('content-length')
+    if content_length:
+        try:
+            if int(content_length) > _MAX_BODY_BYTES:
+                raise HTTPException(413,'Request body too large')
+        except ValueError as exc:
+            raise HTTPException(400,'Invalid Content-Length') from exc
+    if request.url.path.startswith('/api/') and request.method != 'OPTIONS':
+        now = time.monotonic()
+        key = f"{request.client.host if request.client else 'unknown'}:{request.url.path.split('/')[2:3]}"
+        window = _request_windows[key]
+        while window and now - window[0] >= 60:
+            window.popleft()
+        if len(window) >= _RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(429,'Rate limit exceeded')
+        window.append(now)
     response=await call_next(request)
     if request.method=='GET' and request.url.path in {'/','/index.html'}:
         response.headers['Cache-Control']='no-store, max-age=0'
         response.headers['Pragma']='no-cache'
         response.headers['Expires']='0'
+    response.headers['X-Content-Type-Options']='nosniff'
+    response.headers['Referrer-Policy']='no-referrer'
+    response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:; img-src 'self' data:; frame-ancestors https://web.telegram.org https://*.telegram.org"
     return response
 
 
@@ -165,17 +205,9 @@ app.include_router(websocket.router,prefix='/ws',tags=['websocket'])
 async def _health_payload():
     return {
         'status':'ok','service':'alphapulsesbot','version':'3.4',
-        'scanner':'adaptive-timeframe-driver','telegram_configured':TELEGRAM_ENABLED,
+        'telegram_configured':TELEGRAM_ENABLED,
         'database_configured':bool(os.getenv('DATABASE_URL','').strip()),
-        'backend_url':BACKEND_URL or None,
-        'auto_realtime':driver_health(),
-        'source':{
-            'provider':os.getenv('VERCEL_GIT_PROVIDER','manual'),
-            'repository':'/'.join(p for p in (os.getenv('VERCEL_GIT_REPO_OWNER',''),os.getenv('VERCEL_GIT_REPO_SLUG','')) if p) or 'unknown',
-            'ref':os.getenv('VERCEL_GIT_COMMIT_REF','unknown'),
-            'sha':os.getenv('VERCEL_GIT_COMMIT_SHA','unknown'),
-        },
-        'market':await market_data.health(),
+        'runtime_role':os.getenv('APP_RUNTIME_ROLE','web'),
     }
 
 
@@ -187,11 +219,6 @@ async def health():
 @app.get('/api/health')
 async def api_health():
     return await _health_payload()
-
-
-@app.post('/api/internal/telegram-repair')
-async def internal_telegram_repair():
-    return await repair_telegram_webhook()
 
 
 async def _telegram_webhook_handler(payload:dict,x_telegram_bot_api_secret_token:str|None):
@@ -226,10 +253,20 @@ async def telegram_webhook(payload:dict,x_telegram_bot_api_secret_token:str|None
     return await _telegram_webhook_handler(payload,x_telegram_bot_api_secret_token)
 
 
-async def _verify_scanner(authorization: str | None) -> None:
-    if bot is None:raise HTTPException(503,'Telegram is not configured in this deployment')
+async def _verify_internal(authorization: str | None) -> None:
     if not authorization or not authorization.lower().startswith('bearer '):raise HTTPException(401,'Bearer token required')
     await verify_oidc(authorization.split(' ',1)[1])
+
+
+async def _verify_scanner(authorization: str | None) -> None:
+    if bot is None:raise HTTPException(503,'Telegram is not configured in this deployment')
+    await _verify_internal(authorization)
+
+
+@app.post('/api/internal/telegram-repair')
+async def internal_telegram_repair(authorization:str|None=Header(default=None)):
+    await _verify_internal(authorization)
+    return await repair_telegram_webhook()
 
 
 @app.post('/api/internal/auto-tick')

@@ -29,9 +29,6 @@ OTC_ASSETS: Dict[str, str] = {
 }
 DISPLAY_TO_ASSET = {v.replace(' OTC', ''): k for k, v in OTC_ASSETS.items()}
 TF_SECONDS = {'15s': 15, '1m': 60, '3m': 180, '5m': 300, '15m': 900, '1h': 3600}
-PRIVATE_SSID_KEY = '__runtime_pocket__'
-
-
 class MarketDataUnavailable(RuntimeError):
     pass
 
@@ -76,7 +73,9 @@ class PocketOptionOTCService:
         self._last_error = None
         self._auth_kind = 'none'
         self._private_secret_loaded = False
-        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip())
+        runtime_role = os.getenv('APP_RUNTIME_ROLE', 'web').strip().lower()
+        # Pocket credentials are local-worker secrets and are ignored by web/serverless runtimes.
+        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip() if runtime_role == 'worker' else '')
 
     def _apply_ssid(self, value: str) -> None:
         self.ssid = (value or '').strip()
@@ -99,26 +98,8 @@ class PocketOptionOTCService:
             self._auth_kind = 'raw-session'
 
     async def _refresh_private_ssid(self) -> None:
-        if self._private_secret_loaded:
-            return
-        try:
-            from backend.models.db_models import AsyncSessionLocal, MLState
-            async with AsyncSessionLocal() as db:
-                state = await db.get(MLState, PRIVATE_SSID_KEY)
-                if state and state.payload and state.payload.strip():
-                    private_ssid = state.payload.strip()
-                    if private_ssid != self.ssid:
-                        old, self._client = self._client, None
-                        if old is not None:
-                            try:
-                                await old.disconnect()
-                            except Exception:
-                                pass
-                        self._apply_ssid(private_ssid)
-                    logger.info('Pocket Option market session loaded (%s)', self._auth_kind)
-            self._private_secret_loaded = True
-        except Exception as exc:
-            logger.warning('Cannot load Pocket Option market session: %s', type(exc).__name__)
+        # Intentionally never load credentials from the shared database.
+        self._private_secret_loaded = True
 
     @property
     def configured(self):

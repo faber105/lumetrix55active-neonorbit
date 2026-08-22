@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.db_models import MLState, UserSettings, utcnow
 from backend.services.database import get_db
-from backend.telegram_auth import TelegramMiniAppUser, telegram_user
+from backend.telegram_auth import TelegramMiniAppUser, is_admin_id, telegram_user
 
 router = APIRouter()
 
@@ -47,12 +47,25 @@ async def row(db, tid):
 
 
 @router.get('/user/{telegram_id}')
-async def get(telegram_id: int, db: AsyncSession = Depends(get_db)):
+async def get(
+    telegram_id: int,
+    user: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if int(user.id) != int(telegram_id) and not is_admin_id(user.id):
+        raise HTTPException(403, 'Cannot read another user settings')
     return ser(await row(db, telegram_id))
 
 
 @router.patch('/user/{telegram_id}')
-async def patch(telegram_id: int, data: Update, db: AsyncSession = Depends(get_db)):
+async def patch(
+    telegram_id: int,
+    data: Update,
+    user: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if int(user.id) != int(telegram_id) and not is_admin_id(user.id):
+        raise HTTPException(403, 'Cannot edit another user settings')
     s = await row(db, telegram_id)
     if data.vip_enabled is not None:
         s.vip_enabled = data.vip_enabled
