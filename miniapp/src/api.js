@@ -1,4 +1,11 @@
-export const API = window.location.origin;
+const buildApi = String(import.meta.env.VITE_API_BASE || "").trim();
+const queryApi = new URLSearchParams(window.location.search).get("api") || "";
+if (queryApi) {
+  try { localStorage.setItem("ap_api_base", queryApi); } catch {}
+}
+let savedApi = "";
+try { savedApi = localStorage.getItem("ap_api_base") || ""; } catch {}
+export const API = String(buildApi || queryApi || savedApi || window.location.origin).replace(/\/$/, "");
 
 export function getTelegramWebApp() {
   return window.Telegram?.WebApp || null;
@@ -55,6 +62,8 @@ function normalizeTimeValue(value, key = "") {
 export async function apiFetch(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
     ...options,
+    mode: "cors",
+    cache: options.cache || "no-store",
     headers: telegramHeaders(options.headers || {}),
   });
   let body = null;
@@ -131,7 +140,7 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   const startPolling = () => {
     if (stopped || pollTimer) return;
     void poll();
-    pollTimer = window.setInterval(poll, 1000);
+    pollTimer = window.setInterval(poll, 750);
   };
 
   const connect = async () => {
