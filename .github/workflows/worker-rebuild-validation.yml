@@ -1,5 +1,6 @@
 name: Validate Windows worker rebuild
 
+# Final architecture validation v2: rerun this workflow only when this file changes.
 on:
   push:
     branches: [codex-windows-worker-rebuild]
@@ -17,6 +18,8 @@ jobs:
         with:
           ref: codex-windows-worker-rebuild
           fetch-depth: 0
+      - name: Capture source revision
+        run: echo "VALIDATED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -46,21 +49,30 @@ jobs:
             tests/test_session_settle_transition.py
       - name: Verify architecture boundaries
         run: |
+          set -euo pipefail
           grep -q 'if _truthy(os.getenv("VERCEL"))' backend/services/auto_realtime.py
           grep -q 'if not await owns_lease(account_id)' backend/services/auto_realtime.py
           grep -q 'OrderUncertainError' backend/services/auto_trade.py
           grep -q 'reconcile_uncertain_executions' worker/main.py
+          grep -q '_demo_trading_client: DirectDemoTradingClient' backend/services/auto_trade.py
+          grep -q 'close_demo_trading_client' worker/main.py
+          grep -q 'client = await market_data.connect()' backend/services/positions.py
           grep -q 'SESSION_STAGES = {' backend/services/session_engine.py
           grep -q 'USER_STOP_PENDING' backend/services/session_engine.py
           grep -q 'MIN_AUTO_PAYOUT = 92.0' backend/services/auto_trade.py
+          grep -q 'INSUFFICIENT_FUNDS' backend/services/auto_trade.py
           grep -q 'PRELOAD_OPEN_GRACE_SECONDS = 1.5' backend/services/preload_next.py
           ! grep -q 'id:"smart_confluence"' miniapp/src/App.jsx
+          ! grep -q 'strategy1+' miniapp/src/App.jsx
           grep -q 'workflow_dispatch' .github/workflows/otc-scan.yml
           ! grep -q 'schedule:' .github/workflows/otc-scan.yml
           grep -q "'ANALYZE_SIGNAL'" backend/routers/signals.py
           grep -q "'SCAN_STRATEGY'" backend/routers/signals.py
           grep -q "'SCAN_BEST'" backend/routers/signals.py
           grep -q "'RECONCILE_SIGNALS'" backend/routers/signals.py
+          ! grep -q 'signal_engine' backend/routers/signals.py
+          ! grep -q 'market_data' backend/routers/signals.py
+          grep -q 'python-dotenv' requirements.txt
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -75,9 +87,10 @@ jobs:
         run: |
           mkdir -p validation
           printf 'Windows worker rebuild validation PASSED\nvalidated_source_commit=%s\nvalidated_at=%s\n' \
-            "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > validation/worker-rebuild-passed.txt
+            "$VALIDATED_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > validation/worker-rebuild-passed.txt
           git config user.name "AlphaPulse Validation"
           git config user.email "actions@users.noreply.github.com"
           git add validation/worker-rebuild-passed.txt
+          if git diff --cached --quiet; then exit 0; fi
           git commit -m "Record successful worker rebuild validation"
           git push origin HEAD:codex-windows-worker-rebuild
