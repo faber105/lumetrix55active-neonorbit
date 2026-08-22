@@ -18,7 +18,6 @@ from backend.services.session_engine import (
     COUNT_CONFIRM_CONFIDENCE,
     COUNT_MIN_CONFIDENCE,
     PROFIT_MIN_CONFIDENCE,
-    PROFIT_TIMEFRAME,
     _active,
     _event,
     _load_signal,
@@ -232,10 +231,10 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
         candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
         threshold = COUNT_MIN_CONFIDENCE
     elif strategy == "smart_confluence":
-        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, eligible_assets)
+        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
         threshold = PROFIT_MIN_CONFIDENCE
     else:
-        candidates = await signal_engine.scan_strategy_candidates(PROFIT_TIMEFRAME, eligible_assets, strategy)
+        candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)
         threshold = PROFIT_MIN_CONFIDENCE
 
     confirmed = sorted(

@@ -73,10 +73,10 @@ export async function apiFetch(path, options = {}) {
   return normalizeTimeValue(body);
 }
 
-export function postJson(path, payload = {}) {
+export function postJson(path, payload = {}, extraHeaders = {}) {
   return apiFetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     body: JSON.stringify(payload),
   });
 }

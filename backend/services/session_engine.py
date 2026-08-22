@@ -26,8 +26,7 @@ from backend.services.strategies import AUTO_STRATEGIES, STRATEGY_LABELS
 from backend.services.trade_mode import set_execution_mode, set_trade_account_mode
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
 
-COUNT_TIMEFRAMES = {"15s", "1m", "3m"}
-PROFIT_TIMEFRAME = "5m"
+AUTO_TIMEFRAMES = {"15s", "1m", "3m", "5m", "15m"}
 PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
 COUNT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
 COUNT_MIN_CONFIDENCE = 70.0
@@ -198,10 +197,10 @@ async def session_state(*, refresh_balance=False):
     }
 
 
-def _validate_config(config):
+def validate_session_config(config):
     mode = str(config.get("mode") or "count").lower()
     strategy = str(config.get("strategy") or ("smart_confluence" if str(config.get("mode") or "count").lower() == "count" else "trend_pulse"))
-    amount = round(float(config.get("amount") or 1), 2)
+    amount = round(float(1 if config.get("amount") is None else config["amount"]), 2)
     max_martingale = int(config.get("max_martingale", 3))
     if amount < 1 or amount > MAX_SESSION_AMOUNT:
         raise ValueError("Amount must be between 1 and 50000")
@@ -209,29 +208,32 @@ def _validate_config(config):
         raise ValueError("Martingale covers must be between 0 and 3")
     if mode == "count":
         timeframe = str(config.get("timeframe") or "1m")
-        target = int(config.get("target_wins") or 5)
+        target = int(1 if config.get("target_wins") is None else config["target_wins"])
         if strategy not in COUNT_STRATEGIES:
             raise ValueError("Unknown AUTO strategy")
-        if timeframe not in COUNT_TIMEFRAMES:
-            raise ValueError("Count mode timeframe must be 15s, 1m or 3m")
-        if target < 5 or target > 25:
-            raise ValueError("Target wins must be between 5 and 25")
+        if timeframe not in AUTO_TIMEFRAMES:
+            raise ValueError("AUTO timeframe must be 15s, 1m, 3m, 5m or 15m")
+        if target < 1 or target > 25:
+            raise ValueError("Target wins must be between 1 and 25")
         return {
             "mode": mode, "strategy": strategy, "timeframe": timeframe,
             "target_wins": target, "target_profit": None, "amount": amount,
             "max_martingale": max_martingale, "max_failed_series": 1,
         }
     if mode == "profit":
-        target = round(float(config.get("target_profit") or 1), 2)
-        failed = int(config.get("max_failed_series") or 1)
+        target = round(float(1 if config.get("target_profit") is None else config["target_profit"]), 2)
+        failed = int(1 if config.get("max_failed_series") is None else config["max_failed_series"])
+        timeframe = str(config.get("timeframe") or "5m")
         if strategy not in PROFIT_STRATEGIES:
             raise ValueError("Unknown profit-mode strategy")
         if target <= 0:
             raise ValueError("Target profit must be positive")
+        if timeframe not in AUTO_TIMEFRAMES:
+            raise ValueError("AUTO timeframe must be 15s, 1m, 3m, 5m or 15m")
         if failed < 1 or failed > 10:
             raise ValueError("Failed-series limit must be between 1 and 10")
         return {
-            "mode": mode, "strategy": strategy, "timeframe": PROFIT_TIMEFRAME,
+            "mode": mode, "strategy": strategy, "timeframe": timeframe,
             "target_wins": None, "target_profit": target, "amount": amount,
             "max_martingale": max_martingale, "max_failed_series": failed,
         }
@@ -245,7 +247,7 @@ async def start_session(config):
     control = await get_auto_trade_control()
     if control is None or not control.enabled:
         raise ValueError("Enable Autotrading in Admin first")
-    values = _validate_config(config)
+    values = validate_session_config(config)
     await set_trade_account_mode("demo")
     await set_execution_mode("auto")
     await update_auto_trade_control(
@@ -575,17 +577,14 @@ async def session_tick():
     # rank the strongest setups across all smart strategies, then re-check only
     # the selected pair/strategy before scheduling the exact candle-boundary entry.
     # This avoids waiting for one rare strategy while still requiring confirmation.
-    mixed_count = session["mode"] == "count"
+    mixed_count = strategy == "smart_confluence"
     if mixed_count:
         candidates = await signal_engine.scan_best_candidates(timeframe, scan_assets)
         threshold = COUNT_MIN_CONFIDENCE
         strategy = "smart_confluence"
-    elif session["mode"] == "profit" and strategy == "smart_confluence":
-        candidates = await signal_engine.scan_best_candidates(PROFIT_TIMEFRAME, scan_assets)
-        threshold = PROFIT_MIN_CONFIDENCE
     else:
         candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)
-        threshold = PROFIT_MIN_CONFIDENCE
+        threshold = COUNT_MIN_CONFIDENCE if session["mode"] == "count" else PROFIT_MIN_CONFIDENCE
 
     confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]
     # One scan -> one order candidate. Rank all tradable setups explicitly so
