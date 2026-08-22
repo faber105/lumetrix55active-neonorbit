@@ -20,6 +20,7 @@ from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.positions import reconcile_positions
 from backend.services.signal_engine import signal_engine
 from backend.services.signal_store import save_signal
+from backend.services.session_transitions import loss_transition as _loss_transition
 from backend.services.strategies import AUTO_STRATEGIES, STRATEGY_LABELS
 from backend.services.trade_mode import set_execution_mode, set_trade_account_mode
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
@@ -367,23 +368,21 @@ async def _settle(session):
             status, stage, reason, ended = "COMPLETED", "COMPLETED", "TARGET_PROFIT", utcnow()
             message = "Целевой профит достигнут"
     elif result == SignalResult.LOSS.value:
-        series_loss += amount
-        if level < int(session["max_martingale"]):
-            level += 1
-            stage = "MARTINGALE"
-            message = f"LOSS · готовлю перекрытие {level}/{session['max_martingale']} только на новом подтверждённом сетапе"
-        else:
-            failed += 1
-            level, series_loss = 0, 0
-            if session["mode"] == "count":
-                stage = "SCANNING"
-                message = "Серия закрыта в минус · лимит перекрытий исчерпан · начинаю новую серию и продолжаю до заданного числа WIN"
-            elif failed >= int(session["max_failed_series"]):
-                status, stage, reason, ended = "STOPPED", "STOPPED", "FAILED_SERIES_LIMIT", utcnow()
-                message = "Достигнут лимит полностью проигранных серий"
-            else:
-                stage = "SCANNING"
-                message = "Полная минусовая серия учтена · анализирую пары с payout ≥92% дальше"
+        transition = _loss_transition(
+            session,
+            amount=amount,
+            failed=failed,
+            level=level,
+            series_loss=series_loss,
+        )
+        failed = transition["failed"]
+        level = transition["level"]
+        series_loss = transition["series_loss"]
+        status = transition["status"]
+        stage = transition["stage"]
+        reason = transition["reason"]
+        ended = transition["ended"]
+        message = transition["message"]
     else:
         message = "DRAW · повторяю текущий уровень на следующем подтверждённом сетапе"
 
