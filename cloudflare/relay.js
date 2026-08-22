@@ -1,7 +1,7 @@
 const CACHE_TTL = new Map([
-  ["/api/admin/state", 2500],
-  ["/api/auto/state", 700],
-  ["/api/auto-preload/state", 900],
+  ["/api/admin/state", 30000],
+  ["/api/auto/state", 1800],
+  ["/api/auto-preload/state", 3000],
 ]);
 
 function cacheBase(pathname) {
@@ -16,6 +16,17 @@ function jsonResponse(value, status = 200) {
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
+}
+
+function cacheOwner(request) {
+  const initData = request.headers.get("X-Telegram-Init-Data") || "";
+  if (!initData) return "anon";
+  try {
+    const raw = new URLSearchParams(initData).get("user") || "";
+    const user = JSON.parse(raw);
+    if (user?.id) return String(user.id);
+  } catch {}
+  return "tg";
 }
 
 export class AlphaPulseRelay {
@@ -70,23 +81,38 @@ export class AlphaPulseRelay {
     pending.resolve(message);
   }
 
+  async readCache(cacheKey) {
+    if (!cacheKey) return null;
+    const memory = this.cache.get(cacheKey);
+    if (memory) return memory;
+    try {
+      const stored = await this.ctx.storage.get(cacheKey);
+      if (stored) {
+        this.cache.set(cacheKey, stored);
+        return stored;
+      }
+    } catch {}
+    return null;
+  }
+
+  async writeCache(cacheKey, value) {
+    if (!cacheKey) return;
+    this.cache.set(cacheKey, value);
+    try { await this.ctx.storage.put(cacheKey, value); } catch {}
+  }
+
   async forwardApi(request, url) {
     const base = cacheBase(url.pathname);
-    const cacheKey = base ? `${base}:${request.headers.get("X-Telegram-Init-Data") || "anon"}` : null;
+    const cacheKey = base ? `cache:${base}:${cacheOwner(request)}` : null;
     const ttl = base ? CACHE_TTL.get(base) : 0;
-    if (request.method === "GET" && cacheKey) {
-      const cached = this.cache.get(cacheKey);
-      if (cached && Date.now() - cached.at <= ttl) {
-        return new Response(cached.body, { status: cached.status, headers: cached.headers });
-      }
+    const cached = request.method === "GET" && cacheKey ? await this.readCache(cacheKey) : null;
+    if (cached && Date.now() - Number(cached.at || 0) <= ttl) {
+      return new Response(cached.body, { status: cached.status, headers: cached.headers });
     }
 
     const bridge = this.bridge;
     if (!bridge || bridge.readyState !== 1) {
-      if (request.method === "GET" && cacheKey) {
-        const stale = this.cache.get(cacheKey);
-        if (stale) return new Response(stale.body, { status: stale.status, headers: stale.headers });
-      }
+      if (cached) return new Response(cached.body, { status: cached.status, headers: cached.headers });
       return jsonResponse({ detail: "Windows worker bridge offline" }, 503);
     }
 
@@ -109,13 +135,21 @@ export class AlphaPulseRelay {
     const result = await new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        if (cached) {
+          resolve({ ...cached, stale: true });
+          return;
+        }
         resolve({ status: 504, headers: { "content-type": "application/json" }, body: JSON.stringify({ detail: "Windows worker timeout" }) });
-      }, 6500);
+      }, 18000);
       this.pending.set(id, { resolve, timer });
       try { bridge.send(JSON.stringify(payload)); }
       catch {
         clearTimeout(timer);
         this.pending.delete(id);
+        if (cached) {
+          resolve({ ...cached, stale: true });
+          return;
+        }
         resolve({ status: 503, headers: { "content-type": "application/json" }, body: JSON.stringify({ detail: "Windows worker bridge offline" }) });
       }
     });
@@ -123,10 +157,11 @@ export class AlphaPulseRelay {
     const responseHeaders = new Headers(result.headers || {});
     responseHeaders.set("cache-control", "no-store");
     responseHeaders.delete("content-length");
+    if (result.stale) responseHeaders.set("x-alphapulse-cache", "stale");
     const responseBody = result.body || "";
     const status = Number(result.status || 502);
-    if (request.method === "GET" && cacheKey && status >= 200 && status < 300) {
-      this.cache.set(cacheKey, { at: Date.now(), status, headers: [...responseHeaders.entries()], body: responseBody });
+    if (request.method === "GET" && cacheKey && status >= 200 && status < 300 && !result.stale) {
+      await this.writeCache(cacheKey, { at: Date.now(), status, headers: [...responseHeaders.entries()], body: responseBody });
     }
     return new Response(responseBody, { status, headers: responseHeaders });
   }
