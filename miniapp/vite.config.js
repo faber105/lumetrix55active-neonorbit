@@ -19,6 +19,14 @@ function alphaPulseRuntimePatch() {
         if (!next.includes('import "./preload_ui_sync.js";')) {
           next = 'import "./preload_ui_sync.js";\n' + next
         }
+        next = next.replace(
+          'const refreshAdmin=useCallback(async()=>{if(!TG_ID)return;',
+          'const refreshAdmin=useCallback(async()=>{'
+        )
+        next = next.replace(
+          'usePolling(refreshAdmin,2500,Boolean(TG_ID&&isAdmin));',
+          'usePolling(refreshAdmin,2500,Boolean(isAdmin));'
+        )
       }
 
       if (isApi) {
