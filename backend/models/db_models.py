@@ -31,13 +31,27 @@ _connect_args = {}
 if _db_url.host and 'neon.tech' in _db_url.host:
     _connect_args = {'ssl': True, 'statement_cache_size': 0}
 
-engine = create_async_engine(
-    _db_url,
-    echo=False,
-    pool_pre_ping=True,
-    poolclass=NullPool,
-    connect_args=_connect_args,
-)
+# Serverless deployments must not retain database connections between invocations,
+# but the Windows worker is a persistent process. Re-opening a Neon TLS connection
+# for every API request made Mini App boot, /start and worker commands needlessly
+# slow. Keep a small warm pool only in the explicit worker runtime.
+_worker_runtime = str(os.getenv('APP_RUNTIME_ROLE') or '').strip().lower() == 'worker'
+_engine_kwargs = {
+    'echo': False,
+    'pool_pre_ping': True,
+    'connect_args': _connect_args,
+}
+if _worker_runtime:
+    _engine_kwargs.update({
+        'pool_size': max(2, min(20, int(os.getenv('DB_POOL_SIZE') or 8))),
+        'max_overflow': max(0, min(40, int(os.getenv('DB_MAX_OVERFLOW') or 12))),
+        'pool_timeout': 5,
+        'pool_recycle': 300,
+    })
+else:
+    _engine_kwargs['poolclass'] = NullPool
+
+engine = create_async_engine(_db_url, **_engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
