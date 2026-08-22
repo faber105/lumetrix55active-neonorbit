@@ -42,6 +42,7 @@ async def _regular_hunt_tick() -> None:
 
 
 async def _maintenance_loop(stop_event: asyncio.Event) -> None:
+    from backend.services.execution_recovery import reconcile_uncertain_executions
     from backend.services.reconciler import reconcile_pending
     from backend.services.vip_runtime_fix import run_due_vip
 
@@ -52,6 +53,14 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
         except Exception:
             logger.exception("Telegram bot could not initialize in worker maintenance")
     while not stop_event.is_set():
+        # Resolve ambiguous broker sends before any maintenance that could make
+        # a new trading decision. This path never resends an order.
+        try:
+            recovery = await reconcile_uncertain_executions()
+            if recovery.get("recovered"):
+                logger.warning("Recovered %s uncertain Pocket execution(s)", recovery["recovered"])
+        except Exception as exc:
+            logger.warning("Uncertain execution recovery recovered after %s", type(exc).__name__)
         try:
             await reconcile_pending()
         except Exception as exc:
