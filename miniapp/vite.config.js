@@ -27,6 +27,10 @@ function alphaPulseRuntimePatch() {
           'const CDN_API = window.location.origin;'
         )
         next = next.replace(
+          'const timeoutMs = Number(options.timeoutMs || 4500);',
+          'const timeoutMs = Number(options.timeoutMs || 9000);'
+        )
+        next = next.replace(
           'const connect = async () => {\n    if (stopped || !getTelegramInitData()) return;',
           'const connect = async () => {\n    if (stopped || !getTelegramInitData()) return;\n    if (isCloudflareCdn) { startPolling(); return; }'
         )
