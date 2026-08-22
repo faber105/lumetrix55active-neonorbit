@@ -1,20 +1,7 @@
 {
-  "at": "2026-08-22T01:09:55.305635+00:00",
-  "health_status": 200,
-  "health": {
-    "status": "ok",
-    "service": "alphapulsesbot",
-    "version": "3.4",
-    "telegram_configured": true,
-    "database_configured": true,
-    "backend_url": "https://lumetrix55active-neonorbit.vercel.app"
-  },
-  "repair_status": 200,
-  "repair": {
-    "ok": true,
-    "target": "https://lumetrix55active-neonorbit.vercel.app/api/telegram/webhook",
-    "actual": "https://lumetrix55active-neonorbit.vercel.app/api/telegram/webhook",
-    "pending_update_count": 0,
-    "last_error_message": "Wrong response from the webhook: 500 Internal Server Error"
-  }
+  "at": "2026-08-22T08:57:38.605940+00:00",
+  "health_status": 402,
+  "health": "Payment required\n\nDEPLOYMENT_DISABLED\n\ncle1::nhh6r-1787389058393-1bae2ff699ef\n",
+  "repair_status": 402,
+  "repair": "Payment required\n\nDEPLOYMENT_DISABLED\n\ncle1::gh8zn-1787389058555-7f7d90b1892f\n"
 }
