@@ -10,6 +10,18 @@ AlphaPulse is a Telegram bot + Telegram Mini App for Pocket Option OTC market an
 - Mini App/backend are deployed together from `main`
 - Runtime credentials never belong in Git; production secrets are loaded server-side
 
+## Render realtime deployment
+
+`render.yaml` provisions one free Docker web service in Frankfurt. The Render
+runtime enables a persistent AUTO driver and `/ws/auto`, which pushes active
+session changes directly to the authenticated Telegram Mini App. HTTP polling is
+kept only as a reconnect fallback.
+
+The only required secret during Blueprint creation is `DATABASE_URL`; the
+existing runtime loader restores the Telegram, admin and Pocket credentials from
+the private database state. The scheduled GitHub health check keeps the free web
+service warm and verifies that the persistent driver is running.
+
 ## Mini App information architecture
 
 Ordinary users see exactly three tabs:
