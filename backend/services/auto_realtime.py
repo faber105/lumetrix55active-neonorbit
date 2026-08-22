@@ -24,16 +24,16 @@ def _truthy(value: str | None) -> bool:
 
 
 def realtime_driver_enabled() -> bool:
-    """Enable the persistent engine only on a long-running runtime.
+    """Enable the persistent engine only in the explicit worker runtime.
 
-    Vercel functions must not create a process-wide trading loop. Render sets the
-    flag explicitly in render.yaml, while local development can opt in with the
-    same environment variable.
+    A deployment flag alone is intentionally insufficient: an accidentally
+    copied environment variable must never start a trading loop in Vercel or in
+    the public web process.
     """
-    configured = os.getenv("AUTO_REALTIME_DRIVER")
-    if configured is not None:
-        return _truthy(configured)
-    return _truthy(os.getenv("RENDER"))
+    if _truthy(os.getenv("VERCEL")):
+        return False
+    role = str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower()
+    return role == "worker" and _truthy(os.getenv("AUTO_REALTIME_DRIVER"))
 
 
 def _change_condition() -> asyncio.Condition:
