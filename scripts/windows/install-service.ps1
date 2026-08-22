@@ -20,11 +20,16 @@ $runtimeRoot = Join-Path $baseRoot 'runtime'
 $runner = Join-Path $PSScriptRoot 'run-worker.ps1'
 New-Item -ItemType Directory -Force -Path $configRoot,$logRoot,$runtimeRoot | Out-Null
 
-# Generate a fresh high-entropy password on every registration. The password is
-# intentionally not persisted anywhere; rerunning this installer rotates it and
-# updates the scheduled task credentials atomically.
+# Generate a fresh high-entropy password on every registration. Use the
+# instance API for compatibility with Windows PowerShell / .NET Framework,
+# where RandomNumberGenerator.Fill is unavailable.
 $passwordBytes = [byte[]]::new(36)
-[Security.Cryptography.RandomNumberGenerator]::Fill($passwordBytes)
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $rng.GetBytes($passwordBytes)
+} finally {
+    $rng.Dispose()
+}
 $passwordText = [Convert]::ToBase64String($passwordBytes) + 'Aa1!'
 $securePassword = ConvertTo-SecureString $passwordText -AsPlainText -Force
 $existingUser = Get-LocalUser -Name $ServiceUser -ErrorAction SilentlyContinue
