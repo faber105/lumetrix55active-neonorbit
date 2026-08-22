@@ -14,11 +14,12 @@ The scripts resolve this layout from the repository location, so both `C:\AlphaP
 ## One-time preparation
 
 1. Install current Python, Node.js LTS (with npm) and Git from their official sources.
-2. Run `scripts\windows\bootstrap.ps1` in normal PowerShell.
-3. Run `scripts\windows\install-service.ps1` once from PowerShell **as Administrator**.
-4. Fill `config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Add `TELEGRAM_BOT_TOKEN` so scheduled VIP signals can be delivered. Keep `POCKET_OPTION_DEMO=true`.
-5. Start the task: `Start-ScheduledTask -TaskName 'AlphaPulse Worker'`.
-6. Check it with `scripts\windows\status.ps1` and inspect the newest file under `logs\`.
+2. If the checkout is in the non-admin fallback path, run `scripts\windows\relocate-to-c-drive.ps1` once as Administrator to copy it safely into `C:\AlphaPulse\app`.
+3. Run `scripts\windows\bootstrap.ps1` in normal PowerShell.
+4. Run `scripts\windows\install-service.ps1` once from PowerShell **as Administrator**.
+5. Fill `config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Add `TELEGRAM_BOT_TOKEN` so scheduled VIP signals can be delivered. Keep `POCKET_OPTION_DEMO=true`.
+6. Start the task: `Start-ScheduledTask -TaskName 'AlphaPulse Worker'`.
+7. Check it with `scripts\windows\status.ps1` and inspect the newest file under `logs\`.
 
 The installer creates a standard `AlphaPulseWorker` account, removes inherited access from the secret directory, gives the worker read-only access to code/secrets and modify access only to logs/runtime, registers one startup task with a 30-second delay, automatic restarts and single-instance policy, and disables AC sleep. Screen locking remains enabled.
 
