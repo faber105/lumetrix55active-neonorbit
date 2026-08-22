@@ -435,8 +435,12 @@ async def process_one_command(account_id: int) -> dict | None:
 
 async def worker_supervisor(stop_event: Any, account_id: int) -> None:
     while not stop_event.is_set():
-        generation = await acquire_lease(account_id)
-        await register_heartbeat(status="ONLINE" if generation is not None else "STANDBY")
+        try:
+            generation = await acquire_lease(account_id)
+            await register_heartbeat(status="ONLINE" if generation is not None else "STANDBY")
+        except Exception:
+            # A transient Neon/network failure must not kill the 24/7 supervisor.
+            generation = None
         try:
             await asyncio_wait(stop_event, 5.0)
         except TimeoutError:

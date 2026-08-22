@@ -29,7 +29,6 @@ async def health():
     return {
         "status": "ok",
         "service": "alphapulse-worker",
-        "worker_id": worker_id(),
         "version": worker_version(),
     }
 
