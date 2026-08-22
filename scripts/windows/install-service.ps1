@@ -145,6 +145,10 @@ if (-not (Test-Path -LiteralPath $configFile)) {
 
 icacls $repoRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)RX" 'SYSTEM:(OI)(CI)F' | Out-Null
 icacls $configRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)R" 'SYSTEM:(OI)(CI)F' | Out-Null
+# worker.env may have been created or rewritten before the folder ACL was hardened,
+# leaving it with a stale explicit ACL. Grant the service account read access to
+# the file itself so the scheduled task can always load local secrets.
+icacls $configFile /inheritance:r /grant:r "${env:USERNAME}:F" "${ServiceUser}:R" 'SYSTEM:F' | Out-Null
 icacls $logRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)M" 'SYSTEM:(OI)(CI)F' | Out-Null
 icacls $runtimeRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)M" 'SYSTEM:(OI)(CI)F' | Out-Null
 
