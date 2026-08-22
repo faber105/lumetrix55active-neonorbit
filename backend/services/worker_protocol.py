@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -219,7 +220,148 @@ async def enqueue_command(
 def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
     return value
+
+
+async def append_session_event(
+    session_id: int,
+    stage: str,
+    message: str,
+    payload: dict | None = None,
+    *,
+    source_ts: datetime | None = None,
+) -> dict[str, Any]:
+    await ensure_worker_schema()
+    event_id = uuid.uuid4().hex
+    source = source_ts or utcnow()
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            sequence = (
+                await db.execute(
+                    text("""UPDATE auto_trade_sessions
+                        SET version=version+1,updated_at=:now WHERE id=:sid
+                        RETURNING version"""),
+                    {"now": utcnow(), "sid": int(session_id)},
+                )
+            ).scalar_one()
+            await db.execute(
+                text("""INSERT INTO auto_trade_events
+                    (session_id,stage,message,payload,event_id,sequence,source_ts)
+                    VALUES (:sid,:stage,:message,:payload,:event_id,:sequence,:source_ts)"""),
+                {
+                    "sid": int(session_id),
+                    "stage": str(stage)[:32],
+                    "message": str(message),
+                    "payload": json.dumps(payload or {}, ensure_ascii=False),
+                    "event_id": event_id,
+                    "sequence": int(sequence),
+                    "source_ts": source,
+                },
+            )
+    return {
+        "event_id": event_id,
+        "session_id": int(session_id),
+        "sequence": int(sequence),
+        "stage": str(stage),
+        "message": str(message),
+        "payload": payload or {},
+        "source_ts": _json_value(source),
+    }
+
+
+async def realtime_snapshot(account_id: int, *, after_sequence: int = 0) -> dict[str, Any]:
+    await ensure_worker_schema()
+    async with AsyncSessionLocal() as db:
+        account = (
+            await db.execute(
+                text("SELECT id,owner_telegram_id,mode,status FROM broker_accounts WHERE id=:id"),
+                {"id": int(account_id)},
+            )
+        ).mappings().first()
+        if not account:
+            raise ValueError("Broker account not found")
+        session = (
+            await db.execute(
+                text("""SELECT * FROM auto_trade_sessions
+                    WHERE account_id=:account ORDER BY id DESC LIMIT 1"""),
+                {"account": int(account_id)},
+            )
+        ).mappings().first()
+        legs = []
+        events = []
+        if session:
+            legs = (
+                await db.execute(
+                    text("""SELECT * FROM auto_trade_legs
+                        WHERE session_id=:sid ORDER BY id DESC LIMIT 100"""),
+                    {"sid": int(session["id"])},
+                )
+            ).mappings().all()
+            events = (
+                await db.execute(
+                    text("""SELECT id,event_id,sequence,stage,message,payload,source_ts,created_at
+                        FROM auto_trade_events WHERE session_id=:sid
+                          AND (sequence>:after OR (:after=0 AND sequence IS NULL))
+                        ORDER BY COALESCE(sequence,id) ASC LIMIT 200"""),
+                    {"sid": int(session["id"]), "after": max(0, int(after_sequence))},
+                )
+            ).mappings().all()
+        lease = (
+            await db.execute(
+                text("""SELECT l.worker_id,l.lease_until,l.generation,w.hostname,w.version,
+                    w.heartbeat_at,w.status FROM worker_leases l
+                    LEFT JOIN workers w ON w.id=l.worker_id WHERE l.account_id=:account"""),
+                {"account": int(account_id)},
+            )
+        ).mappings().first()
+        runtime_payload = (
+            await db.execute(
+                text("SELECT payload FROM ml_state WHERE strategy='__auto_trade_runtime__'"),
+            )
+        ).scalar_one_or_none()
+
+    now = utcnow()
+    worker_status = "OFFLINE"
+    if lease and lease.get("heartbeat_at"):
+        age = max(0.0, (now - lease["heartbeat_at"]).total_seconds())
+        worker_status = "ONLINE" if age <= 10 else ("DEGRADED" if age <= 20 else "OFFLINE")
+    else:
+        age = None
+    event_rows = []
+    for row in events:
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item.get("payload") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            item["payload"] = {}
+        event_rows.append(_json_value(item))
+    latest_sequence = max(
+        [int(item.get("sequence") or 0) for item in event_rows] + [int(after_sequence or 0)]
+    )
+    try:
+        runtime = json.loads(runtime_payload or "{}")
+    except (TypeError, json.JSONDecodeError):
+        runtime = {}
+    return {
+        "active": bool(session and str(session.get("status")) == "ACTIVE"),
+        "account": _json_value(dict(account)),
+        "session": _json_value(dict(session)) if session else None,
+        "legs": _json_value([dict(row) for row in legs]),
+        "events": event_rows,
+        "runtime": _json_value(runtime),
+        "min_payout": 92.0,
+        "sequence": latest_sequence,
+        "worker": {
+            **(_json_value(dict(lease)) if lease else {}),
+            "status": worker_status,
+            "heartbeat_age_seconds": round(age, 3) if age is not None else None,
+        },
+        "server_time": _json_value(now),
+    }
 
 
 async def _claim_command(account_id: int) -> dict | None:

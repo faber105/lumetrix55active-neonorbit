@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -10,7 +11,9 @@ from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal
 from backend.services.live_quotes import broker_live_chart
 from backend.services.pocketoption_otc import MarketDataUnavailable, TF_SECONDS, market_data
 from backend.services.positions import reconcile_positions, serialize_position, sync_broker_positions, take_signal
-from backend.telegram_auth import TelegramMiniAppUser, telegram_user
+from backend.services.realtime_tokens import issue_realtime_token
+from backend.services.worker_protocol import ensure_demo_account
+from backend.telegram_auth import TelegramMiniAppUser, admin_user, telegram_user
 
 router = APIRouter()
 
@@ -29,6 +32,26 @@ def _no_cache(response: Response | None) -> None:
 
 class TakeRequest(BaseModel):
     signal_id: int
+
+
+@router.post('/realtime-token')
+async def realtime_token(user: TelegramMiniAppUser = Depends(admin_user)):
+    transport = str(os.getenv('REALTIME_TRANSPORT') or 'polling').strip().lower()
+    public_url = str(os.getenv('REALTIME_PUBLIC_URL') or '').strip().rstrip('/')
+    if transport != 'wss' or not public_url:
+        return {'transport': 'polling', 'poll_interval_ms': 1000}
+    account_id = await ensure_demo_account(int(user.id))
+    try:
+        token = issue_realtime_token(telegram_id=int(user.id), account_id=account_id)
+    except RuntimeError:
+        return {'transport': 'polling', 'poll_interval_ms': 1000}
+    return {
+        'transport': 'wss',
+        'url': f"{public_url}/ws/live",
+        'token': token,
+        'expires_in': 60,
+        'poll_interval_ms': 1000,
+    }
 
 
 @router.post('/take')

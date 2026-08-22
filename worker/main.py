@@ -80,6 +80,24 @@ async def run_worker() -> None:
         worker_supervisor(stop_event, account_id),
         name="alphapulse-worker-supervisor",
     )
+    realtime_server = None
+    realtime_task = None
+    if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
+        import uvicorn
+
+        realtime_server = uvicorn.Server(
+            uvicorn.Config(
+                "worker.realtime_server:app",
+                host="127.0.0.1",
+                port=int(os.getenv("WORKER_HTTP_PORT") or 8765),
+                log_level=os.getenv("LOG_LEVEL", "info").lower(),
+                access_log=False,
+            )
+        )
+        realtime_task = asyncio.create_task(
+            realtime_server.serve(),
+            name="alphapulse-worker-realtime",
+        )
     if not await start_auto_realtime_driver():
         supervisor.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
@@ -91,6 +109,10 @@ async def run_worker() -> None:
         logger.info("AlphaPulse Windows worker is stopping")
         await stop_auto_realtime_driver()
         stop_event.set()
+        if realtime_server is not None:
+            realtime_server.should_exit = True
+        if realtime_task is not None:
+            await realtime_task
         try:
             await supervisor
         except asyncio.CancelledError:

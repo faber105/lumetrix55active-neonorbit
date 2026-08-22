@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -91,12 +92,9 @@ def _serialize(row):
 
 
 async def _event(session_id, stage, message, payload=None):
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            text("INSERT INTO auto_trade_events (session_id,stage,message,payload) VALUES (:sid,:stage,:message,:payload)"),
-            {"sid": session_id, "stage": stage, "message": message, "payload": json.dumps(payload or {}, ensure_ascii=False)},
-        )
-        await db.commit()
+    from backend.services.worker_protocol import append_session_event
+
+    await append_session_event(int(session_id), stage, message, payload or {})
 
 
 _ALLOWED = {
@@ -113,7 +111,10 @@ async def _update(session_id, **changes):
     changes["updated_at"] = utcnow()
     sets = ", ".join(f"{key}=:{key}" for key in changes)
     async with AsyncSessionLocal() as db:
-        await db.execute(text(f"UPDATE auto_trade_sessions SET {sets} WHERE id=:id"), {**changes, "id": session_id})
+        await db.execute(
+            text(f"UPDATE auto_trade_sessions SET {sets},version=version+1 WHERE id=:id"),
+            {**changes, "id": session_id},
+        )
         await db.commit()
 
 
@@ -394,13 +395,16 @@ async def _settle(session):
                     "id": leg_id,
                 },
             )
-            await db.execute(
+            event_count = 2 if transition["status"] != "ACTIVE" else 1
+            version = (
+                await db.execute(
                 text("""UPDATE auto_trade_sessions SET
                     status=:status,stage=:stage,wins=:wins,failed_series=:failed,
                     current_level=:level,current_series_loss=:series_loss,
                     profit=:profit,current_balance=:balance,active_position_id=NULL,
                     pending_signal_id=NULL,last_message=:message,stop_reason=:reason,
-                    ended_at=:ended,updated_at=:updated WHERE id=:sid"""),
+                    ended_at=:ended,updated_at=:updated,version=version+:event_count
+                    WHERE id=:sid RETURNING version"""),
                 {
                     "status": transition["status"],
                     "stage": transition["stage"],
@@ -414,9 +418,12 @@ async def _settle(session):
                     "reason": transition["reason"],
                     "ended": transition["ended"],
                     "updated": now,
+                    "event_count": event_count,
                     "sid": session_id,
                 },
-            )
+                )
+            ).scalar_one()
+            closed_sequence = int(version) - event_count + 1
             closed_payload = json.dumps(
                 {
                     "pnl": transition["pnl"],
@@ -427,18 +434,23 @@ async def _settle(session):
                 ensure_ascii=False,
             )
             await db.execute(
-                text("""INSERT INTO auto_trade_events (session_id,stage,message,payload)
-                    VALUES (:sid,'CLOSED',:message,:payload)"""),
+                text("""INSERT INTO auto_trade_events
+                    (session_id,stage,message,payload,event_id,sequence,source_ts)
+                    VALUES (:sid,'CLOSED',:message,:payload,:event_id,:sequence,:source_ts)"""),
                 {
                     "sid": session_id,
                     "message": f"Сделка закрыта · {transition['result']}",
                     "payload": closed_payload,
+                    "event_id": uuid.uuid4().hex,
+                    "sequence": closed_sequence,
+                    "source_ts": now,
                 },
             )
             if transition["status"] != "ACTIVE":
                 await db.execute(
-                    text("""INSERT INTO auto_trade_events (session_id,stage,message,payload)
-                        VALUES (:sid,:stage,:message,:payload)"""),
+                    text("""INSERT INTO auto_trade_events
+                        (session_id,stage,message,payload,event_id,sequence,source_ts)
+                        VALUES (:sid,:stage,:message,:payload,:event_id,:sequence,:source_ts)"""),
                     {
                         "sid": session_id,
                         "stage": transition["stage"],
@@ -451,6 +463,9 @@ async def _settle(session):
                             },
                             ensure_ascii=False,
                         ),
+                        "event_id": uuid.uuid4().hex,
+                        "sequence": closed_sequence + 1,
+                        "source_ts": now,
                     },
                 )
 

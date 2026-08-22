@@ -93,7 +93,9 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   let socket = null;
   let stopped = false;
   let retryTimer = null;
+  let pollTimer = null;
   let retryDelay = 250;
+  let lastSequence = 0;
 
   const report = (value) => {
     try { onStatus?.(value); } catch {}
@@ -101,7 +103,8 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
 
   const scheduleReconnect = () => {
     if (stopped || retryTimer) return;
-    report({ connected: false, driving: false, reconnecting: true });
+    startPolling();
+    report({ connected: false, driving: false, reconnecting: true, transport: "polling" });
     retryTimer = window.setTimeout(() => {
       retryTimer = null;
       connect();
@@ -109,22 +112,57 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
     retryDelay = Math.min(5000, Math.round(retryDelay * 1.7));
   };
 
-  const connect = () => {
+  const stopPolling = () => {
+    if (pollTimer) window.clearInterval(pollTimer);
+    pollTimer = null;
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const state = await apiFetch("/api/auto/state?drive=false");
+      onState?.(state);
+      report({ connected: true, driving: true, reconnecting: false, transport: "polling" });
+    } catch {
+      report({ connected: false, driving: false, reconnecting: true, transport: "polling" });
+    }
+  };
+
+  const startPolling = () => {
+    if (stopped || pollTimer) return;
+    void poll();
+    pollTimer = window.setInterval(poll, 1000);
+  };
+
+  const connect = async () => {
     if (stopped || !getTelegramInitData()) return;
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(`${protocol}//${window.location.host}/ws/auto`);
-    report({ connected: false, driving: false, reconnecting: true });
+    let config;
+    try {
+      config = await postJson("/api/live/realtime-token");
+    } catch {
+      startPolling();
+      scheduleReconnect();
+      return;
+    }
+    if (config?.transport !== "wss" || !config?.url || !config?.token) {
+      startPolling();
+      return;
+    }
+    socket = new WebSocket(config.url);
+    report({ connected: false, driving: false, reconnecting: true, transport: "wss" });
 
     socket.addEventListener("open", () => {
       retryDelay = 250;
-      socket?.send(JSON.stringify({ type: "auth", init_data: getTelegramInitData() }));
+      socket?.send(JSON.stringify({ type: "auth", token: config.token, last_sequence: lastSequence }));
     });
     socket.addEventListener("message", (event) => {
       try {
         const message = JSON.parse(event.data);
         if (message?.type === "ready") {
-          report({ connected: true, driving: Boolean(message.realtime_driver), reconnecting: false });
+          stopPolling();
+          report({ connected: true, driving: true, reconnecting: false, transport: "wss" });
         } else if (message?.type === "auto_state" && message.data) {
+          lastSequence = Math.max(lastSequence, Number(message.data.sequence || 0));
           onState?.(normalizeTimeValue(message.data));
         }
       } catch {}
@@ -139,6 +177,7 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   return () => {
     stopped = true;
     if (retryTimer) window.clearTimeout(retryTimer);
+    stopPolling();
     try { socket?.close(1000, "Mini App closed realtime stream"); } catch {}
   };
 }
