@@ -34,6 +34,7 @@ from backend.services.trade_runtime import update_trade_runtime
 
 _PRELOAD_SCHEMA_READY = False
 ENTRY_TOLERANCE_SECONDS = 3.0
+PRELOAD_OPEN_GRACE_SECONDS = 1.5
 
 
 def _to_naive_utc(value) -> datetime:
@@ -225,7 +226,7 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
         return {"status": "WAIT_PAYOUT", "eligible": 0, "seconds_to_expiry": round(remaining, 1)}
     timeframe = str(session.get("timeframe") or "5m")
     strategy = str(session.get("strategy") or "smart_confluence")
-    mixed_count = str(session.get("mode")) == "count"
+    mixed_count = strategy == "smart_confluence"
 
     if mixed_count:
         candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
@@ -318,8 +319,16 @@ async def _consume_when_closed(session: dict, candidate: dict) -> dict | None:
     if str(candidate.get("status")) not in {"PREPARED", "WAIT_CLOSE"} or not candidate.get("signal_id"):
         return None
     entry = _to_naive_utc(candidate.get("entry_time"))
-    if (entry - utcnow()).total_seconds() > 0.35:
+    seconds_to_entry = (entry - utcnow()).total_seconds()
+    if seconds_to_entry > 0.35:
         return None
+    if seconds_to_entry < -PRELOAD_OPEN_GRACE_SECONDS:
+        await _save_candidate(int(session["id"]), status="CANCELLED")
+        await _update(
+            int(session["id"]), stage="SCANNING", pending_signal_id=None,
+            last_message="Предварительный вход отменён: результат Pocket пришёл слишком поздно · ищу новый актуальный сетап",
+        )
+        return {"status": "PRELOAD_MISSED", "block": True, "late_by_seconds": round(-seconds_to_entry, 3)}
 
     await reconcile_positions()
     current = await _active()
@@ -345,9 +354,22 @@ async def _consume_when_closed(session: dict, candidate: dict) -> dict | None:
         await _save_candidate(int(session["id"]), status="CANCELLED")
         return {"status": "PRELOAD_SIGNAL_MISSING", "block": True}
 
+    seconds_to_entry = (entry - utcnow()).total_seconds()
+    if seconds_to_entry < -PRELOAD_OPEN_GRACE_SECONDS:
+        await _save_candidate(int(session["id"]), status="CANCELLED")
+        await _update(
+            int(session["id"]), stage="SCANNING", pending_signal_id=None,
+            last_message="Pocket результат получен после допустимого окна · старый ранний сигнал не открываю",
+        )
+        return {"status": "PRELOAD_MISSED", "block": True, "late_by_seconds": round(-seconds_to_entry, 3)}
+
     payout = float(candidate.get("payout") or MIN_AUTO_PAYOUT)
     amount = float(_next_amount(current, payout))
     await update_auto_trade_control(amount=amount, max_open_positions=1)
+    await _update(
+        int(session["id"]), stage="OPENING", pending_signal_id=int(signal["id"]),
+        last_message="Результат Pocket зафиксирован · открываю заранее подготовленный сигнал",
+    )
     await update_trade_runtime(
         stage="OPENING", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
         strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout,
@@ -366,7 +388,15 @@ async def _consume_when_closed(session: dict, candidate: dict) -> dict | None:
         )
         return {"status": "OPEN", "block": True, "preloaded": True, "trade": trade}
 
+    if trade.get("status") == "RECONCILING":
+        await _save_candidate(int(session["id"]), status="WAIT_CLOSE")
+        await _update(
+            int(session["id"]), stage="RESOLVING", pending_signal_id=int(signal["id"]),
+            last_message="Pocket не подтвердил новый ордер · сверяю request id, повторный вход запрещён",
+        )
+        return {"status": "RECONCILING", "block": True, "trade": trade}
     await _save_candidate(int(session["id"]), status="CANCELLED")
+    await _update(int(session["id"]), pending_signal_id=None, stage="SCANNING")
     return {"status": str(trade.get("status") or "PRELOAD_FAILED"), "block": True, "trade": trade}
 
 
