@@ -5,7 +5,6 @@ import logging
 from datetime import timezone
 
 from sqlalchemy import desc, select, text
-from sqlalchemy.exc import IntegrityError
 
 from backend.models.db_models import (
     AsyncSessionLocal,
@@ -43,11 +42,7 @@ async def _runtime_payout() -> float:
         return 92.0
 
 
-async def _attach_recovered_position(
-    execution: TradeExecution,
-    signal: Signal,
-    recovered,
-) -> dict:
+async def _attach_recovered_position(execution: TradeExecution, signal: Signal, recovered) -> dict:
     broker_order_id = str(recovered.order_id)
     placed_at = _naive(recovered.placed_at) or utcnow()
     expires_at = _naive(recovered.expires_at) or signal.expiry_time
@@ -57,6 +52,7 @@ async def _attach_recovered_position(
             entry_price = await market_data.latest_price(signal.asset)
         except Exception:
             entry_price = 1.0
+    payout = await _runtime_payout()
 
     async with AsyncSessionLocal() as db:
         async with db.begin():
@@ -124,39 +120,34 @@ async def _attach_recovered_position(
                 level = int(session.get("current_level") or 0)
                 series = int(session.get("wins") or 0) + int(session.get("failed_series") or 0) + 1
                 idem = f"session:{int(session['id'])}:series:{series}:level:{level}:signal:{int(signal.id)}"
-                payout = await _runtime_payout()
-                try:
-                    await db.execute(
-                        text("""INSERT INTO auto_trade_legs
-                            (session_id,series_no,martingale_level,signal_id,position_id,broker_order_id,idempotency_key,
-                             pair,asset,direction,amount,payout,result,opened_at)
-                            VALUES (:sid,:series,:level,:signal,:position,:broker,:idem,:pair,:asset,:direction,
-                                    :amount,:payout,'PENDING',:opened)"""),
-                        {
-                            "sid": int(session["id"]),
-                            "series": series,
-                            "level": level,
-                            "signal": int(signal.id),
-                            "position": int(existing.id),
-                            "broker": broker_order_id,
-                            "idem": idem,
-                            "pair": signal.pair,
-                            "asset": signal.asset,
-                            "direction": signal.direction.value,
-                            "amount": float(execution.amount),
-                            "payout": payout,
-                            "opened": placed_at,
-                        },
-                    )
-                except IntegrityError:
-                    # Another recovery/tick may have attached the same durable leg.
-                    pass
+                await db.execute(
+                    text("""INSERT INTO auto_trade_legs
+                        (session_id,series_no,martingale_level,signal_id,position_id,broker_order_id,idempotency_key,
+                         pair,asset,direction,amount,payout,result,opened_at)
+                        VALUES (:sid,:series,:level,:signal,:position,:broker,:idem,:pair,:asset,:direction,
+                                :amount,:payout,'PENDING',:opened)
+                        ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING"""),
+                    {
+                        "sid": int(session["id"]),
+                        "series": series,
+                        "level": level,
+                        "signal": int(signal.id),
+                        "position": int(existing.id),
+                        "broker": broker_order_id,
+                        "idem": idem,
+                        "pair": signal.pair,
+                        "asset": signal.asset,
+                        "direction": signal.direction.value,
+                        "amount": float(execution.amount),
+                        "payout": payout,
+                        "opened": placed_at,
+                    },
+                )
                 await db.execute(
                     text("""UPDATE auto_trade_sessions SET
                         stage='OPEN',active_position_id=:position,pending_signal_id=NULL,
-                        total_legs=CASE WHEN active_position_id IS NULL THEN total_legs+1 ELSE total_legs END,
-                        last_message=:message,updated_at=:now,version=version+1
-                        WHERE id=:sid AND status='ACTIVE'"""),
+                        total_legs=total_legs+1,last_message=:message,updated_at=:now,version=version+1
+                        WHERE id=:sid AND status='ACTIVE' AND active_position_id IS NULL"""),
                     {
                         "position": int(existing.id),
                         "message": "Pocket сделка восстановлена после неопределённого ответа · LIVE отслеживание продолжено",
@@ -212,8 +203,11 @@ async def reconcile_uncertain_executions(limit: int = 10) -> dict:
             if recovered is None:
                 unresolved += 1
                 continue
-            await _attach_recovered_position(execution, signal, recovered)
-            recovered_count += 1
+            attached = await _attach_recovered_position(execution, signal, recovered)
+            if attached.get("status") in {"RECOVERED", "ALREADY_ATTACHED"}:
+                recovered_count += 1
+            else:
+                unresolved += 1
     finally:
         try:
             await client.disconnect()
