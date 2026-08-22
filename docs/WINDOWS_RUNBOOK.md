@@ -8,16 +8,17 @@ The public Mini App and API stay on Vercel. The permanent AUTO runtime runs only
 - `config/worker.env` — local worker secrets; never committed.
 - `logs/` — daily worker logs, retained for 14 days.
 - `runtime/` — local runtime state.
+- `backups/` — operator backups before maintenance.
 
-The scripts resolve this layout from the repository location, so both `C:\AlphaPulse\app` and the non-admin fallback under the Codex workspace are supported.
+The supported production layout is `C:\AlphaPulse\app` with sibling `config`, `logs`, `runtime`, and `backups` directories. The relocation script copies the checkout and never deletes the source automatically.
 
 ## One-time preparation
 
-1. Install current Python, Node.js LTS (with npm) and Git from their official sources.
-2. If the checkout is in the non-admin fallback path, run `scripts\windows\relocate-to-c-drive.ps1` once as Administrator to copy it safely into `C:\AlphaPulse\app`.
-3. Run `scripts\windows\bootstrap.ps1` in normal PowerShell.
+1. Install Python 3.12+ and Git from their official sources. Node.js is not required on the trading worker PC.
+2. If the checkout is elsewhere, run `scripts\windows\relocate-to-c-drive.ps1` once as Administrator to copy it safely into `C:\AlphaPulse\app`.
+3. Run `scripts\windows\bootstrap.ps1` in normal PowerShell. It creates/uses `.venv`, installs Python dependencies, compiles the worker code, and runs the Python test suite.
 4. Run `scripts\windows\install-service.ps1` once from PowerShell **as Administrator**.
-5. Fill `config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Add `TELEGRAM_BOT_TOKEN` so scheduled VIP signals can be delivered. Keep `POCKET_OPTION_DEMO=true`.
+5. Fill `C:\AlphaPulse\config\worker.env`. Required values are `DATABASE_URL`, `ADMIN_ID`, `POCKET_OPTION_SSID`, and a random `WORKER_SHARED_SECRET` of at least 32 characters. Add `TELEGRAM_BOT_TOKEN` so scheduled VIP signals can be delivered. Keep `POCKET_OPTION_DEMO=true`.
 6. Start the task: `Start-ScheduledTask -TaskName 'AlphaPulse Worker'`.
 7. Check it with `scripts\windows\status.ps1` and inspect the newest file under `logs\`.
 
@@ -25,7 +26,7 @@ The installer creates a standard `AlphaPulseWorker` account, removes inherited a
 
 ## Updating
 
-Run `scripts\windows\update.ps1`. It refuses to update when a session is active, a broker position is unresolved, or the checkout contains local changes. A successful update is fast-forward-only, reinstalls locked dependencies, builds the Mini App, and restarts the task.
+Run `scripts\windows\update.ps1`. It refuses to update when a session is active, a broker position is unresolved, a broker execution is still `EXECUTING/UNKNOWN`, or the checkout contains local changes. It updates only the current worker branch (or an explicitly supplied `-Branch` / `WORKER_UPDATE_BRANCH`), uses fast-forward-only Git, reinstalls Python dependencies, compiles the worker code, and restarts the task. It never builds the Mini App on the trading PC.
 
 ## Recovery
 
@@ -33,6 +34,7 @@ Run `scripts\windows\update.ps1`. It refuses to update when a session is active,
 - `DEGRADED`: heartbeat is 10–20 seconds old.
 - `OFFLINE`: heartbeat is older than 20 seconds or missing.
 - An order timeout moves execution to `UNKNOWN/RECONCILING`. Never resend it manually; confirm the broker result first.
+- `EXECUTING/UNKNOWN` broker executions block maintenance/update just like unresolved positions.
 - Do not run two workers for the same account. The Neon lease prevents a second worker from trading, while the Windows mutex prevents a duplicate local process.
 
 ## Security boundaries
