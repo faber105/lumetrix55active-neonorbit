@@ -159,10 +159,10 @@ def _decorate_live_state(payload: dict) -> dict:
             continue
         seen.add(key)
         output.append(event)
-        if len(output) >= 16:
+        if len(output) >= 40:
             break
     payload["events"] = output
-    payload["screen_notifications"] = output[:12]
+    payload["screen_notifications"] = output
     payload["session"] = session
     return payload
 
