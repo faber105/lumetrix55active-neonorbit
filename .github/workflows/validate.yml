@@ -24,7 +24,10 @@ jobs:
           python-version: '3.12'
 
       - name: Compile Python
-        run: python -m compileall -q api backend bot
+        run: python -m compileall -q api backend bot tests
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -v
 
       - name: Install Python dependencies
         run: pip install -e .
@@ -38,10 +41,11 @@ jobs:
           python - <<'PY'
           from api.main import app
           assert app.title == 'AlphaPulse API'
-          assert app.version == '3.0'
+          assert app.version == '3.4'
           paths = {route.path for route in app.routes}
           assert '/api/auto/tick' in paths
-          print('FastAPI 3.0 import OK')
+          assert '/ws/auto' in paths
+          print('FastAPI 3.4 realtime import OK')
           PY
 
       - name: Verify strategies and AUTO session configuration
@@ -66,7 +70,7 @@ jobs:
 
           assert signal_engine is not None
           assert callable(drive_session_tick)
-          assert 2.0 <= TICK_MIN_INTERVAL_SECONDS <= 5.0
+          assert 0.5 <= TICK_MIN_INTERVAL_SECONDS <= 1.0
           assert tuple(AUTO_STRATEGIES) == ('trend_pulse', 'range_reversal', 'volatility_breakout')
           assert tuple(SMART_STRATEGIES) == (
               'trend_pulse', 'range_reversal', 'volatility_breakout',
@@ -106,11 +110,11 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: miniapp/package.json
+          cache-dependency-path: miniapp/package-lock.json
 
       - name: Install Mini App dependencies
         working-directory: miniapp
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Build Mini App
         working-directory: miniapp
@@ -119,14 +123,13 @@ jobs:
       - name: Verify new Mini App flows
         working-directory: miniapp
         run: |
-          grep -R -q 'Сигнал из реального' dist/assets/*.js
           grep -R -q 'VIP 5M Confluence' dist/assets/*.js
-          grep -R -q 'Trading Session' dist/assets/*.js
-          grep -R -q 'По WIN-сделкам' dist/assets/*.js
-          grep -R -q 'До профита' dist/assets/*.js
+          grep -R -q 'НАСТРОЙКА AUTO' dist/assets/*.js
+          grep -R -q 'AUTO СЕССИЯ' dist/assets/*.js
+          grep -R -q 'ПУЛЬС РЫНКА' dist/assets/*.js
           grep -R -q 'Автотрейдинг' dist/assets/*.js
-          grep -R -q 'DEMO BALANCE' dist/assets/*.js
-          grep -R -q 'ЧТО ДЕЛАЕТ РОБОТ СЕЙЧАС' dist/assets/*.js
+          grep -R -q 'REALTIME' dist/assets/*.js
+          grep -R -q '/ws/auto' dist/assets/*.js
           echo 'Mini App flows OK'
 
       - name: Verify stale Telegram asset recovery
