@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: alphapulse-faber105-realtime
+    runtime: docker
+    plan: free
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: AUTO_REALTIME_DRIVER
+        value: "true"
+      - key: POCKET_OPTION_DEMO
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
