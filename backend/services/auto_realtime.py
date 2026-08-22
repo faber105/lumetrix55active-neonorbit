@@ -111,11 +111,14 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
         or status in {
             "OPEN",
             "OPENING",
+            "PREPARING",
+            "RESOLVING",
             "WAIT_ENTRY",
             "SCHEDULED",
             "PREPARED",
             "WAIT_CLOSE",
             "PRELOAD_RETRY",
+            "RECONCILING",
         }
     ):
         target = 0.08
