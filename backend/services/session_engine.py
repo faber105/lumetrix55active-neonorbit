@@ -33,6 +33,19 @@ COUNT_MIN_CONFIDENCE = 70.0
 COUNT_CONFIRM_CONFIDENCE = 68.0
 PROFIT_MIN_CONFIDENCE = 82.0
 MAX_SESSION_AMOUNT = 50000.0
+SESSION_STAGES = {"CREATED", "SCANNING", "PREPARING", "OPENING", "OPEN", "RESOLVING", "COMPLETED", "STOPPED", "FAILED"}
+_STAGE_ALIASES = {
+    "WAIT_PAYOUT": "SCANNING", "MARTINGALE": "SCANNING", "SIGNAL_FOUND": "PREPARING",
+    "WAIT_ENTRY": "PREPARING", "SCHEDULED": "PREPARING", "PREPARED": "PREPARING",
+    "PRELOAD_RETRY": "PREPARING", "WAIT_CLOSE": "RESOLVING", "RECONCILING": "RESOLVING",
+    "MISSED_ENTRY": "SCANNING", "CLOSED": "RESOLVING",
+}
+
+def _canonical_stage(value):
+    stage = str(value or "SCANNING").upper()
+    stage = _STAGE_ALIASES.get(stage, stage)
+    return stage if stage in SESSION_STAGES else "SCANNING"
+
 _SCHEMA_READY = False
 
 
@@ -105,6 +118,8 @@ _ALLOWED = {
 
 async def _update(session_id, **changes):
     changes = {key: value for key, value in changes.items() if key in _ALLOWED}
+    if "stage" in changes:
+        changes["stage"] = _canonical_stage(changes["stage"])
     if not changes:
         return
     changes["updated_at"] = utcnow()
@@ -285,12 +300,21 @@ async def stop_session(reason="USER_STOP"):
     session = await _active()
     if not session:
         return await session_state()
+    session_id = int(session["id"])
+    if session.get("active_position_id"):
+        await set_execution_mode("confirm")
+        await _update(
+            session_id, stage="OPEN", stop_reason="USER_STOP_PENDING", pending_signal_id=None,
+            last_message="Остановка запрошена · жду результат уже открытой сделки",
+        )
+        await _event(session_id, "STOP_REQUESTED", "Остановка запрошена · открытая сделка будет учтена", {"reason": reason})
+        return await session_state(refresh_balance=True)
     await _update(
-        int(session["id"]), status="STOPPED", stage="STOPPED", stop_reason=reason,
+        session_id, status="STOPPED", stage="STOPPED", stop_reason=reason,
         last_message="Сессия остановлена", ended_at=utcnow(), pending_signal_id=None, active_position_id=None,
     )
     await reset_trade_runtime("IDLE", "AUTO сессия остановлена")
-    await _event(int(session["id"]), "STOPPED", "Сессия остановлена", {"reason": reason})
+    await _event(session_id, "STOPPED", "Сессия остановлена", {"reason": reason})
     return await session_state(refresh_balance=True)
 
 
@@ -384,6 +408,12 @@ async def _settle(session):
                 amount=amount,
                 payout=payout,
             )
+            if str(locked_session.get("stop_reason") or "") == "USER_STOP_PENDING" and transition["status"] == "ACTIVE":
+                transition.update(
+                    status="STOPPED", stage="STOPPED", reason="USER_STOP", ended=utcnow(),
+                    message=f"Сделка закрыта · {transition['result']} · сессия остановлена пользователем",
+                )
+            transition["stage"] = _canonical_stage(transition["stage"])
             leg_id = int(leg["id"])
             now = utcnow()
             await db.execute(
@@ -539,7 +569,7 @@ async def session_tick():
         if trade.get("status") == "RECONCILING":
             await _update(
                 int(session["id"]),
-                stage="RECONCILING",
+                stage="RESOLVING",
                 last_message="Ответ Pocket не получен · новые входы заблокированы до сверки",
             )
             return trade
@@ -675,7 +705,7 @@ async def session_tick():
     amount = _next_amount(session, payout)
     await update_auto_trade_control(amount=amount, max_open_positions=1)
     await _update(
-        int(session["id"]), stage="SIGNAL_FOUND", pending_signal_id=int(signal["id"]),
+        int(session["id"]), stage="PREPARING", pending_signal_id=int(signal["id"]),
         last_message=f"Сигнал найден {signal['pair']} · payout {payout:.1f}% · жду {signal['entry_time']}",
     )
     await _event(
@@ -683,7 +713,7 @@ async def session_tick():
         {"confidence": signal["confidence"], "amount": amount, "payout": payout, "scanned": len(scan_assets), "mixed": mixed_count, "confirmed": True},
     )
     await update_trade_runtime(
-        stage="SIGNAL_FOUND", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
+        stage="PREPARING", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],
         strategy=signal["strategy"], timeframe=signal["timeframe"], payout_percent=payout, balance=balance,
         entry_time=signal["entry_time"], expiry_time=signal["expiry_time"], amount=amount,
         scanned_assets=scan_assets, scanned_count=len(scan_assets), eligible_assets=eligible_assets,
@@ -696,12 +726,12 @@ async def session_tick():
         await _register_open(session, signal, trade, amount, trade.get("payout") or payout)
     elif trade.get("status") in {"SCHEDULED", "WAIT_ENTRY"}:
         await _update(
-            int(session["id"]), stage="WAIT_ENTRY", pending_signal_id=int(signal["id"]),
+            int(session["id"]), stage="PREPARING", pending_signal_id=int(signal["id"]),
             last_message="Сигнал найден · жду точное время входа",
         )
     elif trade.get("status") == "RECONCILING":
         await _update(
-            int(session["id"]), stage="RECONCILING", pending_signal_id=int(signal["id"]),
+            int(session["id"]), stage="RESOLVING", pending_signal_id=int(signal["id"]),
             last_message="Ответ Pocket не получен · новые входы заблокированы до сверки",
         )
     elif trade.get("status") == "STOP_REQUIRED":
