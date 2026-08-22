@@ -40,19 +40,25 @@ def _require_demo_runtime() -> None:
     if str(os.getenv("VERCEL") or "").strip().lower() in {"1", "true", "yes", "on"}:
         raise RuntimeError("The persistent worker cannot run inside Vercel")
     if str(os.getenv("POCKET_OPTION_DEMO") or "true").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
+        "1", "true", "yes", "on",
     }:
         raise RuntimeError("REAL AUTO execution is disabled; POCKET_OPTION_DEMO must be true")
     missing = [
         name
-        for name in ("DATABASE_URL", "POCKET_OPTION_SSID")
+        for name in ("DATABASE_URL", "ADMIN_ID", "POCKET_OPTION_SSID", "WORKER_SHARED_SECRET")
         if not str(os.getenv(name) or "").strip()
     ]
     if missing:
         raise RuntimeError(f"Missing worker configuration: {', '.join(missing)}")
+    try:
+        if int(os.getenv("ADMIN_ID") or 0) <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise RuntimeError("ADMIN_ID must be a positive Telegram user id") from exc
+    if len(str(os.getenv("WORKER_SHARED_SECRET") or "").strip()) < 32:
+        raise RuntimeError("WORKER_SHARED_SECRET must contain at least 32 characters")
+    if len(str(os.getenv("POCKET_OPTION_SSID") or "").strip()) < 10:
+        raise RuntimeError("POCKET_OPTION_SSID looks incomplete")
 
 
 async def run_worker() -> None:
@@ -64,10 +70,7 @@ async def run_worker() -> None:
     # Imports happen only after the runtime guard so the public web runtime can
     # never acquire worker-side resources as an import side effect.
     from backend.models.db_models import engine
-    from backend.services.auto_realtime import (
-        start_auto_realtime_driver,
-        stop_auto_realtime_driver,
-    )
+    from backend.services.auto_realtime import start_auto_realtime_driver, stop_auto_realtime_driver
     from backend.services.database import init_db
     from backend.services.pocketoption_otc import market_data
     from backend.services.preload_next import ensure_preload_schema
@@ -101,19 +104,12 @@ async def run_worker() -> None:
         if signum is not None:
             signal.signal(signum, request_stop)
 
-    supervisor = asyncio.create_task(
-        worker_supervisor(stop_event, account_id),
-        name="alphapulse-worker-supervisor",
-    )
-    maintenance = asyncio.create_task(
-        _maintenance_loop(stop_event),
-        name="alphapulse-worker-maintenance",
-    )
+    supervisor = asyncio.create_task(worker_supervisor(stop_event, account_id), name="alphapulse-worker-supervisor")
+    maintenance = asyncio.create_task(_maintenance_loop(stop_event), name="alphapulse-worker-maintenance")
     realtime_server = None
     realtime_task = None
     if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
         import uvicorn
-
         realtime_server = uvicorn.Server(
             uvicorn.Config(
                 "worker.realtime_server:app",
@@ -123,12 +119,10 @@ async def run_worker() -> None:
                 access_log=False,
             )
         )
-        realtime_task = asyncio.create_task(
-            realtime_server.serve(),
-            name="alphapulse-worker-realtime",
-        )
+        realtime_task = asyncio.create_task(realtime_server.serve(), name="alphapulse-worker-realtime")
     if not await start_auto_realtime_driver():
         supervisor.cancel()
+        maintenance.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
 
     logger.info("AlphaPulse Windows worker started in DEMO-only mode")
@@ -142,14 +136,11 @@ async def run_worker() -> None:
             realtime_server.should_exit = True
         if realtime_task is not None:
             await realtime_task
-        try:
-            await supervisor
-        except asyncio.CancelledError:
-            pass
-        try:
-            await maintenance
-        except asyncio.CancelledError:
-            pass
+        for task in (supervisor, maintenance):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await release_lease(account_id)
         await register_heartbeat(status="OFFLINE")
         await market_data.close()
