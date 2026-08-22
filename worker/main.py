@@ -36,11 +36,9 @@ async def run_worker() -> None:
     os.environ["AUTO_REALTIME_DRIVER"] = "true"
     _require_demo_runtime()
 
-    # Imports happen only after the runtime guard. Importing auto_recovery
-    # currently installs compatibility patches; the state-machine phase will
-    # replace those patches with explicit code paths.
+    # Imports happen only after the runtime guard so the public web runtime can
+    # never acquire worker-side resources as an import side effect.
     from backend.models.db_models import engine
-    from backend.services import auto_recovery as _auto_recovery  # noqa: F401
     from backend.services.auto_realtime import (
         start_auto_realtime_driver,
         stop_auto_realtime_driver,

@@ -428,10 +428,38 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                 "payout": payout, "balance": balance, "entry_time": _iso(placed_at), "scheduled_entry_time": _iso(entry),
                 "entry_delay_ms": round((placed_at - entry).total_seconds() * 1000) if exact_entry else None,
             }
+        except asyncio.TimeoutError:
+            # The broker may have accepted the order even though its response
+            # was lost. Never retry or continue scanning until reconciliation
+            # has resolved this execution.
+            if execution is not None:
+                await _mark_execution(
+                    execution.id,
+                    "UNKNOWN",
+                    "ORDER_TIMEOUT_RECONCILIATION_REQUIRED",
+                )
+            await update_trade_runtime(
+                stage="RECONCILING",
+                message="Ответ Pocket не получен · сверяю ордер, новые входы заблокированы",
+            )
+            return {
+                "status": "RECONCILING",
+                "reason": "ORDER_TIMEOUT",
+                "signal_id": int(signal["id"]),
+                "execution_id": execution.id if execution is not None else None,
+            }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
             if execution is not None:
                 await _mark_execution(execution.id, "FAILED", type(exc).__name__)
+            compact = str(exc).replace(" ", "").lower()
+            if "notenoughfunds" in compact or "insufficientfunds" in compact:
+                await update_trade_runtime(
+                    stage="STOPPED",
+                    pending_signal_id=None,
+                    message="Недостаточно средств для следующей DEMO ставки",
+                )
+                return {"status": "STOP_REQUIRED", "reason": "INSUFFICIENT_FUNDS"}
             await update_trade_runtime(stage="FAILED", pending_signal_id=None, message=f"Ошибка открытия: {type(exc).__name__}")
             return {"status": "FAILED", "error": type(exc).__name__}
         finally:

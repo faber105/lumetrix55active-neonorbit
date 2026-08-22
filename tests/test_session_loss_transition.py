@@ -40,7 +40,7 @@ class LossTransitionTests(unittest.TestCase):
 
         self.assertEqual(state["status"], "STOPPED")
         self.assertEqual(state["stage"], "STOPPED")
-        self.assertEqual(state["reason"], "FAILED_SERIES_LIMIT")
+        self.assertEqual(state["reason"], "MAX_FAILED_SERIES")
         self.assertEqual(state["level"], 0)
         self.assertEqual(state["series_loss"], 0)
         self.assertIn("3/3", state["message"])
@@ -55,7 +55,7 @@ class LossTransitionTests(unittest.TestCase):
         )
 
         self.assertEqual(state["status"], "STOPPED")
-        self.assertEqual(state["reason"], "FAILED_SERIES_LIMIT")
+        self.assertEqual(state["reason"], "MAX_FAILED_SERIES")
 
     def test_profit_mode_can_continue_until_failed_series_limit(self):
         session = {"mode": "profit", "max_martingale": 3, "max_failed_series": 2}

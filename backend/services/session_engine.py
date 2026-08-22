@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 
-from backend.models.db_models import AsyncSessionLocal, PaperPosition, SignalResult, utcnow
+from backend.models.db_models import AsyncSessionLocal, PaperPosition, utcnow
 from backend.services.auto_trade import (
     MIN_AUTO_PAYOUT,
     get_auto_trade_control,
@@ -20,7 +20,7 @@ from backend.services.pocketoption_otc import OTC_ASSETS
 from backend.services.positions import reconcile_positions
 from backend.services.signal_engine import signal_engine
 from backend.services.signal_store import save_signal
-from backend.services.session_transitions import loss_transition as _loss_transition
+from backend.services.session_transitions import settle_transition
 from backend.services.strategies import AUTO_STRATEGIES, STRATEGY_LABELS
 from backend.services.trade_mode import set_execution_mode, set_trade_account_mode
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
@@ -335,81 +335,125 @@ async def _settle(session):
     if position is None or position.status != "CLOSED":
         return session
     session_id = int(session["id"])
-    async with AsyncSessionLocal() as db:
-        leg = (
-            await db.execute(
-                text("SELECT * FROM auto_trade_legs WHERE session_id=:sid AND position_id=:pid ORDER BY id DESC LIMIT 1"),
-                {"sid": session_id, "pid": int(position_id)},
-            )
-        ).mappings().first()
-    if not leg or str(leg["result"]) != "PENDING":
-        await _update(session_id, active_position_id=None)
-        return (await _active()) or session
-
-    result = position.result.value
-    amount = float(leg["amount"])
-    payout = float(leg["payout"] or MIN_AUTO_PAYOUT)
-    pnl = amount * payout / 100 if result == SignalResult.WIN.value else (-amount if result == SignalResult.LOSS.value else 0)
-    profit = round(float(session.get("profit") or 0) + pnl, 2)
-    wins = int(session.get("wins") or 0)
-    failed = int(session.get("failed_series") or 0)
-    level = int(session.get("current_level") or 0)
-    series_loss = float(session.get("current_series_loss") or 0)
-    status, stage, reason, ended = "ACTIVE", "SCANNING", None, None
-
-    if result == SignalResult.WIN.value:
-        wins += 1
-        level, series_loss = 0, 0
-        message = f"WIN +{pnl:.2f} · анализирую пары с payout ≥92% для следующего входа"
-        if session["mode"] == "count" and wins >= int(session["target_wins"]):
-            status, stage, reason, ended = "COMPLETED", "COMPLETED", "TARGET_WINS", utcnow()
-            message = "Цель по успешным сделкам достигнута"
-        if session["mode"] == "profit" and profit >= float(session["target_profit"]):
-            status, stage, reason, ended = "COMPLETED", "COMPLETED", "TARGET_PROFIT", utcnow()
-            message = "Целевой профит достигнут"
-    elif result == SignalResult.LOSS.value:
-        transition = _loss_transition(
-            session,
-            amount=amount,
-            failed=failed,
-            level=level,
-            series_loss=series_loss,
-        )
-        failed = transition["failed"]
-        level = transition["level"]
-        series_loss = transition["series_loss"]
-        status = transition["status"]
-        stage = transition["stage"]
-        reason = transition["reason"]
-        ended = transition["ended"]
-        message = transition["message"]
-    else:
-        message = "DRAW · повторяю текущий уровень на следующем подтверждённом сетапе"
-
     try:
         snapshot = await get_demo_account_snapshot(force=True)
         balance = snapshot.get("balance")
     except Exception:
         balance = session.get("current_balance")
 
+    transition = None
+    leg_id = None
     async with AsyncSessionLocal() as db:
-        await db.execute(
-            text("UPDATE auto_trade_legs SET result=:result,pnl=:pnl,closed_at=:closed WHERE id=:id"),
-            {"result": result, "pnl": pnl, "closed": utcnow(), "id": int(leg["id"])},
-        )
-        await db.commit()
+        async with db.begin():
+            locked_session = (
+                await db.execute(
+                    text("SELECT * FROM auto_trade_sessions WHERE id=:sid FOR UPDATE"),
+                    {"sid": session_id},
+                )
+            ).mappings().first()
+            leg = (
+                await db.execute(
+                    text("""SELECT * FROM auto_trade_legs
+                        WHERE session_id=:sid AND position_id=:pid
+                        ORDER BY id DESC LIMIT 1 FOR UPDATE"""),
+                    {"sid": session_id, "pid": int(position_id)},
+                )
+            ).mappings().first()
+            if (
+                not locked_session
+                or str(locked_session["status"]) != "ACTIVE"
+                or not leg
+                or str(leg["result"]) != "PENDING"
+            ):
+                return _serialize(locked_session) if locked_session else session
 
-    await _update(
-        session_id, status=status, stage=stage, wins=wins, failed_series=failed, current_level=level,
-        current_series_loss=series_loss, profit=profit, current_balance=balance, active_position_id=None,
-        pending_signal_id=None, last_message=message, stop_reason=reason, ended_at=ended,
-    )
-    await _event(session_id, "CLOSED", f"Сделка закрыта · {result}", {"pnl": pnl, "profit": profit, "level": int(leg["martingale_level"])})
-    if status != "ACTIVE":
-        await reset_trade_runtime("IDLE", message)
-        await _event(session_id, stage, message, {"wins": wins, "failed_series": failed, "profit": profit})
+            result = position.result.value
+            amount = float(leg["amount"])
+            payout = float(leg["payout"] or MIN_AUTO_PAYOUT)
+            transition = settle_transition(
+                dict(locked_session),
+                result=result,
+                amount=amount,
+                payout=payout,
+            )
+            leg_id = int(leg["id"])
+            now = utcnow()
+            await db.execute(
+                text("""UPDATE auto_trade_legs
+                    SET result=:result,pnl=:pnl,closed_at=:closed
+                    WHERE id=:id AND result='PENDING'"""),
+                {
+                    "result": transition["result"],
+                    "pnl": transition["pnl"],
+                    "closed": now,
+                    "id": leg_id,
+                },
+            )
+            await db.execute(
+                text("""UPDATE auto_trade_sessions SET
+                    status=:status,stage=:stage,wins=:wins,failed_series=:failed,
+                    current_level=:level,current_series_loss=:series_loss,
+                    profit=:profit,current_balance=:balance,active_position_id=NULL,
+                    pending_signal_id=NULL,last_message=:message,stop_reason=:reason,
+                    ended_at=:ended,updated_at=:updated WHERE id=:sid"""),
+                {
+                    "status": transition["status"],
+                    "stage": transition["stage"],
+                    "wins": transition["wins"],
+                    "failed": transition["failed"],
+                    "level": transition["level"],
+                    "series_loss": transition["series_loss"],
+                    "profit": transition["profit"],
+                    "balance": balance,
+                    "message": transition["message"],
+                    "reason": transition["reason"],
+                    "ended": transition["ended"],
+                    "updated": now,
+                    "sid": session_id,
+                },
+            )
+            closed_payload = json.dumps(
+                {
+                    "pnl": transition["pnl"],
+                    "profit": transition["profit"],
+                    "level": int(leg["martingale_level"]),
+                    "position_id": int(position_id),
+                },
+                ensure_ascii=False,
+            )
+            await db.execute(
+                text("""INSERT INTO auto_trade_events (session_id,stage,message,payload)
+                    VALUES (:sid,'CLOSED',:message,:payload)"""),
+                {
+                    "sid": session_id,
+                    "message": f"Сделка закрыта · {transition['result']}",
+                    "payload": closed_payload,
+                },
+            )
+            if transition["status"] != "ACTIVE":
+                await db.execute(
+                    text("""INSERT INTO auto_trade_events (session_id,stage,message,payload)
+                        VALUES (:sid,:stage,:message,:payload)"""),
+                    {
+                        "sid": session_id,
+                        "stage": transition["stage"],
+                        "message": transition["message"],
+                        "payload": json.dumps(
+                            {
+                                "wins": transition["wins"],
+                                "failed_series": transition["failed"],
+                                "profit": transition["profit"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                )
+
+    assert transition is not None and leg_id is not None
+    if transition["status"] != "ACTIVE":
+        await reset_trade_runtime("IDLE", transition["message"])
     else:
-        await reset_trade_runtime(stage, message)
+        await reset_trade_runtime(transition["stage"], transition["message"])
     return (await _active()) or (await _latest()) or session
 
 
@@ -470,6 +514,16 @@ async def session_tick():
                 last_message=runtime.get("message") or "Жду точное время входа",
             )
             return trade
+        if trade.get("status") == "RECONCILING":
+            await _update(
+                int(session["id"]),
+                stage="RECONCILING",
+                last_message="Ответ Pocket не получен · новые входы заблокированы до сверки",
+            )
+            return trade
+        if trade.get("status") == "STOP_REQUIRED":
+            await stop_session(str(trade.get("reason") or "BROKER_STOP"))
+            return {"status": "STOPPED", "reason": trade.get("reason")}
         await _update(int(session["id"]), pending_signal_id=None, stage="SCANNING", last_message="Сигнал пропущен · продолжаю анализ пар с payout ≥92%")
         session = (await _active()) or session
 
@@ -626,6 +680,13 @@ async def session_tick():
             int(session["id"]), stage="WAIT_ENTRY", pending_signal_id=int(signal["id"]),
             last_message="Сигнал найден · жду точное время входа",
         )
+    elif trade.get("status") == "RECONCILING":
+        await _update(
+            int(session["id"]), stage="RECONCILING", pending_signal_id=int(signal["id"]),
+            last_message="Ответ Pocket не получен · новые входы заблокированы до сверки",
+        )
+    elif trade.get("status") == "STOP_REQUIRED":
+        await stop_session(str(trade.get("reason") or "BROKER_STOP"))
     else:
         await _update(
             int(session["id"]), pending_signal_id=None, stage="SCANNING",
