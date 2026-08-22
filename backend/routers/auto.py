@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.models.db_models import AsyncSessionLocal
+from backend.services.auto_realtime import notify_auto_change
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
 from backend.services.session_engine import session_history, session_state, validate_session_config
 from backend.services.worker_protocol import ensure_demo_account, enqueue_command
@@ -34,6 +35,15 @@ class PreviewRequest(StartSessionRequest):
     payout: float = Field(default=92, ge=1, le=100)
 
 
+def _normalize_strategy(value: str | None) -> str:
+    # Older Mini App builds used smart_confluence as the initial AUTO value even
+    # though the rebuilt engine exposes one of three strict single strategies.
+    # Keep those cached clients functional and route the legacy default to the
+    # first supported strategy instead of rejecting START_SESSION before enqueue.
+    raw = str(value or "").strip()
+    return "trend_pulse" if raw == "smart_confluence" else raw
+
+
 def _bet_plan(base: float, payout: float, max_martingale: int) -> list[float]:
     ratio = max(float(payout) / 100.0, 0.01)
     levels = [round(float(base), 2)]
@@ -46,7 +56,9 @@ def _bet_plan(base: float, payout: float, max_martingale: int) -> list[float]:
 
 @router.post("/preview")
 async def preview(data: PreviewRequest, _: TelegramMiniAppUser = Depends(admin_user)):
-    values = validate_session_config(data.model_dump())
+    body = data.model_dump()
+    body["strategy"] = _normalize_strategy(body.get("strategy"))
+    values = validate_session_config(body)
     levels = _bet_plan(values["amount"], data.payout, values["max_martingale"])
     expected_net = round(values["amount"] * float(data.payout) / 100.0, 2)
     projected = (
@@ -66,8 +78,6 @@ async def preview(data: PreviewRequest, _: TelegramMiniAppUser = Depends(admin_u
 def _command_key(user_id: int, command_type: str, payload: dict, provided: str | None) -> str:
     if provided and provided.strip():
         return provided.strip()[:128]
-    # Browser retries of the same action within a short window resolve to the
-    # same command even when an older client does not yet send an explicit key.
     bucket = int(datetime.now(timezone.utc).timestamp() // 10)
     raw = json.dumps(
         {"user": int(user_id), "type": command_type, "payload": payload, "bucket": bucket},
@@ -185,8 +195,6 @@ def _decorate_live_state(payload: dict) -> dict:
         amount_line = f"Следующая ставка: {next_bet:.2f}"
     if amount_line not in base_message:
         session["last_message"] = f"{base_message} · {amount_line}"
-    # The journal is an audit trail: only persisted worker events are exposed.
-    # Runtime/UI helpers must never invent timestamps or pretend to be trades.
     payload["events"] = events[:40]
     payload["screen_notifications"] = events[:40]
     payload["session"] = session
@@ -212,6 +220,7 @@ async def start(
     x_idempotency_key: str | None = Header(default=None),
 ):
     body = data.model_dump()
+    body["strategy"] = _normalize_strategy(body.get("strategy"))
     try:
         body = validate_session_config(body)
     except ValueError as exc:
@@ -223,6 +232,7 @@ async def start(
         payload=body,
         idempotency_key=_command_key(int(user.id), "START_SESSION", body, x_idempotency_key),
     )
+    await notify_auto_change(wake_driver=True)
     payload = _decorate_live_state(await session_state())
     payload["command"] = command
     payload["driver"] = {"status": "QUEUED"}
@@ -242,6 +252,7 @@ async def stop(
         payload=body,
         idempotency_key=_command_key(int(user.id), "STOP_SESSION", body, x_idempotency_key),
     )
+    await notify_auto_change(wake_driver=True)
     payload = _decorate_live_state(await session_state())
     payload["command"] = command
     payload["driver"] = {"status": "QUEUED"}
