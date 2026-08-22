@@ -10,10 +10,10 @@ def _utcnow() -> datetime:
 def loss_transition(session, *, amount, failed, level, series_loss):
     """Return the next session state after a confirmed losing position.
 
-    A fully lost martingale chain is a failed series in every AUTO mode. The
-    cover limit is therefore a hard stop once ``max_failed_series`` is reached.
-    Martingale is session data (``current_level``), not a durable state by
-    itself, so the engine returns to SCANNING for the next confirmed setup.
+    A fully lost martingale chain always resets the martingale level. In count
+    mode the session continues until the requested WIN target is reached. In
+    profit mode a fully lost chain increments ``failed_series`` and the session
+    stops only when ``max_failed_series`` is reached.
     """
     series_loss += amount
     max_martingale = int(session["max_martingale"])
@@ -31,6 +31,21 @@ def loss_transition(session, *, amount, failed, level, series_loss):
                 f"LOSS · готовлю перекрытие {level}/{max_martingale} "
                 "только на новом подтверждённом сетапе"
             ),
+        }
+
+    # Count mode is governed by the WIN target, not by a failed-series limit.
+    # After the last allowed overlap is lost we reset the chain and continue
+    # scanning for a fresh confirmed setup.
+    if str(session.get("mode") or "count") == "count":
+        return {
+            "failed": failed + 1,
+            "level": 0,
+            "series_loss": 0,
+            "status": "ACTIVE",
+            "stage": "SCANNING",
+            "reason": None,
+            "ended": None,
+            "message": "Полная минусовая серия учтена · продолжаю до достижения цели по WIN",
         }
 
     failed += 1
