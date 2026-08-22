@@ -1,22 +1,41 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend.services.pocketoption_otc import (
-    DISPLAY_TO_ASSET,
-    MarketDataUnavailable,
-    OTC_ASSETS,
-    TF_SECONDS,
-    market_data,
-)
-from backend.services.strategies import indicator_snapshot
 from backend.models.db_models import utcnow
-from backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account
+from backend.services.pocketoption_otc import DISPLAY_TO_ASSET, OTC_ASSETS, TF_SECONDS
+from backend.services.worker_protocol import (
+    await_command,
+    enqueue_command,
+    ensure_demo_account,
+    realtime_snapshot,
+)
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
+
+
+async def _worker_command(
+    user: TelegramMiniAppUser,
+    command_type: str,
+    payload: dict,
+    key: str,
+    *,
+    timeout: float = 25.0,
+) -> dict:
+    account_id = await ensure_demo_account(int(user.id))
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type=command_type,
+        payload=payload,
+        idempotency_key=key[:128],
+    )
+    try:
+        return await await_command(int(command['id']), account_id, timeout_seconds=timeout)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Windows worker is not responding') from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, 'Windows worker could not load Pocket market data') from exc
 
 
 @router.get('/assets')
@@ -25,37 +44,35 @@ async def assets():
 
 
 @router.get('/health')
-async def health():
-    return await market_data.health()
+async def health(user: TelegramMiniAppUser = Depends(telegram_user)):
+    account_id = await ensure_demo_account(int(user.id))
+    snapshot = await realtime_snapshot(account_id)
+    worker = snapshot.get('worker') or {}
+    return {
+        'configured': worker.get('status') in {'ONLINE', 'DEGRADED'},
+        'connected': worker.get('status') == 'ONLINE',
+        'demo': True,
+        'provider': 'Windows worker / Pocket Option DEMO',
+        'worker_status': worker.get('status', 'OFFLINE'),
+        'heartbeat_age_seconds': worker.get('heartbeat_age_seconds'),
+    }
 
 
 @router.get('/diagnostics')
-async def diagnostics():
-    state = await market_data.health()
-    result = {
-        'configured': state.get('configured', False),
-        'connected': state.get('connected', False),
-        'auth_format': state.get('auth_format'),
-        'demo': state.get('demo'),
-        'provider': state.get('provider'),
-        'candle_test': False,
-        'asset': 'EURUSD_otc',
-        'timeframe': '1m',
-        'candles': 0,
-        'latest_candle_time': None,
+async def diagnostics(user: TelegramMiniAppUser = Depends(telegram_user)):
+    account_id = await ensure_demo_account(int(user.id))
+    snapshot = await realtime_snapshot(account_id)
+    worker = snapshot.get('worker') or {}
+    return {
+        'configured': worker.get('status') in {'ONLINE', 'DEGRADED'},
+        'connected': worker.get('status') == 'ONLINE',
+        'demo': True,
+        'provider': 'Windows worker / Pocket Option DEMO',
+        'worker_status': worker.get('status', 'OFFLINE'),
+        'heartbeat_age_seconds': worker.get('heartbeat_age_seconds'),
+        'active_session': bool(snapshot.get('active')),
+        'sequence': snapshot.get('sequence', 0),
     }
-    if not result['configured']:
-        return result
-    try:
-        candles = await market_data.get_candles('EURUSD_otc', '1m', 100)
-        result['connected'] = True
-        result['candle_test'] = len(candles) >= 80
-        result['candles'] = len(candles)
-        result['latest_candle_time'] = candles[-1]['time'] if candles else None
-        return result
-    except MarketDataUnavailable as exc:
-        result['error'] = str(exc)
-        return result
 
 
 @router.get('/candles')
@@ -70,54 +87,47 @@ async def candles(
         raise HTTPException(400, 'Unsupported OTC pair')
     if timeframe not in TF_SECONDS:
         raise HTTPException(400, 'Unsupported timeframe')
-    try:
-        account_id = await ensure_demo_account()
-        payload = {'pair': pair, 'timeframe': timeframe, 'count': count}
-        command = await enqueue_command(
-            account_id=account_id,
-            command_type='MARKET_CANDLES',
-            payload=payload,
-            idempotency_key=f'candles:{int(user.id)}:{asset}:{timeframe}:{count}:{int(utcnow().timestamp() // 2)}',
-        )
-        return await await_command(int(command['id']), account_id)
-    except TimeoutError as exc:
-        raise HTTPException(503, 'Windows worker is not responding') from exc
-    except RuntimeError as exc:
-        raise HTTPException(503, 'Windows worker could not load market data') from exc
+    payload = {'pair': pair, 'timeframe': timeframe, 'count': count}
+    bucket = int(utcnow().timestamp() // 2)
+    return await _worker_command(
+        user,
+        'MARKET_CANDLES',
+        payload,
+        f'candles:{int(user.id)}:{asset}:{timeframe}:{count}:{bucket}',
+    )
 
 
 @router.get('/analysis')
-async def analysis(pair: str = Query(...), _: TelegramMiniAppUser = Depends(telegram_user)):
+async def analysis(
+    pair: str = Query(...),
+    timeframe: str = Query('1m'),
+    user: TelegramMiniAppUser = Depends(telegram_user),
+):
     asset = DISPLAY_TO_ASSET.get(pair.replace(' OTC', '').strip())
     if not asset:
         raise HTTPException(400, 'Unsupported OTC pair')
-    timeframes = {}
-    primary = None
-    try:
-        for timeframe in ['1m', '5m', '15m', '1h']:
-            snapshot = indicator_snapshot(await market_data.get_candles(asset, timeframe, 240))
-            timeframes[timeframe] = {
-                'direction': snapshot['direction'],
-                'confidence': snapshot['confidence'],
-            }
-            if timeframe == '5m':
-                primary = snapshot
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    return {
-        'pair': pair,
-        'asset': asset,
-        'timeframes': timeframes,
-        'indicators': (primary or {}).get('indicators', {}),
-    }
+    if timeframe not in {'15s', '1m', '3m', '5m', '15m'}:
+        raise HTTPException(400, 'Unsupported timeframe')
+    bucket = int(utcnow().timestamp() // 2)
+    return await _worker_command(
+        user,
+        'ANALYZE_SIGNAL',
+        {'pair': pair, 'timeframe': timeframe},
+        f'analysis:{int(user.id)}:{asset}:{timeframe}:{bucket}',
+    )
 
 
 @router.get('/price/{asset}')
-async def price(asset: str, _: TelegramMiniAppUser = Depends(telegram_user)):
+async def price(asset: str, user: TelegramMiniAppUser = Depends(telegram_user)):
     if asset not in OTC_ASSETS:
         raise HTTPException(404, 'Unknown OTC asset')
-    try:
-        value = await market_data.latest_price(asset)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    return {'asset': asset, 'pair': OTC_ASSETS[asset], 'price': value}
+    pair = OTC_ASSETS[asset]
+    bucket = int(utcnow().timestamp())
+    payload = await _worker_command(
+        user,
+        'MARKET_CANDLES',
+        {'pair': pair, 'timeframe': '15s', 'count': 20},
+        f'price:{int(user.id)}:{asset}:{bucket}',
+        timeout=10.0,
+    )
+    return {'asset': asset, 'pair': pair, 'price': payload.get('current_price')}
