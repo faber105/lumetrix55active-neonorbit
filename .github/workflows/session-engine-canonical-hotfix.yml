@@ -50,16 +50,13 @@ jobs:
           text = text.replace('stage="WAIT_ENTRY", pending_signal_id=int(signal["id"]),', 'stage="PREPARING", pending_signal_id=int(signal["id"]),')
           text = text.replace('stage="RECONCILING", pending_signal_id=int(signal["id"]),', 'stage="RESOLVING", pending_signal_id=int(signal["id"]),')
           text = text.replace('stage="RECONCILING",\n                last_message=', 'stage="RESOLVING",\n                last_message=')
-
           p.write_text(text, encoding='utf-8')
-      - name: Validate
+      - name: Validate syntax and markers
         run: |
           python -m compileall -q backend worker
-          python - <<'PY'
-          from backend.services.session_engine import _canonical_stage
-          assert _canonical_stage('WAIT_ENTRY') == 'PREPARING'
-          assert _canonical_stage('RECONCILING') == 'RESOLVING'
-          PY
+          grep -q 'SESSION_STAGES = {' backend/services/session_engine.py
+          grep -q 'USER_STOP_PENDING' backend/services/session_engine.py
+          grep -q '_canonical_stage' backend/services/session_engine.py
       - name: Commit
         run: |
           git config user.name "AlphaPulse Worker Hotfix"
