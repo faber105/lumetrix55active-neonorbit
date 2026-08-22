@@ -36,7 +36,9 @@ $existingUser = Get-LocalUser -Name $ServiceUser -ErrorAction SilentlyContinue
 if (-not $existingUser) {
     New-LocalUser -Name $ServiceUser -Password $securePassword -AccountNeverExpires -UserMayNotChangePassword | Out-Null
 } else {
-    Set-LocalUser -Name $ServiceUser -Password $securePassword -AccountNeverExpires $true
+    # -AccountNeverExpires is a switch parameter in Windows PowerShell. Passing
+    # an explicit $true is treated as an unexpected positional argument.
+    Set-LocalUser -Name $ServiceUser -Password $securePassword -AccountNeverExpires
 }
 
 if (-not (Test-Path -LiteralPath $configFile)) {
