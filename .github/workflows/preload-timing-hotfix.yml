@@ -1,0 +1,84 @@
+name: Early search timing hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/preload-timing-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Patch preload timing and strategy ownership
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text(encoding='utf-8')
+
+          text = text.replace(
+              'ENTRY_TOLERANCE_SECONDS = 3.0\n',
+              'ENTRY_TOLERANCE_SECONDS = 3.0\nPRELOAD_OPEN_GRACE_SECONDS = 1.5\n',
+              1,
+          ) if 'PRELOAD_OPEN_GRACE_SECONDS' not in text else text
+
+          text = text.replace(
+              '    mixed_count = str(session.get("mode")) == "count"\n',
+              '    mixed_count = strategy == "smart_confluence"\n',
+              1,
+          )
+
+          anchor = '''    entry = _to_naive_utc(candidate.get("entry_time"))\n    if (entry - utcnow()).total_seconds() > 0.35:\n        return None\n\n    await reconcile_positions()\n'''
+          replacement = '''    entry = _to_naive_utc(candidate.get("entry_time"))\n    seconds_to_entry = (entry - utcnow()).total_seconds()\n    if seconds_to_entry > 0.35:\n        return None\n    if seconds_to_entry < -PRELOAD_OPEN_GRACE_SECONDS:\n        await _save_candidate(int(session["id"]), status="CANCELLED")\n        await _update(\n            int(session["id"]), stage="SCANNING", pending_signal_id=None,\n            last_message="Предварительный вход отменён: результат Pocket пришёл слишком поздно · ищу новый актуальный сетап",\n        )\n        return {"status": "PRELOAD_MISSED", "block": True, "late_by_seconds": round(-seconds_to_entry, 3)}\n\n    await reconcile_positions()\n'''
+          if anchor in text:
+              text = text.replace(anchor, replacement, 1)
+          elif 'PRELOAD_MISSED' not in text:
+              raise SystemExit('preload entry anchor missing')
+
+          anchor = '''    payout = float(candidate.get("payout") or MIN_AUTO_PAYOUT)\n    amount = float(_next_amount(current, payout))\n    await update_auto_trade_control(amount=amount, max_open_positions=1)\n    await update_trade_runtime(\n        stage="OPENING", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],\n'''
+          replacement = '''    seconds_to_entry = (entry - utcnow()).total_seconds()\n    if seconds_to_entry < -PRELOAD_OPEN_GRACE_SECONDS:\n        await _save_candidate(int(session["id"]), status="CANCELLED")\n        await _update(\n            int(session["id"]), stage="SCANNING", pending_signal_id=None,\n            last_message="Pocket результат получен после допустимого окна · старый ранний сигнал не открываю",\n        )\n        return {"status": "PRELOAD_MISSED", "block": True, "late_by_seconds": round(-seconds_to_entry, 3)}\n\n    payout = float(candidate.get("payout") or MIN_AUTO_PAYOUT)\n    amount = float(_next_amount(current, payout))\n    await update_auto_trade_control(amount=amount, max_open_positions=1)\n    await _update(\n        int(session["id"]), stage="OPENING", pending_signal_id=int(signal["id"]),\n        last_message="Результат Pocket зафиксирован · открываю заранее подготовленный сигнал",\n    )\n    await update_trade_runtime(\n        stage="OPENING", pending_signal_id=int(signal["id"]), pair=signal["pair"], asset=signal["asset"],\n'''
+          if anchor in text:
+              text = text.replace(anchor, replacement, 1)
+          elif 'Результат Pocket зафиксирован' not in text:
+              raise SystemExit('preload claim anchor missing')
+
+          old = '''    await _save_candidate(int(session["id"]), status="CANCELLED")\n    return {"status": str(trade.get("status") or "PRELOAD_FAILED"), "block": True, "trade": trade}\n'''
+          new = '''    if trade.get("status") == "RECONCILING":\n        await _save_candidate(int(session["id"]), status="WAIT_CLOSE")\n        await _update(\n            int(session["id"]), stage="RESOLVING", pending_signal_id=int(signal["id"]),\n            last_message="Pocket не подтвердил новый ордер · сверяю request id, повторный вход запрещён",\n        )\n        return {"status": "RECONCILING", "block": True, "trade": trade}\n    await _save_candidate(int(session["id"]), status="CANCELLED")\n    await _update(int(session["id"]), pending_signal_id=None, stage="SCANNING")\n    return {"status": str(trade.get("status") or "PRELOAD_FAILED"), "block": True, "trade": trade}\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          # Broker close results get a slightly wider receive window in the hot
+          # expiry path; the worker loop itself still controls overall cadence.
+          p = Path('backend/services/positions.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace(
+              'deals = await client._client.get_closed_deals(listen_seconds=0.20)',
+              'deals = await client._client.get_closed_deals(listen_seconds=0.45)',
+              1,
+          )
+          p.write_text(text, encoding='utf-8')
+      - name: Validate syntax and invariants
+        run: |
+          python -m compileall -q backend worker
+          grep -q 'PRELOAD_OPEN_GRACE_SECONDS = 1.5' backend/services/preload_next.py
+          grep -q 'mixed_count = strategy == "smart_confluence"' backend/services/preload_next.py
+          grep -q 'pending_signal_id=int(signal\["id"\])' backend/services/preload_next.py
+          grep -q 'listen_seconds=0.45' backend/services/positions.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/preload_next.py backend/services/positions.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Open early-search signals only in the live entry window"
+          git push origin HEAD:codex-windows-worker-rebuild
