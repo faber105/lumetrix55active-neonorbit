@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
-from backend.services.session_driver import drive_session_tick
-from backend.services.cpu_guard import adaptive_drive_session_tick
-from backend.services.auto_realtime import notify_auto_change
-from backend.services.session_engine import session_history, session_state, start_session, stop_session
-from backend.services.trade_mode import set_execution_mode
+from backend.services.session_engine import session_history, session_state, validate_session_config
+from backend.services.worker_protocol import ensure_demo_account, enqueue_command
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
@@ -32,8 +30,52 @@ class StartSessionRequest(BaseModel):
     max_failed_series: int = 1
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+class PreviewRequest(StartSessionRequest):
+    payout: float = Field(default=92, ge=1, le=100)
+
+
+def _bet_plan(base: float, payout: float, max_martingale: int) -> list[float]:
+    ratio = max(float(payout) / 100.0, 0.01)
+    levels = [round(float(base), 2)]
+    recovery = 0.0
+    for _level in range(1, int(max_martingale) + 1):
+        recovery += levels[-1]
+        levels.append(round(math.ceil(((recovery + base * ratio) / ratio) * 100) / 100, 2))
+    return levels
+
+
+@router.post("/preview")
+async def preview(data: PreviewRequest, _: TelegramMiniAppUser = Depends(admin_user)):
+    values = validate_session_config(data.model_dump())
+    levels = _bet_plan(values["amount"], data.payout, values["max_martingale"])
+    expected_net = round(values["amount"] * float(data.payout) / 100.0, 2)
+    projected = (
+        round(expected_net * int(values["target_wins"]), 2)
+        if values["mode"] == "count"
+        else float(values["target_profit"])
+    )
+    return {
+        "levels": levels,
+        "payout": float(data.payout),
+        "expected_net_per_winning_series": expected_net,
+        "projected_target": projected,
+        "config": values,
+    }
+
+
+def _command_key(user_id: int, command_type: str, payload: dict, provided: str | None) -> str:
+    if provided and provided.strip():
+        return provided.strip()[:128]
+    # Browser retries of the same action within a short window resolve to the
+    # same command even when an older client does not yet send an explicit key.
+    bucket = int(datetime.now(timezone.utc).timestamp() // 10)
+    raw = json.dumps(
+        {"user": int(user_id), "type": command_type, "payload": payload, "bucket": bucket},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _iso(value):
@@ -143,74 +185,66 @@ def _decorate_live_state(payload: dict) -> dict:
         amount_line = f"Следующая ставка: {next_bet:.2f}"
     if amount_line not in base_message:
         session["last_message"] = f"{base_message} · {amount_line}"
-    live_events = []
-    now = _now_iso()
-    runtime_message = str(runtime.get("message") or "").strip()
-    if runtime_message:
-        live_events.append({"id": f"runtime-{stage}", "stage": runtime.get("stage") or stage, "message": runtime_message, "created_at": runtime.get("updated_at") or now, "payload": {"live": True}})
-    live_events.append({"id": f"bet-{stage}-{session.get('current_level', 0)}", "stage": "BET", "message": amount_line, "created_at": now, "payload": {"current_bet": session.get("current_bet_amount"), "next_bet": session.get("next_bet_amount"), "level": session.get("current_level")}})
-    if stage in {"SCANNING", "MARTINGALE"}:
-        live_events.append({"id": f"scan-{stage}", "stage": "ANALYSIS", "message": "Анализ рынка активен · следующий сетап ищется сразу после закрытия предыдущей сделки", "created_at": now, "payload": {"live": True}})
-    merged = live_events + events
-    seen = set()
-    output = []
-    for event in merged:
-        key = (str(event.get("stage")), str(event.get("message")))
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(event)
-        if len(output) >= 40:
-            break
-    payload["events"] = output
-    payload["screen_notifications"] = output
+    # The journal is an audit trail: only persisted worker events are exposed.
+    # Runtime/UI helpers must never invent timestamps or pretend to be trades.
+    payload["events"] = events[:40]
+    payload["screen_notifications"] = events[:40]
     payload["session"] = session
     return payload
 
 
 @router.get("/state")
 async def state(refresh: bool = Query(False), drive: bool = Query(False), _: TelegramMiniAppUser = Depends(admin_user)):
-    tick_result = None
-    if drive:
-        try:
-            tick_result = await adaptive_drive_session_tick()
-        except Exception as exc:
-            tick_result = {"status": "ERROR", "error": type(exc).__name__}
     payload = await session_state(refresh_balance=refresh)
-    payload["driver"] = tick_result
+    payload["driver"] = {"status": "WORKER_DRIVEN", "legacy_drive_ignored": bool(drive)}
     return _decorate_live_state(payload)
 
 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
-    result = await adaptive_drive_session_tick()
-    await notify_auto_change()
-    return result
+    return {"status": "WORKER_DRIVEN"}
 
 
 @router.post("/start")
-async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admin_user)):
+async def start(
+    data: StartSessionRequest,
+    user: TelegramMiniAppUser = Depends(admin_user),
+    x_idempotency_key: str | None = Header(default=None),
+):
+    body = data.model_dump()
     try:
-        payload = await start_session(data.model_dump())
-        first_tick = None
-        if data.mode == "profit":
-            try:
-                first_tick = await drive_session_tick(min_interval_seconds=0.5)
-            except Exception as exc:
-                first_tick = {"status": "ERROR", "error": type(exc).__name__}
-            payload = await session_state()
-            payload["driver"] = first_tick
-        await notify_auto_change(wake_driver=True)
-        return _decorate_live_state(payload)
+        body = validate_session_config(body)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(422, str(exc)) from exc
+    account_id = await ensure_demo_account(int(user.id))
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type="START_SESSION",
+        payload=body,
+        idempotency_key=_command_key(int(user.id), "START_SESSION", body, x_idempotency_key),
+    )
+    payload = _decorate_live_state(await session_state())
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
+    return payload
 
 
 @router.post("/stop")
-async def stop(_: TelegramMiniAppUser = Depends(admin_user)):
-    await set_execution_mode("confirm")
-    payload = _decorate_live_state(await stop_session("USER_STOP"))
-    await notify_auto_change(wake_driver=True)
+async def stop(
+    user: TelegramMiniAppUser = Depends(admin_user),
+    x_idempotency_key: str | None = Header(default=None),
+):
+    body = {"reason": "USER_STOP"}
+    account_id = await ensure_demo_account(int(user.id))
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type="STOP_SESSION",
+        payload=body,
+        idempotency_key=_command_key(int(user.id), "STOP_SESSION", body, x_idempotency_key),
+    )
+    payload = _decorate_live_state(await session_state())
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
     return payload
 
 

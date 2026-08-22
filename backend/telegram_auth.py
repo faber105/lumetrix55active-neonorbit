@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl
 from fastapi import Header, HTTPException
 
 
-BUILTIN_ADMIN_IDS = {7591614041}
+BUILTIN_ADMIN_IDS: set[int] = set()
 
 
 def admin_ids() -> set[int]:
@@ -73,7 +73,7 @@ def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
         auth_date = int(values.get("auth_date", "0") or 0)
     except ValueError as exc:
         raise HTTPException(401, "Invalid Telegram auth date") from exc
-    max_age = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "86400"))
+    max_age = max(60, min(3600, int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", "300"))))
     if auth_date <= 0 or abs(int(time.time()) - auth_date) > max_age:
         raise HTTPException(401, "Telegram Mini App session expired")
 

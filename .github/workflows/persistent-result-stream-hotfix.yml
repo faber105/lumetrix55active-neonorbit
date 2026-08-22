@@ -1,0 +1,45 @@
+name: Persistent Pocket result stream hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/persistent-result-stream-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Reuse worker Pocket stream for deal results
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('backend/services/positions.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''async def _closed_broker_deals() -> dict[str, dict]:\n    try:\n        await market_data._refresh_private_ssid()\n        if not market_data.configured:\n            return {}\n        client = DirectDemoTradingClient(market_data.ssid)\n        try:\n            if not await client.connect(persistent=False):\n                return {}\n            deals = await client._client.get_closed_deals(listen_seconds=0.45)\n        finally:\n            await client.disconnect()\n        return {_deal_id(row): row for row in deals if isinstance(row, dict) and _deal_id(row)}\n    except Exception as exc:\n        logger.warning("Pocket closed-deals sync failed: %s", type(exc).__name__)\n        return {}\n'''
+          new = '''async def _closed_broker_deals() -> dict[str, dict]:\n    """Read closed deals from the worker's already-authenticated Pocket stream.\n\n    Creating a fresh Socket.IO session after every expiry added seconds of\n    handshake latency. The market-data client is worker-local and reused, so\n    settlement can observe the broker result on the next hot AUTO tick.\n    """\n    try:\n        await market_data._refresh_private_ssid()\n        if not market_data.configured:\n            return {}\n        client = await market_data.connect()\n        getter = getattr(client, "get_closed_deals", None)\n        if getter is None:\n            return {}\n        deals = await getter(listen_seconds=0.45)\n        return {_deal_id(row): row for row in deals if isinstance(row, dict) and _deal_id(row)}\n    except Exception as exc:\n        logger.warning("Pocket closed-deals sync failed: %s", type(exc).__name__)\n        return {}\n'''
+          if old not in text:
+              raise SystemExit('closed deal helper anchor missing')
+          text = text.replace(old, new, 1)
+          # The transient trading client is no longer needed by the settlement path.
+          text = text.replace('from backend.services.pocket_demo_trading import DirectDemoTradingClient\n', '', 1)
+          p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend worker
+          grep -q 'client = await market_data.connect()' backend/services/positions.py
+          ! grep -q 'DirectDemoTradingClient' backend/services/positions.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/positions.py
+          git commit -m "Read Pocket results from persistent worker stream"
+          git push origin HEAD:codex-windows-worker-rebuild

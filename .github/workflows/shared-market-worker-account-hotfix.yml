@@ -1,0 +1,50 @@
+name: Shared worker market account routing
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/shared-market-worker-account-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Route read-only market commands to the leased worker account
+        shell: python
+        run: |
+          from pathlib import Path
+          files = [
+              Path('backend/routers/market.py'),
+              Path('backend/routers/home.py'),
+              Path('backend/routers/live.py'),
+              Path('backend/routers/signals.py'),
+          ]
+          for p in files:
+              text = p.read_text(encoding='utf-8')
+              # The Windows process owns one Pocket DEMO credential/lease. Any
+              # authenticated app user may request read-only market analysis,
+              # but commands must be queued to that leased broker account rather
+              # than creating an unserviced broker_account for every Telegram id.
+              text = text.replace('account_id = await ensure_demo_account(int(user.id))', 'account_id = await ensure_demo_account()')
+              text = text.replace('account_id = await ensure_demo_account(int(user_id))', 'account_id = await ensure_demo_account()')
+              p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend
+          ! grep -R 'ensure_demo_account(int(user.id))' backend/routers/market.py backend/routers/home.py backend/routers/live.py backend/routers/signals.py
+          ! grep -R 'ensure_demo_account(int(user_id))' backend/routers/market.py backend/routers/home.py backend/routers/live.py backend/routers/signals.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/routers/market.py backend/routers/home.py backend/routers/live.py backend/routers/signals.py
+          git commit -m "Route market commands to the leased worker account"
+          git push origin HEAD:codex-windows-worker-rebuild

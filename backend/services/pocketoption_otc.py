@@ -29,9 +29,6 @@ OTC_ASSETS: Dict[str, str] = {
 }
 DISPLAY_TO_ASSET = {v.replace(' OTC', ''): k for k, v in OTC_ASSETS.items()}
 TF_SECONDS = {'15s': 15, '1m': 60, '3m': 180, '5m': 300, '15m': 900, '1h': 3600}
-PRIVATE_SSID_KEY = '__runtime_pocket__'
-
-
 class MarketDataUnavailable(RuntimeError):
     pass
 
@@ -76,7 +73,9 @@ class PocketOptionOTCService:
         self._last_error = None
         self._auth_kind = 'none'
         self._private_secret_loaded = False
-        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip())
+        self._runtime_role = os.getenv('APP_RUNTIME_ROLE', 'web').strip().lower()
+        # Pocket credentials are local-worker secrets and are ignored by web/serverless runtimes.
+        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip() if self._runtime_role == 'worker' else '')
 
     def _apply_ssid(self, value: str) -> None:
         self.ssid = (value or '').strip()
@@ -99,26 +98,8 @@ class PocketOptionOTCService:
             self._auth_kind = 'raw-session'
 
     async def _refresh_private_ssid(self) -> None:
-        if self._private_secret_loaded:
-            return
-        try:
-            from backend.models.db_models import AsyncSessionLocal, MLState
-            async with AsyncSessionLocal() as db:
-                state = await db.get(MLState, PRIVATE_SSID_KEY)
-                if state and state.payload and state.payload.strip():
-                    private_ssid = state.payload.strip()
-                    if private_ssid != self.ssid:
-                        old, self._client = self._client, None
-                        if old is not None:
-                            try:
-                                await old.disconnect()
-                            except Exception:
-                                pass
-                        self._apply_ssid(private_ssid)
-                    logger.info('Pocket Option market session loaded (%s)', self._auth_kind)
-            self._private_secret_loaded = True
-        except Exception as exc:
-            logger.warning('Cannot load Pocket Option market session: %s', type(exc).__name__)
+        # Intentionally never load credentials from the shared database.
+        self._private_secret_loaded = True
 
     @property
     def configured(self):
@@ -152,6 +133,17 @@ class PocketOptionOTCService:
         websocket._alphapulse_regular_42_patch = True
 
     def _make_client(self):
+        # The worker owns the broker connection. Always use AlphaPulse's direct
+        # Socket.IO transport there so candles, telemetry, settlement and orders
+        # share the same handshake semantics. Falling back to the legacy library
+        # after a successful direct auth caused repeated auth timeouts in the
+        # persistent Windows runtime.
+        if self._runtime_role == 'worker':
+            from backend.services.pocket_direct import DirectPocketOptionClient
+
+            self._auth_kind = 'direct-worker'
+            return DirectPocketOptionClient(self.ssid, is_demo=self.demo)
+
         from pocketoptionapi_async.client import AsyncPocketOptionClient
 
         payload = _parse_wire_auth(self.ssid)
@@ -202,7 +194,7 @@ class PocketOptionOTCService:
                 raise MarketDataUnavailable('Pocket Option market source is not configured')
             try:
                 client = self._make_client()
-                ok = await asyncio.wait_for(client.connect(persistent=False), timeout=35)
+                ok = await asyncio.wait_for(client.connect(persistent=True), timeout=35)
                 if not ok:
                     raise RuntimeError('Pocket Option session rejected or authentication timed out')
                 self._client = client
@@ -238,7 +230,7 @@ class PocketOptionOTCService:
             'connected': self._client is not None and bool(getattr(self._client, 'is_connected', True)),
             'auth_format': self._auth_kind,
             'demo': self.demo,
-            'provider': 'Pocket Option web-session stream (read-only, unofficial client)',
+            'provider': 'Pocket Option direct worker stream' if self._runtime_role == 'worker' else 'Pocket Option web-session stream (read-only, unofficial client)',
             'last_error': self._last_error,
         }
 

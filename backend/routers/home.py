@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.models.db_models import utcnow
 from backend.services.control import get_control, update_control
-from backend.services.pocketoption_otc import DISPLAY_TO_ASSET, MarketDataUnavailable, OTC_ASSETS, TF_SECONDS
-from backend.services.scanner import notify_signal
-from backend.services.signal_engine import signal_engine
-from backend.services.signal_store import save_signal
+from backend.services.pocketoption_otc import DISPLAY_TO_ASSET
+from backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account
 from backend.telegram_auth import TelegramMiniAppUser, admin_user, telegram_user
 
 router = APIRouter()
 MANUAL_TIMEFRAMES = {'15s', '1m', '3m', '5m', '15m'}
-MIN_MANUAL_CONFIDENCE = 70.0
-VIP_CONFIDENCE = 82.0
 
 
 class AnalyzeRequest(BaseModel):
@@ -25,36 +19,24 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.post('/analyze')
-async def analyze(req: AnalyzeRequest, _: TelegramMiniAppUser = Depends(telegram_user)):
-    asset = DISPLAY_TO_ASSET.get(req.pair.replace(' OTC', '').strip())
-    if not asset:
-        raise HTTPException(400, 'Unsupported OTC pair')
-    if req.timeframe not in MANUAL_TIMEFRAMES or req.timeframe not in TF_SECONDS:
+async def analyze(req: AnalyzeRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
+    if req.timeframe not in MANUAL_TIMEFRAMES:
         raise HTTPException(400, 'Unsupported timeframe')
+    if req.pair.replace(' OTC', '').strip() not in DISPLAY_TO_ASSET:
+        raise HTTPException(400, 'Unsupported OTC pair')
     try:
-        candidate = await signal_engine.evaluate_asset_composite(asset, req.timeframe)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    if not candidate or float(candidate.get('confidence') or 0) < MIN_MANUAL_CONFIDENCE:
-        return {
-            'status': 'NO_SIGNAL',
-            'pair': OTC_ASSETS[asset],
-            'timeframe': req.timeframe,
-            'signal': None,
-            'reason': 'Сейчас нет подтверждённой точки входа. Trend, momentum и volatility-фильтры не дали достаточного совпадения.',
-        }
-    signal, duplicate = await save_signal(candidate, is_vip=False)
-    return {
-        'status': 'SIGNAL',
-        'signal': signal,
-        'duplicate': duplicate,
-        'analysis': {
-            'engine': 'Composite Analysis',
-            'strategy': candidate.get('strategy_label'),
-            'confirmations': candidate.get('confirmations', []),
-            'indicators': candidate.get('indicators', {}),
-        },
-    }
+        account_id = await ensure_demo_account()
+        command = await enqueue_command(
+            account_id=account_id,
+            command_type='ANALYZE_SIGNAL',
+            payload=req.model_dump(),
+            idempotency_key=f'manual:{int(user.id)}:{req.pair}:{req.timeframe}:{int(utcnow().timestamp() // 3)}',
+        )
+        return await await_command(int(command['id']), account_id)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Windows worker is not responding') from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, 'Windows worker could not analyze the market') from exc
 
 
 @router.get('/vip-status')
@@ -82,55 +64,25 @@ async def vip_status(_: TelegramMiniAppUser = Depends(telegram_user)):
 
 @router.post('/vip-scan-now')
 async def vip_scan_now(_: TelegramMiniAppUser = Depends(admin_user)):
-    """Run the same 5m VIP engine used by the background scanner.
+    """Queue the next VIP cycle for the permanent Windows worker.
 
-    The older /admin/vip-now path used the generic selected admin timeframe and
-    strategy, so it could accidentally create a 1m signal while calling it VIP.
-    This endpoint always runs the real VIP 5m scan and sends the same Telegram
-    notification as the scheduled scanner.
+    The public web runtime never scans Pocket directly. The worker maintenance
+    loop notices the due timestamp within a few seconds and runs the same VIP 5m
+    engine used by scheduled delivery.
     """
     control = await get_control()
     if control is None:
         raise HTTPException(503, 'VIP control is not configured')
-    try:
-        candidate = await signal_engine.scan_vip(list(OTC_ASSETS.keys()))
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-
     now = utcnow()
-    interval = max(60, min(86400, int(control.vip_interval_seconds or 300)))
-    next_vip = now + timedelta(seconds=interval)
-    if not candidate or float(candidate.get('confidence') or 0) < VIP_CONFIDENCE:
-        await update_control(
-            vip_enabled=True,
-            last_vip_at=now,
-            last_vip_status='NO_CONFIRMED_SETUP',
-            next_vip_at=next_vip,
-            last_scan_at=now,
-        )
-        return {
-            'status': 'NO_SIGNAL',
-            'timeframe': '5m',
-            'threshold': VIP_CONFIDENCE,
-            'next_vip_at': next_vip.isoformat() + 'Z',
-        }
-
-    signal, duplicate = await save_signal(candidate, is_vip=True)
-    notification = {'notified': 0, 'notification_errors': 0}
-    if not duplicate:
-        from bot.main import bot
-        notification = await notify_signal(bot, signal)
     await update_control(
         vip_enabled=True,
-        last_vip_at=now,
-        last_vip_status='DUPLICATE' if duplicate else 'ISSUED',
-        next_vip_at=next_vip,
-        last_scan_at=now,
+        next_vip_at=now,
+        last_vip_status='QUEUED_FOR_WORKER',
     )
     return {
-        'status': 'DUPLICATE' if duplicate else 'SIGNAL',
-        'signal': signal,
-        'duplicate': duplicate,
-        'next_vip_at': next_vip.isoformat() + 'Z',
-        **notification,
+        'status': 'QUEUED',
+        'worker_driven': True,
+        'timeframe': '5m',
+        'strategy': 'VIP 5M Confluence',
+        'queued_at': now.isoformat() + 'Z',
     }

@@ -1,0 +1,66 @@
+name: Single strategy AUTO hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/single-strategy-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Enforce one selected strategy
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('miniapp/src/App.jsx')
+          text = p.read_text(encoding='utf-8')
+          old = 'const AUTO_STRATEGIES=[{id:"smart_confluence",icon:"✦",name:"Mixed Smart",desc:"Быстрый поиск по всем стратегиям + повторное подтверждение перед входом",tone:"gold"},{id:"trend_pulse",icon:"↗",name:"Trend Pulse",desc:"EMA 9/21/50/200 · ADX/DMI · MACD · RSI",tone:"violet"},{id:"range_reversal",icon:"↔",name:"Range Reversal",desc:"Bollinger · RSI · слабый ADX · rejection",tone:"cyan"},{id:"volatility_breakout",icon:"⚡",name:"Volatility Breakout",desc:"Donchian · ATR expansion · DMI · momentum",tone:"orange"}];'
+          new = 'const AUTO_STRATEGIES=[{id:"trend_pulse",icon:"↗",name:"Trend Pulse",desc:"EMA 9/21/50/200 · ADX/DMI · MACD · RSI",tone:"violet"},{id:"range_reversal",icon:"↔",name:"Range Reversal",desc:"Bollinger · RSI · слабый ADX · rejection",tone:"cyan"},{id:"volatility_breakout",icon:"⚡",name:"Volatility Breakout",desc:"Donchian · ATR expansion · DMI · momentum",tone:"orange"}];'
+          if old in text:
+              text = text.replace(old, new, 1)
+          text = text.replace('const strategyLabel=value=>String(value||"").split("+").filter(Boolean).map(id=>STRATEGY_NAME[id]||id).join(" + ")||"—";', 'const strategyLabel=value=>STRATEGY_NAME[String(value||"")]||String(value||"—");', 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('backend/services/session_engine.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}\nCOUNT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}', 'PROFIT_STRATEGIES = set(AUTO_STRATEGIES)\nCOUNT_STRATEGIES = set(AUTO_STRATEGIES)', 1)
+          text = text.replace('strategy = str(config.get("strategy") or ("smart_confluence" if str(config.get("mode") or "count").lower() == "count" else "trend_pulse"))', 'strategy = str(config.get("strategy") or "trend_pulse")', 1)
+          old = '''    # Fast COUNT mode (15s/1m/3m) uses a mixed strategy pool. We first\n    # rank the strongest setups across all smart strategies, then re-check only\n    # the selected pair/strategy before scheduling the exact candle-boundary entry.\n    # This avoids waiting for one rare strategy while still requiring confirmation.\n    mixed_count = strategy == "smart_confluence"\n    if mixed_count:\n        candidates = await signal_engine.scan_best_candidates(timeframe, scan_assets)\n        threshold = COUNT_MIN_CONFIDENCE\n        strategy = "smart_confluence"\n    else:\n        candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n        threshold = COUNT_MIN_CONFIDENCE if session["mode"] == "count" else PROFIT_MIN_CONFIDENCE\n'''
+          new = '''    # Exactly one user-selected strategy owns the session. No hidden\n    # strategy pool is allowed to change the setup model mid-session.\n    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n    threshold = COUNT_MIN_CONFIDENCE if session["mode"] == "count" else PROFIT_MIN_CONFIDENCE\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('strategy = str(session.get("strategy") or "smart_confluence")', 'strategy = str(session.get("strategy") or "trend_pulse")', 1)
+          old = '''    mixed_count = strategy == "smart_confluence"\n\n    if mixed_count:\n        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)\n        threshold = COUNT_MIN_CONFIDENCE\n    elif strategy == "smart_confluence":\n        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)\n        threshold = PROFIT_MIN_CONFIDENCE\n    else:\n        candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n        threshold = PROFIT_MIN_CONFIDENCE\n'''
+          new = '''    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n    threshold = COUNT_MIN_CONFIDENCE if str(session.get("mode")) == "count" else PROFIT_MIN_CONFIDENCE\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend worker
+          grep -q 'COUNT_STRATEGIES = set(AUTO_STRATEGIES)' backend/services/session_engine.py
+          ! grep -q 'id:"smart_confluence"' miniapp/src/App.jsx
+          ! grep -q 'scan_best_candidates(timeframe, scan_assets)' backend/services/session_engine.py
+          ! grep -q 'scan_best_candidates(timeframe, eligible_assets)' backend/services/preload_next.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add miniapp/src/App.jsx backend/services/session_engine.py backend/services/preload_next.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Enforce one AUTO strategy per session"
+          git push origin HEAD:codex-windows-worker-rebuild

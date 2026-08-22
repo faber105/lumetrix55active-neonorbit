@@ -1,0 +1,65 @@
+name: Broker recovery price hardening
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/recovery-price-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Preserve broker entry price during recovery
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('backend/services/pocket_demo_trading.py')
+          text = p.read_text(encoding='utf-8')
+          opened = '''            if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:\n                return self._deal_to_order_result(deal, request_id, closed=False)\n'''
+          opened_new = '''            if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:\n                self.last_open_payload = deal\n                self.last_open_price = self._open_price(deal)\n                return self._deal_to_order_result(deal, request_id, closed=False)\n'''
+          closed = '''            if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:\n                return self._deal_to_order_result(deal, request_id, closed=True)\n'''
+          closed_new = '''            if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:\n                self.last_open_payload = deal\n                self.last_open_price = self._open_price(deal)\n                return self._deal_to_order_result(deal, request_id, closed=True)\n'''
+          if opened in text: text = text.replace(opened, opened_new, 1)
+          if closed in text: text = text.replace(closed, closed_new, 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('backend/services/execution_recovery.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace(
+              'async def _attach_recovered_position(execution: TradeExecution, signal: Signal, recovered) -> dict:',
+              'async def _attach_recovered_position(execution: TradeExecution, signal: Signal, recovered, recovered_entry_price: float | None = None) -> dict:',
+              1,
+          )
+          old = '''    entry_price = signal.entry_price or signal.analysis_price\n    if entry_price is None:\n        try:\n            entry_price = await market_data.latest_price(signal.asset)\n        except Exception:\n            entry_price = 1.0\n    payout = await _runtime_payout()\n'''
+          new = '''    entry_price = recovered_entry_price or signal.entry_price or signal.analysis_price\n    if entry_price is None:\n        # Do not invent a price for a real broker execution. If the broker deal\n        # does not expose one, use a live quote only as a last observable value.\n        try:\n            entry_price = await market_data.latest_price(signal.asset)\n        except Exception:\n            return {"status": "UNRESOLVED_PRICE", "execution_id": int(execution.id)}\n    payout = await _runtime_payout()\n'''
+          if old in text: text = text.replace(old, new, 1)
+          text = text.replace(
+              'attached = await _attach_recovered_position(execution, signal, recovered)',
+              'attached = await _attach_recovered_position(execution, signal, recovered, client.last_open_price)',
+              1,
+          )
+          p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend worker
+          grep -q 'UNRESOLVED_PRICE' backend/services/execution_recovery.py
+          grep -q 'client.last_open_price' backend/services/execution_recovery.py
+          grep -q 'self.last_open_price = self._open_price(deal)' backend/services/pocket_demo_trading.py
+          ! grep -q 'entry_price = 1.0' backend/services/execution_recovery.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/pocket_demo_trading.py backend/services/execution_recovery.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Recover broker entry price without invented values"
+          git push origin HEAD:codex-windows-worker-rebuild

@@ -1,56 +1,19 @@
-name: AlphaPulse OTC Scanner
+name: AlphaPulse OTC Scanner (retired)
 
+# Persistent AUTO scanning is owned exclusively by the Windows worker.
+# Keep this workflow as a manual diagnostic stub so merging the worker rebuild
+# cannot leave the old scheduled Render/GitHub driver running in parallel.
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'bot/**'
-      - 'api/**'
-      - 'Dockerfile'
-      - 'render.yaml'
-      - '.github/workflows/otc-scan.yml'
 
 permissions:
   contents: read
-  id-token: write
-
-concurrency:
-  group: alphapulsesbot-scanner-${{ github.event_name }}
-  cancel-in-progress: false
 
 jobs:
-  scan:
+  retired:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
     steps:
-      - name: Keep Render awake and verify realtime driver
-        env:
-          HEALTH_URL: https://alphapulse-faber105-realtime.onrender.com/health
-          SCAN_URL: https://alphapulse-faber105-realtime.onrender.com/api/internal/auto-tick
-          EVENT_NAME: ${{ github.event_name }}
-        shell: bash
+      - name: Explain runtime ownership
         run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then sleep 90; fi
-
-          HEALTH=$(curl --fail --silent --show-error --retry 2 --retry-delay 3 \
-            --connect-timeout 8 --max-time 90 "$HEALTH_URL")
-          RUNNING=$(python3 -c 'import json,sys; print(str(bool(json.load(sys.stdin).get("auto_realtime",{}).get("running"))).lower())' <<<"$HEALTH")
-          if [ "$RUNNING" = "true" ]; then
-            exit 0
-          fi
-
-          TOKEN_JSON=$(curl --fail --silent --show-error \
-            --connect-timeout 5 --max-time 15 \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=alphapulsesbot-scanner")
-          TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<<"$TOKEN_JSON")
-          curl --fail --silent --show-error --retry 1 \
-            --connect-timeout 5 --max-time 30 \
-            -X POST "$SCAN_URL" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json"
+          echo "Legacy cloud AUTO scanner is retired."
+          echo "Run AlphaPulse AUTO only through the leased Windows worker."

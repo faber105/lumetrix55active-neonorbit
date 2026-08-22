@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -10,28 +8,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.db_models import Signal, SignalDirection, SignalResult, StrategyPerformance
+from backend.models.db_models import Signal
 from backend.services.database import get_db
 from backend.services.online_ml import get_model
-from backend.services.pocketoption_otc import DISPLAY_TO_ASSET, MarketDataUnavailable, OTC_ASSETS, TF_SECONDS, market_data
-from backend.services.signal_engine import signal_engine
-from backend.services.strategies import STRATEGY_LABELS, STRATEGIES
-from backend.telegram_auth import TelegramMiniAppUser, telegram_user
+from backend.services.pocketoption_otc import OTC_ASSETS
+from backend.services.strategies import STRATEGY_LABELS
+from backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account
+from backend.telegram_auth import TelegramMiniAppUser, admin_user, telegram_user
 
 router = APIRouter()
-logger = logging.getLogger('alphapulse.signals')
 
 
-def now():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def parse(value):
-    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
-
-
-def out(signal):
+def out(signal: Signal) -> dict:
     return {
         'id': signal.id,
         'pair': signal.pair,
@@ -57,98 +45,47 @@ def out(signal):
     }
 
 
-async def save_candidate(db, candidate):
-    entry_time = parse(candidate['entry_time'])
-    expiry_time = parse(candidate['expiry_time'])
-    existing = (
-        await db.execute(
-            select(Signal).where(
-                Signal.asset == candidate['asset'],
-                Signal.timeframe == candidate['timeframe'],
-                Signal.strategy == candidate['strategy'],
-                Signal.entry_time == entry_time,
-            )
-        )
-    ).scalar_one_or_none()
-    if existing:
-        return existing, True
-
-    indicators = candidate.get('indicators', {})
-    signal = Signal(
-        pair=candidate['pair'],
-        asset=candidate['asset'],
-        timeframe=candidate['timeframe'],
-        strategy=candidate['strategy'],
-        direction=SignalDirection(candidate['direction']),
-        confidence=candidate['confidence'],
-        model_probability=candidate.get('model_probability'),
-        is_vip=candidate['confidence'] >= 80,
-        rsi=indicators.get('rsi'),
-        ema_signal='Bull' if candidate['direction'] == 'BUY' else 'Bear',
-        macd_signal='Positive' if candidate['direction'] == 'BUY' else 'Negative',
-        trend_strength=indicators.get('atr_expansion') or indicators.get('ema_gap_atr'),
-        reason=candidate['reason'],
-        features_json=json.dumps(candidate['features']),
-        analysis_price=candidate.get('analysis_price'),
-        entry_time=entry_time,
-        expiry_time=expiry_time,
-        result=SignalResult.PENDING,
+async def _worker_call(user_id: int, command_type: str, payload: dict, key: str, timeout: float = 25.0) -> dict:
+    # Read-only market analysis for all authenticated Mini App users is served by
+    # the one broker account whose lease is owned by the Windows worker. The
+    # requesting user id remains part of command idempotency but never creates a
+    # second, unserviced Pocket credential slot.
+    account_id = await ensure_demo_account()
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type=command_type,
+        payload=payload,
+        idempotency_key=key[:128],
     )
-    db.add(signal)
-    await db.commit()
-    await db.refresh(signal)
-    return signal, False
+    try:
+        return await await_command(int(command['id']), account_id, timeout_seconds=timeout)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Windows worker is not responding') from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, 'Windows worker could not complete market analysis') from exc
 
 
 class AnalyzeRequest(BaseModel):
     pair: str
     timeframe: str = '1m'
-    strategy: str = 'ema_trend'
+    strategy: str = 'trend_pulse'
     min_confidence: float = Field(0.0, ge=0, le=99)
     user_id: Optional[int] = None
 
 
 @router.post('/analyze')
-async def analyze(
-    req: AnalyzeRequest,
-    _: TelegramMiniAppUser = Depends(telegram_user),
-    db: AsyncSession = Depends(get_db),
-):
-    asset = DISPLAY_TO_ASSET.get(req.pair.replace(' OTC', '').strip())
-    if not asset:
-        raise HTTPException(400, 'Unsupported OTC pair')
-    if req.timeframe not in TF_SECONDS:
-        raise HTTPException(400, 'Unsupported timeframe')
-    if req.strategy not in STRATEGIES:
-        raise HTTPException(400, 'Unknown strategy')
-    try:
-        candidate = await signal_engine.evaluate_asset(asset, req.timeframe, req.strategy)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    if not candidate:
-        return {
-            'status': 'NO_SIGNAL',
-            'signal': None,
-            'pair': OTC_ASSETS[asset],
-            'strategy': req.strategy,
-            'timeframe': req.timeframe,
-            'reason': 'Условия выбранной стратегии сейчас не подтверждены.',
-        }
-    if float(candidate.get('confidence') or 0) < req.min_confidence:
-        return {
-            'status': 'NO_SIGNAL',
-            'signal': None,
-            'pair': OTC_ASSETS[asset],
-            'strategy': req.strategy,
-            'timeframe': req.timeframe,
-            'confidence': candidate.get('confidence'),
-            'reason': 'Ситуация есть, но качество ниже минимального порога.',
-        }
-    signal, duplicate = await save_candidate(db, candidate)
-    payload = out(signal)
-    payload['source'] = 'manual'
-    payload['indicators'] = candidate.get('indicators', {})
-    return {'status': 'SIGNAL', 'signal': payload, 'duplicate': duplicate}
+async def analyze(req: AnalyzeRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
+    payload = req.model_dump(exclude={'user_id'})
+    bucket = int(datetime.now(timezone.utc).timestamp() // 2)
+    result = await _worker_call(
+        int(user.id),
+        'ANALYZE_SIGNAL',
+        payload,
+        f'analyze:{int(user.id)}:{req.pair}:{req.timeframe}:{req.strategy}:{bucket}',
+    )
+    if result.get('signal'):
+        result['signal']['source'] = 'manual'
+    return result
 
 
 class StrategyScanRequest(BaseModel):
@@ -158,151 +95,60 @@ class StrategyScanRequest(BaseModel):
 
 
 @router.post('/scan-strategy')
-async def scan_strategy(
-    req: StrategyScanRequest,
-    _: TelegramMiniAppUser = Depends(telegram_user),
-    db: AsyncSession = Depends(get_db),
-):
-    if req.strategy not in STRATEGIES:
-        raise HTTPException(400, 'Unknown strategy')
-    if req.timeframe not in TF_SECONDS:
-        raise HTTPException(400, 'Unsupported timeframe')
-    try:
-        candidate = await signal_engine.scan_strategy(
-            req.timeframe,
-            list(OTC_ASSETS.keys()),
-            req.strategy,
-        )
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    if not candidate or float(candidate.get('confidence') or 0) < req.min_confidence:
-        return {
-            'status': 'NO_SIGNAL',
-            'signal': None,
-            'strategy': req.strategy,
-            'timeframe': req.timeframe,
-            'threshold': req.min_confidence,
-        }
-    signal, duplicate = await save_candidate(db, candidate)
-    payload = out(signal)
-    payload['source'] = 'vip' if payload['is_vip'] else 'scanner'
-    return {'status': 'SIGNAL', 'signal': payload, 'duplicate': duplicate}
+async def scan_strategy(req: StrategyScanRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
+    bucket = int(datetime.now(timezone.utc).timestamp() // 3)
+    return await _worker_call(
+        int(user.id),
+        'SCAN_STRATEGY',
+        req.model_dump(),
+        f'scan-strategy:{int(user.id)}:{req.strategy}:{req.timeframe}:{bucket}',
+    )
 
 
 class ScanRequest(BaseModel):
     timeframe: str = '1m'
     assets: list[str] = Field(default_factory=lambda: list(OTC_ASSETS.keys()))
-    min_confidence: float = 72.0
+    min_confidence: float = Field(72.0, ge=0, le=99)
 
 
 @router.post('/scan-best')
-async def scan_best(
-    req: ScanRequest,
-    _: TelegramMiniAppUser = Depends(telegram_user),
-    db: AsyncSession = Depends(get_db),
-):
-    assets = [asset for asset in req.assets if asset in OTC_ASSETS]
-    try:
-        candidate = await signal_engine.scan_best(req.timeframe, assets)
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-    if not candidate or candidate['confidence'] < req.min_confidence:
-        return {'status': 'NO_SIGNAL', 'signal': None}
-    signal, duplicate = await save_candidate(db, candidate)
-    return {'status': 'SIGNAL', 'signal': out(signal), 'duplicate': duplicate}
+async def scan_best(req: ScanRequest, user: TelegramMiniAppUser = Depends(telegram_user)):
+    bucket = int(datetime.now(timezone.utc).timestamp() // 3)
+    return await _worker_call(
+        int(user.id),
+        'SCAN_BEST',
+        req.model_dump(),
+        f'scan-best:{int(user.id)}:{req.timeframe}:{bucket}',
+    )
 
 
 @router.post('/reconcile')
-async def reconcile(db: AsyncSession = Depends(get_db)):
-    pending = (
-        await db.execute(
-            select(Signal)
-            .where(Signal.result == SignalResult.PENDING)
-            .order_by(Signal.entry_time)
-            .limit(100)
-        )
-    ).scalars().all()
-
-    closed = []
-    entered = 0
-    trained = 0
-    errors = 0
-    current = now()
-
-    for signal in pending:
-        try:
-            if signal.entry_price is None and signal.entry_time <= current:
-                signal.entry_price = await market_data.boundary_price(signal.asset, signal.entry_time)
-                entered += 1
-
-            if signal.entry_price is not None and signal.expiry_time <= current:
-                signal.close_price = await market_data.boundary_price(signal.asset, signal.expiry_time)
-                delta = signal.close_price - signal.entry_price
-                epsilon = max(abs(signal.entry_price) * 1e-10, 1e-10)
-
-                if abs(delta) <= epsilon:
-                    signal.result = SignalResult.DRAW
-                elif signal.direction == SignalDirection.BUY:
-                    signal.result = SignalResult.WIN if delta > 0 else SignalResult.LOSS
-                else:
-                    signal.result = SignalResult.WIN if delta < 0 else SignalResult.LOSS
-
-                signal.closed_at = current
-                closed.append(out(signal))
-
-                performance = (
-                    await db.execute(
-                        select(StrategyPerformance).where(StrategyPerformance.strategy == signal.strategy)
-                    )
-                ).scalar_one_or_none()
-                if performance is None:
-                    performance = StrategyPerformance(strategy=signal.strategy, samples=0, wins=0, losses=0, draws=0)
-                    db.add(performance)
-
-                if signal.result in {SignalResult.WIN, SignalResult.LOSS} and signal.trained_at is None:
-                    await get_model(signal.strategy).learn(
-                        json.loads(signal.features_json),
-                        signal.result == SignalResult.WIN,
-                    )
-                    signal.trained_at = current
-                    trained += 1
-                    performance.samples = int(performance.samples or 0) + 1
-                    if signal.result == SignalResult.WIN:
-                        performance.wins = int(performance.wins or 0) + 1
-                    else:
-                        performance.losses = int(performance.losses or 0) + 1
-                elif signal.result == SignalResult.DRAW:
-                    performance.draws = int(performance.draws or 0) + 1
-        except MarketDataUnavailable as exc:
-            logger.warning('Reconcile market data unavailable for signal %s: %s', signal.id, exc)
-            continue
-        except Exception as exc:
-            errors += 1
-            logger.exception('Reconcile failed for signal id=%s asset=%s strategy=%s: %s', signal.id, signal.asset, signal.strategy, exc)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            continue
-
-    await db.commit()
-    return {
-        'entered': entered,
-        'closed': len(closed),
-        'trained': trained,
-        'errors': errors,
-        'closed_signals': closed,
-    }
+async def reconcile(user: TelegramMiniAppUser = Depends(admin_user)):
+    bucket = int(datetime.now(timezone.utc).timestamp() // 3)
+    return await _worker_call(
+        int(user.id),
+        'RECONCILE_SIGNALS',
+        {},
+        f'reconcile-signals:{int(user.id)}:{bucket}',
+    )
 
 
 @router.get('/history')
-async def history(limit: int = Query(30, ge=1, le=200), db: AsyncSession = Depends(get_db)):
+async def history(
+    limit: int = Query(30, ge=1, le=200),
+    _: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
     rows = (await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(limit))).scalars().all()
     return [out(signal) for signal in rows]
 
 
 @router.get('/vip')
-async def vip(limit: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_db)):
+async def vip(
+    limit: int = Query(20, ge=1, le=100),
+    _: TelegramMiniAppUser = Depends(telegram_user),
+    db: AsyncSession = Depends(get_db),
+):
     rows = (
         await db.execute(
             select(Signal)
@@ -315,7 +161,7 @@ async def vip(limit: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(g
 
 
 @router.get('/ml')
-async def ml():
+async def ml(_: TelegramMiniAppUser = Depends(telegram_user)):
     result = {}
     for key in STRATEGY_LABELS:
         model = get_model(key)

@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal, utcnow
-from backend.routers.signals import out, save_candidate
+from backend.routers.signals import out
 from backend.services.auto_trade import (
     MIN_AUTO_PAYOUT,
-    execute_confirmed_signal,
     get_auto_trade_control,
-    get_demo_account_snapshot,
     latest_execution,
-    maybe_execute_signal,
     serialize_auto_trade,
-    trading_is_demo,
     update_auto_trade_control,
 )
 from backend.services.control import (
@@ -26,9 +20,6 @@ from backend.services.control import (
     serialize_control,
     update_control,
 )
-from backend.services.pocketoption_otc import MarketDataUnavailable, OTC_ASSETS, market_data
-from backend.services.scanner import notify_signal
-from backend.services.signal_engine import signal_engine
 from backend.services.trade_mode import (
     get_execution_mode,
     get_trade_account_mode,
@@ -36,10 +27,11 @@ from backend.services.trade_mode import (
     set_trade_account_mode,
 )
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
+from backend.services.worker_protocol import ensure_demo_account, realtime_snapshot
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
-VIP_CONFIDENCE = 80.0
+VIP_CONFIDENCE = 82.0
 REGULAR_CONFIDENCE = 72.0
 HUNT_REGULAR = "HUNT_REGULAR"
 HUNT_VIP = "HUNT_VIP"
@@ -61,107 +53,26 @@ class ControlPatch(BaseModel):
     execution_mode: str | None = None
 
 
-async def _scan_and_publish(*, vip: bool) -> dict:
-    control = await get_control()
-    if control is None:
-        raise HTTPException(503, "Admin control is not configured")
+async def _worker_state(user_id: int) -> dict:
     try:
-        candidate = await signal_engine.scan_strategy(
-            control.selected_timeframe,
-            list(OTC_ASSETS.keys()),
-            control.selected_strategy,
-        )
-    except MarketDataUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
-
-    threshold = VIP_CONFIDENCE if vip else REGULAR_CONFIDENCE
-    if not candidate or float(candidate.get("confidence") or 0) < threshold:
-        if vip:
-            now = utcnow()
-            await update_control(
-                last_vip_at=now,
-                last_vip_status="NO_CONFIRMED_SETUP",
-                next_vip_at=now + timedelta(seconds=max(60, int(control.vip_interval_seconds or 300))),
-                last_scan_at=now,
-            )
-        return {
-            "status": "NO_SIGNAL", "vip": vip, "strategy": control.selected_strategy,
-            "timeframe": control.selected_timeframe, "threshold": threshold,
-            "auto_trade": {"status": "NO_SIGNAL"},
-        }
-
-    async with AsyncSessionLocal() as db:
-        row, duplicate = await save_candidate(db, candidate)
-        signal = out(row)
-
-    notification = {"notified": 0, "notification_errors": 0}
-    trade = {"status": "DUPLICATE"} if duplicate else await maybe_execute_signal(signal)
-    if not duplicate:
-        from bot.main import bot
-        notification = await notify_signal(bot, signal)
-
-    now = utcnow()
-    if vip:
-        await update_control(
-            last_vip_at=now,
-            last_vip_status="DUPLICATE" if duplicate else "ISSUED",
-            next_vip_at=now + timedelta(seconds=max(60, int(control.vip_interval_seconds or 300))),
-            last_scan_at=now,
-        )
-    else:
-        await update_control(last_scan_at=now)
-    return {
-        "status": "SIGNAL", "vip": bool(signal.get("is_vip")), "duplicate": duplicate,
-        "signal": signal, "auto_trade": trade, **notification,
-    }
+        account_id = await ensure_demo_account(int(user_id))
+        return await realtime_snapshot(account_id)
+    except Exception:
+        return {"worker": {"status": "OFFLINE"}, "runtime": {}}
 
 
-async def _start_hunt(*, vip: bool) -> dict:
-    control = await get_control()
-    if control is None:
-        raise HTTPException(503, "Admin control is not configured")
-    hunt_status = HUNT_VIP if vip else HUNT_REGULAR
-    now = utcnow()
-    changes = {"last_vip_status": hunt_status, "last_scan_at": now}
-    if vip:
-        changes["vip_enabled"] = True
-        changes["next_vip_at"] = now
-    else:
-        changes["regular_enabled"] = True
-    await update_control(**changes)
-
-    result = await _scan_and_publish(vip=vip)
-    if result.get("status") == "SIGNAL" and not result.get("duplicate"):
-        auto = await get_auto_trade_control()
-        auto_active = bool(auto and auto.enabled and await get_execution_mode() == "auto")
-        await update_control(last_vip_status=hunt_status if auto_active else HUNT_FOUND, last_scan_at=utcnow())
-        result["hunt"] = {
-            "active": auto_active,
-            "kind": "vip" if vip else "regular",
-            "status": hunt_status if auto_active else HUNT_FOUND,
-        }
-        return result
-
-    now = utcnow()
-    keep = {"last_vip_status": hunt_status, "last_scan_at": now}
-    if vip:
-        keep["next_vip_at"] = now
-    await update_control(**keep)
-    return {
-        "status": "SEARCHING", "vip": vip, "strategy": control.selected_strategy,
-        "timeframe": control.selected_timeframe, "threshold": VIP_CONFIDENCE if vip else REGULAR_CONFIDENCE,
-        "hunt": {"active": True, "kind": "vip" if vip else "regular", "status": hunt_status},
-        "auto_trade": {"status": "WAITING_FOR_SIGNAL"},
-    }
-
-
-async def _state_payload() -> dict:
+async def _state_payload(user_id: int) -> dict:
     control = await get_control()
     auto_control = await get_auto_trade_control()
-    market = await market_data.health()
     account_mode = await get_trade_account_mode()
     execution_mode = await get_execution_mode()
     runtime = await get_trade_runtime()
+    worker_snapshot = await _worker_state(user_id)
+    worker = worker_snapshot.get("worker") or {}
+    worker_runtime = worker_snapshot.get("runtime") or {}
+    if worker_runtime:
+        runtime = {**runtime, **worker_runtime}
+
     async with AsyncSessionLocal() as db:
         latest = (await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(1))).scalar_one_or_none()
         open_positions = int((await db.execute(
@@ -170,34 +81,34 @@ async def _state_payload() -> dict:
 
     payload = serialize_control(control)
     payload.update(serialize_auto_trade(auto_control))
-    connected_account = "demo" if trading_is_demo() else "real"
     hunt_status = str(control.last_vip_status or "") if control else ""
-
-    snapshot = {}
-    if connected_account == "demo":
-        try:
-            snapshot = await get_demo_account_snapshot(max_age=12)
-        except Exception:
-            snapshot = {}
-    payouts = snapshot.get("payouts", {}) or {}
-    otc_payouts = {asset: payouts.get(asset) for asset in OTC_ASSETS if payouts.get(asset) is not None}
-    balance = snapshot.get("balance") if snapshot.get("balance") is not None else runtime.get("balance")
+    payout_map = runtime.get("eligible_payouts") or runtime.get("payouts") or {}
+    balance = runtime.get("balance")
+    worker_status = str(worker.get("status") or "OFFLINE")
 
     payload.update({
-        "market": market,
+        "market": {
+            "configured": worker_status in {"ONLINE", "DEGRADED"},
+            "connected": worker_status == "ONLINE",
+            "demo": True,
+            "provider": "Windows worker / Pocket Option DEMO",
+            "worker_status": worker_status,
+            "heartbeat_age_seconds": worker.get("heartbeat_age_seconds"),
+        },
+        "worker": worker,
         "open_positions": open_positions,
         "latest_signal": out(latest) if latest else None,
         "latest_execution": await latest_execution(),
-        "trade_account": connected_account,
+        "trade_account": "demo",
         "trade_account_mode": account_mode,
-        "account_matches_mode": connected_account == account_mode,
+        "account_matches_mode": account_mode == "demo",
         "execution_mode": execution_mode,
         "regular_confidence": REGULAR_CONFIDENCE,
         "vip_confidence": VIP_CONFIDENCE,
         "min_auto_payout": MIN_AUTO_PAYOUT,
         "pocket_balance": balance,
-        "pocket_balance_is_demo": snapshot.get("balance_is_demo", runtime.get("balance_is_demo")),
-        "payouts": otc_payouts,
+        "pocket_balance_is_demo": runtime.get("balance_is_demo", True),
+        "payouts": payout_map,
         "auto_runtime": runtime,
         "hunt": {
             "active": hunt_status in {HUNT_REGULAR, HUNT_VIP},
@@ -213,12 +124,12 @@ async def _state_payload() -> dict:
 
 
 @router.get("/state")
-async def state(_: TelegramMiniAppUser = Depends(admin_user)):
-    return await _state_payload()
+async def state(user: TelegramMiniAppUser = Depends(admin_user)):
+    return await _state_payload(int(user.id))
 
 
 @router.patch("/state")
-async def patch_state(data: ControlPatch, _: TelegramMiniAppUser = Depends(admin_user)):
+async def patch_state(data: ControlPatch, user: TelegramMiniAppUser = Depends(admin_user)):
     changes = data.model_dump(exclude_none=True)
     if "selected_strategy" in changes and changes["selected_strategy"] not in VALID_STRATEGIES:
         raise HTTPException(400, "Unknown strategy")
@@ -272,33 +183,46 @@ async def patch_state(data: ControlPatch, _: TelegramMiniAppUser = Depends(admin
             raise HTTPException(400, str(exc)) from exc
 
     if requested_auto is True:
-        now = utcnow()
-        await update_control(last_vip_status=HUNT_REGULAR, regular_enabled=True, last_scan_at=now)
-        try:
-            snapshot = await get_demo_account_snapshot(force=True)
-        except Exception:
-            snapshot = {}
         await update_trade_runtime(
-            stage="SCANNING", pending_signal_id=None,
-            balance=snapshot.get("balance"), balance_is_demo=snapshot.get("balance_is_demo"),
-            min_payout=MIN_AUTO_PAYOUT,
-            message=f"AUTO включён · сканирую пары с выплатой ≥{MIN_AUTO_PAYOUT:g}%",
+            stage="SCANNING", pending_signal_id=None, min_payout=MIN_AUTO_PAYOUT,
+            message=f"AUTO включён · Windows worker сканирует пары с выплатой ≥{MIN_AUTO_PAYOUT:g}%",
         )
     elif requested_auto is False:
         await update_control(last_vip_status="HUNT_STOPPED", last_scan_at=utcnow())
         await reset_trade_runtime("IDLE", "Автоторговля выключена")
 
-    return await _state_payload()
+    return await _state_payload(int(user.id))
 
 
 @router.post("/scan-now")
 async def scan_now(_: TelegramMiniAppUser = Depends(admin_user)):
-    return await _start_hunt(vip=False)
+    control = await get_control()
+    if control is None:
+        raise HTTPException(503, "Admin control is not configured")
+    now = utcnow()
+    await update_control(regular_enabled=True, last_vip_status=HUNT_REGULAR, last_scan_at=now)
+    return {
+        "status": "SEARCHING", "vip": False,
+        "strategy": control.selected_strategy, "timeframe": control.selected_timeframe,
+        "threshold": REGULAR_CONFIDENCE,
+        "worker_driven": True,
+        "hunt": {"active": True, "kind": "regular", "status": HUNT_REGULAR},
+    }
 
 
 @router.post("/vip-now")
 async def vip_now(_: TelegramMiniAppUser = Depends(admin_user)):
-    return await _start_hunt(vip=True)
+    control = await get_control()
+    if control is None:
+        raise HTTPException(503, "Admin control is not configured")
+    now = utcnow()
+    await update_control(vip_enabled=True, next_vip_at=now, last_vip_status=HUNT_VIP, last_scan_at=now)
+    return {
+        "status": "SEARCHING", "vip": True,
+        "strategy": "VIP 5M Confluence", "timeframe": "5m",
+        "threshold": VIP_CONFIDENCE, "worker_driven": True,
+        "hunt": {"active": True, "kind": "vip", "status": HUNT_VIP},
+    }
 
 
 @router.post("/hunt-stop")
@@ -312,22 +236,21 @@ async def hunt_stop(_: TelegramMiniAppUser = Depends(admin_user)):
 
 @router.post("/execute/{signal_id}")
 async def execute_signal(signal_id: int, _: TelegramMiniAppUser = Depends(admin_user)):
+    # Public/serverless code must never send broker orders. AUTO DEMO execution
+    # is exclusively owned by the Windows worker/session engine.
     async with AsyncSessionLocal() as db:
         signal = await db.get(Signal, signal_id)
         if signal is None:
             raise HTTPException(404, "Signal not found")
-        payload = out(signal)
-    result = await execute_confirmed_signal(payload)
-    if result.get("status") == "FAILED":
-        raise HTTPException(502, f"Broker execution failed: {result.get('error', 'unknown')}")
-    return {"signal": payload, "trade": result}
+    raise HTTPException(409, "Direct broker execution is worker-only; start an AUTO DEMO session")
 
 
 @router.get("/diagnostics")
-async def diagnostics(_: TelegramMiniAppUser = Depends(admin_user)):
-    state = await _state_payload()
+async def diagnostics(user: TelegramMiniAppUser = Depends(admin_user)):
+    state = await _state_payload(int(user.id))
     return {
         "market": state.get("market"),
+        "worker": state.get("worker"),
         "scanner": {
             "last_scan_at": state.get("last_scan_at"), "hunt": state.get("hunt"),
             "regular_enabled": state.get("regular_enabled"), "vip_enabled": state.get("vip_enabled"),

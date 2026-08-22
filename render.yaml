@@ -9,7 +9,9 @@ services:
     healthCheckPath: /health
     envVars:
       - key: AUTO_REALTIME_DRIVER
-        value: "true"
+        value: "false"
+      - key: APP_RUNTIME_ROLE
+        value: "web"
       - key: POCKET_OPTION_DEMO
         value: "true"
       - key: DATABASE_URL
