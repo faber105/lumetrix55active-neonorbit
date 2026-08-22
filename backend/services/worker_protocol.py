@@ -460,6 +460,18 @@ async def process_one_command(account_id: int) -> dict | None:
             from backend.services.manual_worker_tasks import analyze_market
 
             result = await analyze_market(dict(payload))
+        elif command_type == "SCAN_STRATEGY":
+            from backend.services.manual_worker_tasks import scan_strategy
+
+            result = await scan_strategy(dict(payload))
+        elif command_type == "SCAN_BEST":
+            from backend.services.manual_worker_tasks import scan_best
+
+            result = await scan_best(dict(payload))
+        elif command_type == "RECONCILE_SIGNALS":
+            from backend.services.manual_worker_tasks import reconcile_signals
+
+            result = await reconcile_signals(dict(payload))
         elif command_type == "MARKET_CANDLES":
             from backend.services.manual_worker_tasks import candles
 
