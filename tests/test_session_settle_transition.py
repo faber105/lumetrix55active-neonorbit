@@ -20,14 +20,31 @@ def session(**changes):
     return value
 
 
-def test_four_losses_stop_exactly_after_level_three():
+def test_four_losses_reset_chain_and_count_session_continues():
     state = session()
+    transition = None
     for level, amount in enumerate((1.0, 2.09, 4.36, 9.10)):
         state["current_level"] = level
         transition = settle_transition(state, result="LOSS", amount=amount, payout=92)
         if level < 3:
             assert transition["status"] == "ACTIVE"
             assert transition["level"] == level + 1
+            state["current_series_loss"] = transition["series_loss"]
+        else:
+            assert transition["status"] == "ACTIVE"
+            assert transition["reason"] is None
+            assert transition["level"] == 0
+            assert transition["series_loss"] == 0
+            assert transition["failed"] == 1
+
+
+def test_profit_mode_four_losses_stop_at_failed_series_limit():
+    state = session(mode="profit", target_profit=10)
+    transition = None
+    for level, amount in enumerate((1.0, 2.09, 4.36, 9.10)):
+        state["current_level"] = level
+        transition = settle_transition(state, result="LOSS", amount=amount, payout=92)
+        if level < 3:
             state["current_series_loss"] = transition["series_loss"]
         else:
             assert transition["status"] == "STOPPED"
