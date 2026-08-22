@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import timezone
 
 from dotenv import load_dotenv
@@ -25,6 +24,14 @@ async def collect_status() -> dict:
                 )
             ).scalar_one()
         )
+        unresolved_executions = int(
+            (
+                await db.execute(
+                    text("""SELECT COUNT(*) FROM trade_executions
+                        WHERE status IN ('EXECUTING','UNKNOWN')""")
+                )
+            ).scalar_one()
+        )
         worker = (
             await db.execute(
                 text("SELECT heartbeat_at,status,version FROM workers WHERE id=:id"),
@@ -40,13 +47,15 @@ async def collect_status() -> dict:
             heartbeat = heartbeat.astimezone(timezone.utc).replace(tzinfo=None)
         heartbeat_age = max(0.0, (utcnow() - heartbeat).total_seconds())
         status = "ONLINE" if heartbeat_age <= 10 else ("DEGRADED" if heartbeat_age <= 20 else "OFFLINE")
+    safe_to_update = active_sessions == 0 and unresolved_positions == 0 and unresolved_executions == 0
     return {
         "worker_status": status,
         "worker_version": worker.get("version") if worker else None,
         "heartbeat_age_seconds": round(heartbeat_age, 2) if heartbeat_age is not None else None,
         "active_sessions": active_sessions,
         "unresolved_positions": unresolved_positions,
-        "safe_to_update": active_sessions == 0 and unresolved_positions == 0,
+        "unresolved_executions": unresolved_executions,
+        "safe_to_update": safe_to_update,
     }
 
 
