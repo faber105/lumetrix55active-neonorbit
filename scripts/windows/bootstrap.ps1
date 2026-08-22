@@ -3,13 +3,50 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
-if (-not $pythonCommand) { $pythonCommand = Get-Command py.exe -ErrorAction Stop }
+
+function Find-StablePython {
+    $candidates = @()
+    try {
+        $candidates += Get-Command python.exe -All -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    } catch {}
+    try {
+        $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+        if ($launcher) {
+            $pyPaths = & $launcher.Source -0p 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $candidates += $pyPaths | ForEach-Object { ($_ -replace '^\s*-V:\S+\s+', '').Trim() }
+            }
+        }
+    } catch {}
+
+    $candidates = $candidates |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+        Select-Object -Unique
+
+    $stable = $candidates | Where-Object { $_ -notmatch '[\\/]\.cache[\\/]codex-runtimes[\\/]' } | Select-Object -First 1
+    if ($stable) { return $stable }
+
+    $fallback = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
+    if (Test-Path -LiteralPath $fallback) { return $fallback }
+
+    throw 'No stable Python installation found outside the Codex runtime cache.'
+}
+
+$basePython = Find-StablePython
+Write-Host "Using base Python: $basePython"
 
 Set-Location -LiteralPath $repoRoot
-$venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$venvRoot = Join-Path $repoRoot '.venv'
+$venvPython = Join-Path $venvRoot 'Scripts\python.exe'
+$venvConfig = Join-Path $venvRoot 'pyvenv.cfg'
 $venvHealthy = $false
-if (Test-Path -LiteralPath $venvPython) {
+$venvUsesCodexRuntime = $false
+if (Test-Path -LiteralPath $venvConfig) {
+    try {
+        $venvUsesCodexRuntime = (Get-Content -LiteralPath $venvConfig -Raw) -match '[\\/]\.cache[\\/]codex-runtimes[\\/]'
+    } catch {}
+}
+if ((Test-Path -LiteralPath $venvPython) -and -not $venvUsesCodexRuntime) {
     try {
         & $venvPython -c "import sys; print(sys.executable)" *> $null
         $venvHealthy = ($LASTEXITCODE -eq 0)
@@ -19,11 +56,11 @@ if (Test-Path -LiteralPath $venvPython) {
 }
 
 if (-not $venvHealthy) {
-    if (Test-Path -LiteralPath (Join-Path $repoRoot '.venv')) {
-        Write-Host 'Existing .venv is broken or still points to the old Codex runtime; rebuilding it locally.'
-        Remove-Item -LiteralPath (Join-Path $repoRoot '.venv') -Recurse -Force
+    if (Test-Path -LiteralPath $venvRoot) {
+        Write-Host 'Rebuilding .venv with a stable local Python installation.'
+        Remove-Item -LiteralPath $venvRoot -Recurse -Force
     }
-    & $pythonCommand.Source -m venv .venv
+    & $basePython -m venv .venv
     if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed with exit code $LASTEXITCODE" }
 }
 
