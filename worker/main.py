@@ -80,63 +80,72 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
 
 async def _install_worker_bot_db_fallback(bot_main) -> None:
     """Keep /start and verification independent of the unavailable Vercel API."""
-    from sqlalchemy import select
-    from backend.models.db_models import AsyncSessionLocal, User, utcnow
+    from sqlalchemy import text
+    from backend.models.db_models import AsyncSessionLocal, utcnow
 
-    def serialize_user(user: User | None):
-        if user is None:
+    def serialize_row(row):
+        if row is None:
             return None
-        return {
-            "id": user.id,
-            "telegram_id": user.telegram_id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "status": user.status,
-            "click_time": user.click_time.isoformat() if user.click_time else None,
-            "pending_time": user.pending_time.isoformat() if user.pending_time else None,
-            "verified_time": user.verified_time.isoformat() if user.verified_time else None,
-            "attempts_count": user.attempts_count or 0,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-        }
+        item = dict(row)
+        for key in ("click_time", "pending_time", "verified_time", "created_at"):
+            value = item.get(key)
+            if value is not None and hasattr(value, "isoformat"):
+                item[key] = value.isoformat()
+        item["attempts_count"] = int(item.get("attempts_count") or 0)
+        return item
 
     async def local_get_user(telegram_id: int):
         async with AsyncSessionLocal() as db:
-            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
-            return serialize_user(user)
+            row = (
+                await db.execute(
+                    text("""SELECT id,telegram_id,username,full_name,status,click_time,
+                        pending_time,verified_time,attempts_count,created_at
+                        FROM users WHERE telegram_id=:telegram_id LIMIT 1"""),
+                    {"telegram_id": int(telegram_id)},
+                )
+            ).mappings().first()
+        return serialize_row(row)
 
     async def local_create_user(telegram_id: int, username: str, full_name: str):
         async with AsyncSessionLocal() as db:
-            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
-            if user is None:
-                user = User(
-                    telegram_id=int(telegram_id),
-                    username=(username or None),
-                    full_name=(full_name or None),
-                    status="NEW",
-                    attempts_count=0,
+            row = (
+                await db.execute(
+                    text("""INSERT INTO users
+                        (telegram_id,username,full_name,status,attempts_count,created_at)
+                        VALUES (:telegram_id,:username,:full_name,'NEW',0,:created_at)
+                        ON CONFLICT (telegram_id) DO UPDATE SET
+                            username=COALESCE(NULLIF(EXCLUDED.username,''),users.username),
+                            full_name=COALESCE(NULLIF(EXCLUDED.full_name,''),users.full_name)
+                        RETURNING id,telegram_id,username,full_name,status,click_time,
+                            pending_time,verified_time,attempts_count,created_at"""),
+                    {
+                        "telegram_id": int(telegram_id),
+                        "username": username or None,
+                        "full_name": full_name or None,
+                        "created_at": utcnow(),
+                    },
                 )
-                db.add(user)
-            else:
-                user.username = username or user.username
-                user.full_name = full_name or user.full_name
+            ).mappings().one()
             await db.commit()
-            await db.refresh(user)
-            return serialize_user(user)
+        return serialize_row(row)
 
     async def local_set_status(telegram_id: int, status: str) -> bool:
+        value = str(status).upper()
+        now = utcnow()
         async with AsyncSessionLocal() as db:
-            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
-            if user is None:
-                return False
-            value = str(status).upper()
-            user.status = value
-            now = utcnow()
-            if value == "VERIFIED":
-                user.verified_time = now
-            elif value == "PENDING":
-                user.pending_time = now
+            row_id = (
+                await db.execute(
+                    text("""UPDATE users SET
+                        status=:status,
+                        verified_time=CASE WHEN :status='VERIFIED' THEN :now ELSE verified_time END,
+                        pending_time=CASE WHEN :status='PENDING' THEN :now ELSE pending_time END
+                        WHERE telegram_id=:telegram_id
+                        RETURNING id"""),
+                    {"status": value, "now": now, "telegram_id": int(telegram_id)},
+                )
+            ).scalar_one_or_none()
             await db.commit()
-            return True
+        return row_id is not None
 
     bot_main.get_user = local_get_user
     bot_main.create_user = local_create_user
