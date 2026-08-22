@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { TG, TG_ID, apiFetch, patchJson, postJson } from "./api";
+import { TG, TG_ID, apiFetch, connectAutoRealtime, patchJson, postJson } from "./api";
 
 const PAIRS=[["EUR/USD","eu","us"],["GBP/USD","gb","us"],["USD/JPY","us","jp"],["USD/CHF","us","ch"],["AUD/USD","au","us"],["USD/CAD","us","ca"],["NZD/USD","nz","us"],["EUR/GBP","eu","gb"],["EUR/JPY","eu","jp"],["GBP/JPY","gb","jp"]];
 const MANUAL_TF=["15s","1m","3m","5m","15m"],AUTO_TF=["15s","1m","3m"];
@@ -108,7 +108,7 @@ function ActiveSessionBot(){return <div className="ap-session-bot" aria-hidden="
 
 function AutoStageIcon({name}){const paths={search:<><circle cx="10" cy="10" r="5.5"/><path d="m14.5 14.5 5 5M10 7v6M7 10h6"/></>,prepare:<><circle cx="12" cy="12" r="3.2"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></>,entry:<><path d="M4 12h13M13 7l5 5-5 5"/><path d="M4 7v10"/></>,result:<><rect x="5" y="5" width="14" height="14" rx="2"/><path d="m8.5 12 2.3 2.4 5-5.2"/></>};return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>}
 
-function AutoActiveSession({state,busy,onStop,onRefresh}){
+function AutoActiveSession({state,busy,onStop,onRefresh,realtime=false}){
   const session=state?.session||{},runtime=state?.runtime||{},legs=state?.legs||[],events=state?.events||[];
   const leg=legs.find(item=>String(item.result||"").toUpperCase()==="PENDING")||legs[0]||{};
   const rawPair=String(runtime.pair||leg.pair||leg.asset||"—"),pair=rawPair.replace(/\s+OTC$/i,"");
@@ -123,7 +123,7 @@ function AutoActiveSession({state,busy,onStop,onRefresh}){
   const logTone=value=>{const text=String(value||"").toUpperCase();return text.includes("OPEN")||text.includes("WIN")?"green":text.includes("BET")||text.includes("WAIT")?"gold":text.includes("SIGNAL")||text.includes("ENTRY")?"violet":"cyan"};
   const currentMessage=session.last_message||runtime.message||"Сканирую рынок и ищу подтверждённый сетап";
   return <div className="page-stack ap-active-auto">
-    <section className="ap-active-heading"><h1>AUTO СЕССИЯ</h1><div><span><i/>ACTIVE</span><b>DEMO</b><button type="button" aria-label="Обновить" onClick={onRefresh}>↻</button></div></section>
+    <section className="ap-active-heading"><h1>AUTO СЕССИЯ</h1><div><span><i/>{realtime?"REALTIME":"ACTIVE"}</span><b>DEMO</b><button type="button" aria-label="Обновить" onClick={onRefresh}>↻</button></div></section>
     <ErrorBox value={state?.error}/>
     <section className={`ap-session-hud stage-${stage.toLowerCase()}`}>
       <span className="ap-hud-aurora"/><span className="ap-hud-scan"/><span className="ap-hud-noise"/>
@@ -183,19 +183,21 @@ function AutoSessionSetup({mode,setMode,strategies,onStrategy,timeframe,setTimef
 function AutoTab({enabled,isAdmin,adminState,patchAccount}){
   const[mode,setMode]=useState("count"),[strategies,setStrategies]=useState(["smart_confluence"]),[timeframe,setTimeframe]=useState("1m");
   const[targetWins,setTargetWins]=useState("5"),[targetProfit,setTargetProfit]=useState("10"),[amount,setAmount]=useState("1"),[martingale,setMartingale]=useState(3),[failedLimit,setFailedLimit]=useState("1");
-  const[state,setState]=useState(null),[error,setError]=useState(""),[busy,setBusy]=useState(""),[toast,setToast]=useState("");
+  const[state,setState]=useState(null),[error,setError]=useState(""),[busy,setBusy]=useState(""),[toast,setToast]=useState(""),[realtime,setRealtime]=useState({connected:false,driving:false});
   const lastStage=useRef(null);
-  const load=useCallback(async(refresh=false)=>{if(!isAdmin)return;try{const data=await apiFetch(`/api/auto/state?drive=false&_=${Date.now()}${refresh?"&refresh=true":""}`);setState(data);setError("");const stage=data?.session?.stage;if(stage&&stage!==lastStage.current&&["OPEN","CLOSED","MARTINGALE","COMPLETED","STOPPED"].includes(stage)){setToast(data?.session?.last_message||stage);setTimeout(()=>setToast(""),3000)}lastStage.current=stage}catch(e){setError(safeMessage(e))}},[isAdmin]);
-  usePolling(load,state?.active?1000:2500,Boolean(TG_ID&&isAdmin&&enabled));
+  const applyState=useCallback(data=>{setState(data);setError("");const stage=data?.session?.stage;if(stage&&stage!==lastStage.current&&["OPEN","CLOSED","MARTINGALE","COMPLETED","STOPPED"].includes(stage)){setToast(data?.session?.last_message||stage);setTimeout(()=>setToast(""),3000)}lastStage.current=stage},[]);
+  const load=useCallback(async(refresh=false)=>{if(!isAdmin)return;try{applyState(await apiFetch(`/api/auto/state?drive=false&_=${Date.now()}${refresh?"&refresh=true":""}`))}catch(e){setError(safeMessage(e))}},[isAdmin,applyState]);
+  useEffect(()=>{if(!TG_ID||!isAdmin||!enabled){setRealtime({connected:false,driving:false});return undefined}return connectAutoRealtime({onState:applyState,onStatus:setRealtime})},[isAdmin,enabled,applyState]);
+  usePolling(load,realtime.connected?12000:(state?.active?350:2500),Boolean(TG_ID&&isAdmin&&enabled));
   const engineTick=useCallback(async()=>{if(!isAdmin||!enabled)return;try{await postJson("/api/auto/tick")}catch{}},[isAdmin,enabled]);
-  usePolling(engineTick,1000,Boolean(TG_ID&&isAdmin&&enabled&&state?.active));
+  usePolling(engineTick,350,Boolean(TG_ID&&isAdmin&&enabled&&state?.active&&!realtime.driving));
   const toggleStrategy=id=>setStrategies([id]);
   const start=async()=>{setBusy("start");setError("");try{const tw=numeric(targetWins,5,5,25),tp=numeric(targetProfit,1,.01,1000000),amt=numeric(amount,1,1,50000),failed=numeric(failedLimit,1,1,10);await postJson("/api/auto/start",{mode,strategy:strategies[0],timeframe:mode==="count"?timeframe:"5m",target_wins:mode==="count"?tw:null,target_profit:mode==="profit"?tp:null,amount:amt,max_martingale:Number(martingale),max_failed_series:failed});setTargetWins(String(tw));setTargetProfit(String(tp));setAmount(String(amt));setFailedLimit(String(failed));await load(true);TG?.HapticFeedback?.notificationOccurred?.("success")}catch(e){setError(safeMessage(e))}finally{setBusy("")}};
   const stop=async()=>{setBusy("stop");try{await postJson("/api/auto/stop");await load(true)}catch(e){setError(safeMessage(e))}finally{setBusy("")}};
   const session=state?.session,active=Boolean(state?.active),runtime=state?.runtime||{};
   if(!isAdmin)return <div className="locked"><span>🔒</span><h2>Автотрейдинг доступен владельцу Pocket-сессии</h2></div>;
   if(!enabled)return <div className="locked"><span>◌</span><h2>Автотрейдинг выключен</h2><p>Включи «Автотрейдинг» в Админке.</p></div>;
-  if(active&&session)return <AutoActiveSession state={state} busy={busy} onStop={stop} onRefresh={()=>load(true)}/>;
+  if(active&&session)return <AutoActiveSession state={state} busy={busy} onStop={stop} onRefresh={()=>load(true)} realtime={realtime.connected}/>;
   return <div className="page-stack auto-v2">{toast&&<div className="toast">{toast}</div>}<ErrorBox value={error}/><AutoSessionSetup mode={mode} setMode={value=>{setMode(value);setStrategies(["smart_confluence"])}} strategies={strategies} onStrategy={toggleStrategy} timeframe={timeframe} setTimeframe={setTimeframe} targetWins={targetWins} setTargetWins={setTargetWins} targetProfit={targetProfit} setTargetProfit={setTargetProfit} amount={amount} setAmount={setAmount} martingale={martingale} setMartingale={setMartingale} failedLimit={failedLimit} setFailedLimit={setFailedLimit} busy={busy} onStart={start} adminState={adminState} patchAccount={patchAccount}/>{session&&session.status!=="ACTIVE"&&<section className="glass live-session premium-session"><div className="session-top"><div><small>SESSION #{session.id}</small><h2>{session.status==="COMPLETED"?"Цель достигнута":"Сессия завершена"}</h2></div><Pill tone={session.status==="COMPLETED"?"gold":"danger"}>{session.stage}</Pill></div><div className="finish-actions"><Button onClick={start}>Повторить</Button><Button kind="ghost" onClick={()=>setState(null)}>Скрыть</Button></div></section>}</div>;
 }
 
