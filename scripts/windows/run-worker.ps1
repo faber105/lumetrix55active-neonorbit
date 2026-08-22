@@ -34,8 +34,17 @@ try {
         Remove-Item -Force
     $logFile = Join-Path $logRoot ("worker-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
     Set-Location -LiteralPath $repoRoot
-    & $python -m worker.main *>> $logFile
-    exit $LASTEXITCODE
+
+    # Windows PowerShell turns native stderr into ErrorRecord objects and, with
+    # ErrorActionPreference=Stop, can terminate the script even for normal
+    # Python logging. Run through cmd.exe so stdout/stderr are appended to the
+    # worker log as plain text and preserve the real Python exit code.
+    $quotedPython = '"' + $python + '"'
+    $quotedLog = '"' + $logFile + '"'
+    $commandLine = "$quotedPython -m worker.main >> $quotedLog 2>&1"
+    & $env:ComSpec /d /s /c $commandLine
+    $exitCode = $LASTEXITCODE
+    exit $exitCode
 }
 finally {
     $mutex.ReleaseMutex()
