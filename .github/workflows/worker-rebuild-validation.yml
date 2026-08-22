@@ -1,11 +1,12 @@
 name: Validate Windows worker rebuild
 
-# Final architecture validation v2: rerun this workflow only when this file changes.
 on:
   push:
     branches: [codex-windows-worker-rebuild]
     paths:
       - .github/workflows/worker-rebuild-validation.yml
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
@@ -64,6 +65,8 @@ jobs:
           grep -q 'PRELOAD_OPEN_GRACE_SECONDS = 1.5' backend/services/preload_next.py
           ! grep -q 'id:"smart_confluence"' miniapp/src/App.jsx
           ! grep -q 'strategy1+' miniapp/src/App.jsx
+          ! grep -q 'mixed_count' backend/services/session_engine.py
+          ! grep -q 'mixed_count' backend/services/preload_next.py
           grep -q 'workflow_dispatch' .github/workflows/otc-scan.yml
           ! grep -q 'schedule:' .github/workflows/otc-scan.yml
           grep -q "'ANALYZE_SIGNAL'" backend/routers/signals.py
@@ -84,6 +87,7 @@ jobs:
           npm ci
           npm run build
       - name: Record successful validation
+        if: github.event_name == 'push'
         run: |
           mkdir -p validation
           printf 'Windows worker rebuild validation PASSED\nvalidated_source_commit=%s\nvalidated_at=%s\n' \
