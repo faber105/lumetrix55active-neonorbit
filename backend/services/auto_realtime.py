@@ -131,8 +131,17 @@ async def _driver_loop() -> None:
         started = time.monotonic()
         result: dict[str, Any]
         try:
-            value = await adaptive_drive_session_tick()
-            result = dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
+            account_id = int(os.getenv("WORKER_ACCOUNT_ID") or 0)
+            command = None
+            if account_id > 0:
+                from backend.services.worker_protocol import process_one_command
+
+                command = await process_one_command(account_id)
+            if command is not None:
+                result = dict(command)
+            else:
+                value = await adaptive_drive_session_tick()
+                result = dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
         except asyncio.CancelledError:
             raise
         except Exception as exc:

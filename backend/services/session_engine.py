@@ -254,15 +254,18 @@ async def start_session(config):
     snapshot = await get_demo_account_snapshot(force=True)
     balance = snapshot.get("balance")
     tid = admin_id()
+    from backend.services.worker_protocol import ensure_demo_account
+
+    account_id = await ensure_demo_account(tid)
     async with AsyncSessionLocal() as db:
         session_id = (
             await db.execute(
                 text("""INSERT INTO auto_trade_sessions
-                    (telegram_id,mode,status,stage,strategy,timeframe,target_wins,target_profit,base_amount,max_martingale,max_failed_series,start_balance,current_balance,last_message)
-                    VALUES (:tid,:mode,'ACTIVE','SCANNING',:strategy,:tf,:tw,:tp,:amount,:mm,:mf,:balance,:balance,:msg)
+                    (telegram_id,account_id,mode,status,stage,strategy,timeframe,target_wins,target_profit,base_amount,max_martingale,max_failed_series,start_balance,current_balance,last_message)
+                    VALUES (:tid,:account_id,:mode,'ACTIVE','SCANNING',:strategy,:tf,:tw,:tp,:amount,:mm,:mf,:balance,:balance,:msg)
                     RETURNING id"""),
                 {
-                    "tid": tid, "mode": values["mode"], "strategy": values["strategy"], "tf": values["timeframe"],
+                    "tid": tid, "account_id": account_id, "mode": values["mode"], "strategy": values["strategy"], "tf": values["timeframe"],
                     "tw": values["target_wins"], "tp": values["target_profit"], "amount": values["amount"],
                     "mm": values["max_martingale"], "mf": values["max_failed_series"], "balance": balance,
                     "msg": "Сессия запущена · анализирую все OTC пары",
@@ -303,14 +306,16 @@ async def _register_open(session, signal, trade, amount, payout):
     session_id = int(session["id"])
     series = int(session.get("wins") or 0) + int(session.get("failed_series") or 0) + 1
     level = int(session.get("current_level") or 0)
+    idempotency_key = f"session:{session_id}:series:{series}:level:{level}:signal:{int(signal['id'])}"
     async with AsyncSessionLocal() as db:
         await db.execute(
             text("""INSERT INTO auto_trade_legs
-                (session_id,series_no,martingale_level,signal_id,position_id,pair,asset,direction,amount,payout,result,opened_at)
-                VALUES (:sid,:series,:level,:signal,:position,:pair,:asset,:direction,:amount,:payout,'PENDING',:opened)"""),
+                (session_id,series_no,martingale_level,signal_id,position_id,broker_order_id,idempotency_key,pair,asset,direction,amount,payout,result,opened_at)
+                VALUES (:sid,:series,:level,:signal,:position,:broker_order,:idempotency,:pair,:asset,:direction,:amount,:payout,'PENDING',:opened)"""),
             {
                 "sid": session_id, "series": series, "level": level, "signal": int(signal["id"]),
-                "position": int(trade["position_id"]), "pair": signal["pair"], "asset": signal["asset"],
+                "position": int(trade["position_id"]), "broker_order": trade.get("broker_order_id"),
+                "idempotency": idempotency_key, "pair": signal["pair"], "asset": signal["asset"],
                 "direction": signal["direction"], "amount": amount, "payout": payout, "opened": utcnow(),
             },
         )

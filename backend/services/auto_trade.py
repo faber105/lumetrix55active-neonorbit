@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from backend.models.db_models import (
@@ -205,6 +205,8 @@ async def _mark_execution(execution_id: int, status: str, error: str | None = No
 
 
 async def _basic_guard(signal: dict, *, confirmed: bool) -> dict | None:
+    if str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() != "worker":
+        return {"status": "WORKER_REQUIRED"}
     tid = admin_id()
     control = await get_auto_trade_control()
     if tid <= 0 or control is None or not control.enabled:
@@ -220,6 +222,26 @@ async def _basic_guard(signal: dict, *, confirmed: bool) -> dict | None:
         return {"status": "REAL_CONFIRMATION_REQUIRED", "account": "real", "reason": "open_manually_in_pocket"}
     if connected_account != "demo":
         return {"status": "ACCOUNT_MISMATCH", "account": connected_account, "selected_account": selected_account}
+    from backend.services.worker_protocol import ensure_demo_account, owns_lease
+
+    account_id = await ensure_demo_account(tid)
+    if not await owns_lease(account_id):
+        return {"status": "LEASE_REQUIRED", "account_id": account_id}
+    async with AsyncSessionLocal() as db:
+        active_session = (
+            await db.execute(
+                text("""SELECT status,active_position_id,pending_signal_id
+                    FROM auto_trade_sessions WHERE account_id=:account
+                    ORDER BY id DESC LIMIT 1"""),
+                {"account": account_id},
+            )
+        ).mappings().first()
+    if not active_session or str(active_session["status"]) != "ACTIVE":
+        return {"status": "SESSION_NOT_ACTIVE"}
+    if active_session.get("active_position_id"):
+        return {"status": "ACTIVE_POSITION_EXISTS"}
+    if int(active_session.get("pending_signal_id") or 0) != int(signal.get("id") or 0):
+        return {"status": "SIGNAL_NOT_CLAIMED"}
     if not confirmed and await get_execution_mode() != "auto":
         return {"status": "CONFIRMATION_REQUIRED", "execution_mode": "confirm"}
     return None
@@ -425,6 +447,7 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             logger.warning("Admin demo trade opened signal=%s asset=%s exact_entry=%s", signal["id"], signal["asset"], exact_entry)
             return {
                 "status": "OPEN", "position_id": position.id, "amount": amount, "account": "demo", "confirmed": confirmed,
+                "broker_order_id": str(result.order_id),
                 "payout": payout, "balance": balance, "entry_time": _iso(placed_at), "scheduled_entry_time": _iso(entry),
                 "entry_delay_ms": round((placed_at - entry).total_seconds() * 1000) if exact_entry else None,
             }

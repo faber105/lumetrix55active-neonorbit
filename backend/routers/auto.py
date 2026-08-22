@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
-from backend.services.session_driver import drive_session_tick
-from backend.services.cpu_guard import adaptive_drive_session_tick
-from backend.services.auto_realtime import notify_auto_change
-from backend.services.session_engine import session_history, session_state, start_session, stop_session
-from backend.services.trade_mode import set_execution_mode
+from backend.services.session_engine import session_history, session_state
+from backend.services.worker_protocol import ensure_demo_account, enqueue_command
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
@@ -34,6 +32,21 @@ class StartSessionRequest(BaseModel):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _command_key(user_id: int, command_type: str, payload: dict, provided: str | None) -> str:
+    if provided and provided.strip():
+        return provided.strip()[:128]
+    # Browser retries of the same action within a short window resolve to the
+    # same command even when an older client does not yet send an explicit key.
+    bucket = int(datetime.now(timezone.utc).timestamp() // 10)
+    raw = json.dumps(
+        {"user": int(user_id), "type": command_type, "payload": payload, "bucket": bucket},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _iso(value):
@@ -170,47 +183,52 @@ def _decorate_live_state(payload: dict) -> dict:
 
 @router.get("/state")
 async def state(refresh: bool = Query(False), drive: bool = Query(False), _: TelegramMiniAppUser = Depends(admin_user)):
-    tick_result = None
-    if drive:
-        try:
-            tick_result = await adaptive_drive_session_tick()
-        except Exception as exc:
-            tick_result = {"status": "ERROR", "error": type(exc).__name__}
     payload = await session_state(refresh_balance=refresh)
-    payload["driver"] = tick_result
+    payload["driver"] = {"status": "WORKER_DRIVEN", "legacy_drive_ignored": bool(drive)}
     return _decorate_live_state(payload)
 
 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
-    result = await adaptive_drive_session_tick()
-    await notify_auto_change()
-    return result
+    return {"status": "WORKER_DRIVEN"}
 
 
 @router.post("/start")
-async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admin_user)):
-    try:
-        payload = await start_session(data.model_dump())
-        first_tick = None
-        if data.mode == "profit":
-            try:
-                first_tick = await drive_session_tick(min_interval_seconds=0.5)
-            except Exception as exc:
-                first_tick = {"status": "ERROR", "error": type(exc).__name__}
-            payload = await session_state()
-            payload["driver"] = first_tick
-        await notify_auto_change(wake_driver=True)
-        return _decorate_live_state(payload)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+async def start(
+    data: StartSessionRequest,
+    user: TelegramMiniAppUser = Depends(admin_user),
+    x_idempotency_key: str | None = Header(default=None),
+):
+    body = data.model_dump()
+    account_id = await ensure_demo_account(int(user.id))
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type="START_SESSION",
+        payload=body,
+        idempotency_key=_command_key(int(user.id), "START_SESSION", body, x_idempotency_key),
+    )
+    payload = _decorate_live_state(await session_state())
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
+    return payload
 
 
 @router.post("/stop")
-async def stop(_: TelegramMiniAppUser = Depends(admin_user)):
-    await set_execution_mode("confirm")
-    payload = _decorate_live_state(await stop_session("USER_STOP"))
-    await notify_auto_change(wake_driver=True)
+async def stop(
+    user: TelegramMiniAppUser = Depends(admin_user),
+    x_idempotency_key: str | None = Header(default=None),
+):
+    body = {"reason": "USER_STOP"}
+    account_id = await ensure_demo_account(int(user.id))
+    command = await enqueue_command(
+        account_id=account_id,
+        command_type="STOP_SESSION",
+        payload=body,
+        idempotency_key=_command_key(int(user.id), "STOP_SESSION", body, x_idempotency_key),
+    )
+    payload = _decorate_live_state(await session_state())
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
     return payload
 
 

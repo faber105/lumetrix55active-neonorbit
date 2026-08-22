@@ -47,10 +47,23 @@ async def run_worker() -> None:
     from backend.services.pocketoption_otc import market_data
     from backend.services.preload_next import ensure_preload_schema
     from backend.services.session_engine import ensure_schema
+    from backend.services.worker_protocol import (
+        acquire_lease,
+        ensure_demo_account,
+        ensure_worker_schema,
+        register_heartbeat,
+        release_lease,
+        worker_supervisor,
+    )
 
     await init_db()
     await ensure_schema()
     await ensure_preload_schema()
+    await ensure_worker_schema()
+    account_id = await ensure_demo_account()
+    os.environ["WORKER_ACCOUNT_ID"] = str(account_id)
+    if await acquire_lease(account_id) is None:
+        raise RuntimeError("Another worker currently owns the DEMO account lease")
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -63,7 +76,12 @@ async def run_worker() -> None:
         if signum is not None:
             signal.signal(signum, request_stop)
 
+    supervisor = asyncio.create_task(
+        worker_supervisor(stop_event, account_id),
+        name="alphapulse-worker-supervisor",
+    )
     if not await start_auto_realtime_driver():
+        supervisor.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
 
     logger.info("AlphaPulse Windows worker started in DEMO-only mode")
@@ -72,6 +90,13 @@ async def run_worker() -> None:
     finally:
         logger.info("AlphaPulse Windows worker is stopping")
         await stop_auto_realtime_driver()
+        stop_event.set()
+        try:
+            await supervisor
+        except asyncio.CancelledError:
+            pass
+        await release_lease(account_id)
+        await register_heartbeat(status="OFFLINE")
         await market_data.close()
         await engine.dispose()
 
