@@ -55,11 +55,6 @@ def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
     if not received_hash:
         raise HTTPException(401, "Telegram initData hash missing")
 
-    # Bot API 9.x Mini Apps may include the new `signature` field in initData.
-    # For bot-token HMAC validation Telegram's current data-check-string contains
-    # all received fields except `hash`, so `signature` must not be discarded.
-    # Keep a legacy variant as a compatibility fallback for older clients that
-    # generated the hash before the signature field was introduced.
     expected_hash = _telegram_hash(token, values)
     valid = hmac.compare_digest(expected_hash, received_hash)
     if not valid and "signature" in values:
@@ -74,12 +69,6 @@ def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
     except ValueError as exc:
         raise HTTPException(401, "Invalid Telegram auth date") from exc
 
-    # A Telegram Mini App may stay open for many hours. The previous 5-minute
-    # default made every protected API endpoint suddenly return 401 while the
-    # browser still had cryptographically valid Telegram initData. That disabled
-    # manual signals, VIP and AUTO at the same time. Keep HMAC verification as
-    # the trust boundary, but allow a sane worker-session lifetime. The value is
-    # configurable and capped to seven days.
     default_age = 86400 if str(os.getenv("APP_RUNTIME_ROLE") or "").strip().lower() == "worker" else 3600
     try:
         configured_age = int(os.getenv("TELEGRAM_INITDATA_MAX_AGE", str(default_age)) or default_age)
@@ -110,28 +99,32 @@ async def telegram_user(
 
 
 async def _sole_worker_broker_owner(telegram_id: int) -> bool:
-    """Allow the single Pocket fleet owner to control the local Windows gateway.
+    """Authorize the owner of the broker account actually leased by this worker.
 
-    This is intentionally worker-only and only applies while every active broker
-    account belongs to one Telegram owner. It avoids granting global admin rights
-    to unrelated account owners if the deployment later becomes multi-tenant.
+    Old test/duplicate broker rows must not lock the real Pocket owner out of AUTO.
+    The lease is the authoritative ownership boundary for the persistent Windows
+    broker process, so unrelated ACTIVE rows are ignored.
     """
     try:
         from sqlalchemy import text
         from backend.models.db_models import AsyncSessionLocal
+        from backend.services.worker_protocol import worker_id
 
         async with AsyncSessionLocal() as db:
-            rows = (
+            owner = (
                 await db.execute(
-                    text("""SELECT DISTINCT owner_telegram_id
-                        FROM broker_accounts
-                        WHERE status='ACTIVE'
-                        ORDER BY owner_telegram_id
-                        LIMIT 2""")
+                    text("""SELECT b.owner_telegram_id
+                        FROM worker_leases l
+                        JOIN broker_accounts b ON b.id=l.account_id
+                        WHERE l.worker_id=:worker
+                          AND l.lease_until>NOW()
+                          AND b.status='ACTIVE'
+                        ORDER BY l.updated_at DESC
+                        LIMIT 1"""),
+                    {"worker": worker_id()},
                 )
-            ).scalars().all()
-        owners = [int(value) for value in rows if value is not None]
-        return len(owners) == 1 and owners[0] == int(telegram_id)
+            ).scalar_one_or_none()
+        return owner is not None and int(owner) == int(telegram_id)
     except Exception:
         return False
 
