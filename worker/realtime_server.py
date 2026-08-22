@@ -41,6 +41,7 @@ app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
 DIST_DIR = Path(__file__).resolve().parents[1] / "miniapp" / "dist"
 ASSETS_DIR = DIST_DIR / "assets"
+ASSET_CACHE = {"Cache-Control": "public, max-age=31536000, immutable"}
 
 
 def _digest(payload: dict) -> str:
@@ -64,7 +65,7 @@ async def miniapp_asset(asset_path: str):
         raise HTTPException(404, "Mini App assets are not built")
     requested = ASSETS_DIR / Path(asset_path).name
     if requested.is_file():
-        return FileResponse(requested)
+        return FileResponse(requested, headers=ASSET_CACHE)
     suffix = requested.suffix.lower()
     if suffix not in {".js", ".css"}:
         raise HTTPException(404, "Asset not found")
@@ -75,7 +76,7 @@ async def miniapp_asset(asset_path: str):
     )
     if not candidates:
         raise HTTPException(404, "Asset not found")
-    return FileResponse(candidates[0], headers={"Cache-Control": "no-store, max-age=0"})
+    return FileResponse(candidates[0], headers=ASSET_CACHE)
 
 
 @app.websocket("/ws/live")
