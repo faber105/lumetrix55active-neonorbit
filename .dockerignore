@@ -1,0 +1,10 @@
+.git
+.github
+.deploy
+__pycache__
+*.py[cod]
+.pytest_cache
+miniapp/node_modules
+miniapp/dist
+.env
+runtime_secrets.json
