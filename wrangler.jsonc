@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "lumetrix55active-neonorbit",
   "main": "./cloudflare/relay.js",
-  "compatibility_date": "2026-08-23",
+  "compatibility_date": "2026-08-22",
   "assets": {
     "directory": "./miniapp/dist",
     "binding": "ASSETS",
