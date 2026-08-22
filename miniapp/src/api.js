@@ -1,11 +1,13 @@
 const buildApi = String(import.meta.env.VITE_API_BASE || "").trim();
 const queryApi = new URLSearchParams(window.location.search).get("api") || "";
-if (queryApi) {
+const CDN_API = "https://birthday-map-race-packing.trycloudflare.com";
+const isCloudflareCdn = /(?:^|\.)(?:workers\.dev|pages\.dev)$/i.test(window.location.hostname);
+if (queryApi && !isCloudflareCdn) {
   try { localStorage.setItem("ap_api_base", queryApi); } catch {}
 }
 let savedApi = "";
 try { savedApi = localStorage.getItem("ap_api_base") || ""; } catch {}
-export const API = String(buildApi || queryApi || savedApi || window.location.origin).replace(/\/$/, "");
+export const API = String(buildApi || (isCloudflareCdn ? CDN_API : "") || queryApi || savedApi || window.location.origin).replace(/\/$/, "");
 
 export function getTelegramWebApp() {
   return window.Telegram?.WebApp || null;
