@@ -258,29 +258,40 @@ async def run_worker() -> None:
     supervisor = asyncio.create_task(worker_supervisor(stop_event, account_id), name="alphapulse-worker-supervisor")
     maintenance = asyncio.create_task(_maintenance_loop(stop_event), name="alphapulse-worker-maintenance")
     telegram_polling = asyncio.create_task(_telegram_polling_loop(stop_event), name="alphapulse-telegram-runtime")
-    realtime_server = None
-    realtime_task = None
-    if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
-        import uvicorn
-        realtime_server = uvicorn.Server(uvicorn.Config("worker.realtime_server:app", host="127.0.0.1", port=int(os.getenv("WORKER_HTTP_PORT") or 8765), log_level=os.getenv("LOG_LEVEL", "info").lower(), access_log=False))
-        realtime_task = asyncio.create_task(realtime_server.serve(), name="alphapulse-worker-realtime")
+
+    import uvicorn
+    gateway_server = uvicorn.Server(
+        uvicorn.Config(
+            "worker.realtime_server:app",
+            host="127.0.0.1",
+            port=int(os.getenv("WORKER_HTTP_PORT") or 8765),
+            log_level=os.getenv("LOG_LEVEL", "info").lower(),
+            access_log=False,
+        )
+    )
+    gateway_task = asyncio.create_task(gateway_server.serve(), name="alphapulse-worker-gateway")
+
     if not await start_auto_realtime_driver():
         supervisor.cancel()
         maintenance.cancel()
         telegram_polling.cancel()
+        gateway_server.should_exit = True
+        gateway_task.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
 
     logger.info("AlphaPulse Windows worker started in DEMO-only mode")
+    logger.info("Windows Mini App gateway listening on 127.0.0.1:%s", os.getenv("WORKER_HTTP_PORT") or "8765")
     try:
         await stop_event.wait()
     finally:
         logger.info("AlphaPulse Windows worker is stopping")
         await stop_auto_realtime_driver()
         stop_event.set()
-        if realtime_server is not None:
-            realtime_server.should_exit = True
-        if realtime_task is not None:
-            await realtime_task
+        gateway_server.should_exit = True
+        try:
+            await gateway_task
+        except asyncio.CancelledError:
+            pass
         for task in (supervisor, maintenance, telegram_polling):
             try:
                 await task
