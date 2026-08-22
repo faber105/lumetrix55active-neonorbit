@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
@@ -63,6 +64,51 @@ def _fallback_bias(candles: list) -> StrategyCandidate:
 
 
 class SignalEngine:
+    def __init__(self):
+        self._candle_cache: dict[tuple[str, str, int], tuple[float, list]] = {}
+        self._candle_inflight: dict[tuple[str, str, int], asyncio.Task] = {}
+        self._cache_lock = asyncio.Lock()
+
+    @staticmethod
+    def _cache_ttl(timeframe: str) -> float:
+        seconds = int(TF_SECONDS.get(timeframe, 60))
+        if seconds <= 15:
+            return 4.0
+        if seconds <= 60:
+            return 8.0
+        if seconds <= 180:
+            return 12.0
+        return min(30.0, max(15.0, seconds / 12.0))
+
+    async def _candles(self, asset: str, timeframe: str) -> list:
+        key = (asset, timeframe, CANDLE_LOOKBACK)
+        now = time.monotonic()
+        cached = self._candle_cache.get(key)
+        if cached and now - cached[0] <= self._cache_ttl(timeframe):
+            return cached[1]
+
+        async with self._cache_lock:
+            cached = self._candle_cache.get(key)
+            now = time.monotonic()
+            if cached and now - cached[0] <= self._cache_ttl(timeframe):
+                return cached[1]
+            task = self._candle_inflight.get(key)
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK),
+                    name=f"candles:{asset}:{timeframe}",
+                )
+                self._candle_inflight[key] = task
+
+        try:
+            rows = await task
+        finally:
+            async with self._cache_lock:
+                if self._candle_inflight.get(key) is task:
+                    self._candle_inflight.pop(key, None)
+        self._candle_cache[key] = (time.monotonic(), rows)
+        return rows
+
     async def _candidate_dict(self, asset, timeframe, candidate, candles, *, is_vip=False):
         if candidate.strategy == "market_bias":
             ml_p = 0.5
@@ -109,28 +155,28 @@ class SignalEngine:
     async def evaluate_asset(self, asset: str, timeframe: str, strategy: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await self._candles(asset, timeframe)
         candidate = evaluate(strategy, candles)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def _evaluate_asset_best(self, asset: str, timeframe: str, strategies: Iterable[str]) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await self._candles(asset, timeframe)
         candidate = evaluate_best(candles, strategies)
         return None if candidate is None else await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_asset_composite(self, asset: str, timeframe: str) -> Optional[dict]:
         if timeframe not in TF_SECONDS:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
-        candles = await market_data.get_candles(asset, timeframe, CANDLE_LOOKBACK)
+        candles = await self._candles(asset, timeframe)
         candidate = evaluate_best(candles, MANUAL_STRATEGIES)
         if candidate is None:
             candidate = _fallback_bias(candles)
         return await self._candidate_dict(asset, timeframe, candidate, candles)
 
     async def evaluate_vip_asset(self, asset: str) -> Optional[dict]:
-        candles = await market_data.get_candles(asset, "5m", CANDLE_LOOKBACK)
+        candles = await self._candles(asset, "5m")
         candidate = evaluate("vip_confluence", candles)
         if candidate is None:
             candidate = evaluate_best(candles, SMART_STRATEGIES)
