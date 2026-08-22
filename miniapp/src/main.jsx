@@ -1,6 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './smart_confluence_ui.js'
+import './preload_ui_sync.js'
 import App from './App.jsx'
 
 const telegram = window.Telegram?.WebApp
