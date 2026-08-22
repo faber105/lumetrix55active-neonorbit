@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.models.db_models import utcnow
@@ -8,11 +10,40 @@ from backend.services.worker_protocol import (
     await_command,
     enqueue_command,
     ensure_demo_account,
+    owns_lease,
     realtime_snapshot,
 )
 from backend.telegram_auth import TelegramMiniAppUser, telegram_user
 
 router = APIRouter()
+
+
+def _is_local_worker(account_id: int) -> bool:
+    if str(os.getenv('APP_RUNTIME_ROLE') or '').strip().lower() != 'worker':
+        return False
+    try:
+        return int(os.getenv('WORKER_ACCOUNT_ID') or 0) == int(account_id)
+    except (TypeError, ValueError):
+        return False
+
+
+async def _run_local_worker_command(account_id: int, command_type: str, payload: dict) -> dict | None:
+    """Execute read/analysis work in-process when API and worker are the same Windows runtime.
+
+    Neon remains the fallback command bus for future remote/multi-worker deployments, but
+    the local Mini App must not bounce Windows -> Neon -> Windows for every candle request.
+    """
+    if not _is_local_worker(account_id) or not await owns_lease(account_id):
+        return None
+    if command_type == 'MARKET_CANDLES':
+        from backend.services.manual_worker_tasks import candles
+
+        return await candles(dict(payload))
+    if command_type == 'ANALYZE_SIGNAL':
+        from backend.services.manual_worker_tasks import analyze_market
+
+        return await analyze_market(dict(payload))
+    return None
 
 
 async def _worker_command(
@@ -23,7 +54,14 @@ async def _worker_command(
     *,
     timeout: float = 25.0,
 ) -> dict:
-    account_id = await ensure_demo_account()
+    account_id = await ensure_demo_account(int(user.id))
+    try:
+        local = await _run_local_worker_command(account_id, command_type, payload)
+        if local is not None:
+            return local
+    except Exception as exc:
+        raise HTTPException(503, f'Windows worker could not process local market data: {type(exc).__name__}') from exc
+
     command = await enqueue_command(
         account_id=account_id,
         command_type=command_type,
@@ -45,7 +83,7 @@ async def assets():
 
 @router.get('/health')
 async def health(user: TelegramMiniAppUser = Depends(telegram_user)):
-    account_id = await ensure_demo_account()
+    account_id = await ensure_demo_account(int(user.id))
     snapshot = await realtime_snapshot(account_id)
     worker = snapshot.get('worker') or {}
     return {
@@ -60,7 +98,7 @@ async def health(user: TelegramMiniAppUser = Depends(telegram_user)):
 
 @router.get('/diagnostics')
 async def diagnostics(user: TelegramMiniAppUser = Depends(telegram_user)):
-    account_id = await ensure_demo_account()
+    account_id = await ensure_demo_account(int(user.id))
     snapshot = await realtime_snapshot(account_id)
     worker = snapshot.get('worker') or {}
     return {
