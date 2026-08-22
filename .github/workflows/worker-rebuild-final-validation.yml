@@ -1,0 +1,97 @@
+name: Final Windows worker validation
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - backend/**
+      - worker/**
+      - api/**
+      - bot/**
+      - miniapp/**
+      - scripts/windows/**
+      - tests/**
+      - requirements.txt
+      - .github/workflows/worker-rebuild-final-validation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Capture source revision
+        run: echo "VALIDATED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install 'pytest>=8,<9'
+      - name: Compile runtime
+        run: python -m compileall -q backend worker api bot tests
+      - name: Run worker tests
+        env:
+          APP_RUNTIME_ROLE: web
+          POCKET_OPTION_DEMO: 'true'
+          ADMIN_ID: '1'
+          WORKER_SHARED_SECRET: 'validation-only-secret-not-used-in-production-1234567890'
+        run: |
+          pytest -q \
+            tests/test_auto_session_config.py \
+            tests/test_command_idempotency.py \
+            tests/test_fake_broker_scenarios.py \
+            tests/test_realtime_tokens.py \
+            tests/test_runtime_role.py \
+            tests/test_security_boundaries.py \
+            tests/test_session_loss_transition.py \
+            tests/test_session_settle_transition.py
+      - name: Verify architecture boundaries
+        run: |
+          set -euo pipefail
+          grep -q 'MIN_AUTO_PAYOUT = 92.0' backend/services/auto_trade.py
+          grep -q 'PRELOAD_OPEN_GRACE_SECONDS = 1.5' backend/services/preload_next.py
+          grep -q 'OrderUncertainError' backend/services/auto_trade.py
+          grep -q '_demo_trading_client: DirectDemoTradingClient' backend/services/auto_trade.py
+          grep -q 'close_demo_trading_client' worker/main.py
+          grep -q 'USER_STOP_PENDING' backend/services/session_engine.py
+          grep -q 'INSUFFICIENT_FUNDS' backend/services/auto_trade.py
+          ! grep -q 'id:"smart_confluence"' miniapp/src/App.jsx
+          ! grep -q 'strategy1+' miniapp/src/App.jsx
+          ! grep -q 'schedule:' .github/workflows/otc-scan.yml
+          grep -q "'ANALYZE_SIGNAL'" backend/routers/signals.py
+          grep -q "'SCAN_STRATEGY'" backend/routers/signals.py
+          grep -q "'SCAN_BEST'" backend/routers/signals.py
+          grep -q "'RECONCILE_SIGNALS'" backend/routers/signals.py
+          ! grep -q 'signal_engine' backend/routers/signals.py
+          ! grep -q 'market_data' backend/routers/signals.py
+          grep -q 'python-dotenv' requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - name: Build Mini App
+        working-directory: miniapp
+        run: |
+          npm ci
+          npm run build
+      - name: Record pass marker
+        run: |
+          mkdir -p validation
+          printf 'Windows worker rebuild validation PASSED\nvalidated_source_commit=%s\nvalidated_at=%s\n' \
+            "$VALIDATED_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > validation/worker-rebuild-final-passed.txt
+          git config user.name "AlphaPulse Validation"
+          git config user.email "actions@users.noreply.github.com"
+          git add validation/worker-rebuild-final-passed.txt
+          git commit -m "Record final worker rebuild validation" || exit 0
+          git pull --rebase origin codex-windows-worker-rebuild
+          git push origin HEAD:codex-windows-worker-rebuild
