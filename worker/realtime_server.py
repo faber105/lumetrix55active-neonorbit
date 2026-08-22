@@ -24,9 +24,9 @@ app = FastAPI(
     openapi_url=None,
 )
 
-# The Mini App may be served from a global CDN (Cloudflare Pages) while all
+# The Mini App may be served from a global CDN (Cloudflare Pages/Workers) while
 # authenticated API/realtime traffic remains on the private Windows worker.
-# Telegram initData/HMAC remains the authority for protected routes; CORS only
+# Telegram initData/HMAC remains authoritative for protected routes; CORS only
 # permits the browser to reach the worker gateway from the CDN origin.
 _cors_origins = [
     item.strip().rstrip("/")
@@ -36,7 +36,7 @@ _cors_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_origin_regex=r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.pages\.dev",
+    allow_origin_regex=r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:pages\.dev|workers\.dev)",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Telegram-Init-Data", "X-Idempotency-Key"],
