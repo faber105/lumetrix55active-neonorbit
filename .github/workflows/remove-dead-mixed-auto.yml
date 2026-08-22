@@ -1,5 +1,6 @@
 name: Remove dead mixed AUTO paths
 
+# Retry-safe cleanup: rebase before the generated commit is pushed.
 on:
   push:
     branches: [codex-windows-worker-rebuild]
@@ -59,4 +60,5 @@ jobs:
           git add backend/services/session_engine.py backend/services/preload_next.py
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Remove dead mixed-strategy AUTO paths"
+          git pull --rebase origin codex-windows-worker-rebuild
           git push origin HEAD:codex-windows-worker-rebuild
