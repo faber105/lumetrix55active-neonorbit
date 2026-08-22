@@ -34,7 +34,7 @@ class TakeRequest(BaseModel):
 
 
 async def _worker_candles(user_id: int, pair: str, timeframe: str, count: int) -> dict:
-    account_id = await ensure_demo_account(int(user_id))
+    account_id = await ensure_demo_account()
     bucket = int(datetime.now(timezone.utc).timestamp() // 2)
     command = await enqueue_command(
         account_id=account_id,
@@ -56,7 +56,7 @@ async def realtime_token(user: TelegramMiniAppUser = Depends(admin_user)):
     public_url = str(os.getenv('REALTIME_PUBLIC_URL') or '').strip().rstrip('/')
     if transport != 'wss' or not public_url:
         return {'transport': 'polling', 'poll_interval_ms': 1000}
-    account_id = await ensure_demo_account(int(user.id))
+    account_id = await ensure_demo_account()
     try:
         token = issue_realtime_token(telegram_id=int(user.id), account_id=account_id)
     except RuntimeError:

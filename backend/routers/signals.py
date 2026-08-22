@@ -24,7 +24,7 @@ logger = logging.getLogger('alphapulse.signals')
 
 
 async def _worker_call(user_id: int, command_type: str, payload: dict, key: str, timeout: float = 25.0) -> dict:
-    account_id = await ensure_demo_account(int(user_id))
+    account_id = await ensure_demo_account()
     command = await enqueue_command(
         account_id=account_id, command_type=command_type, payload=payload, idempotency_key=key[:128]
     )

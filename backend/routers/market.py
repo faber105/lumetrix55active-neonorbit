@@ -23,7 +23,7 @@ async def _worker_command(
     *,
     timeout: float = 25.0,
 ) -> dict:
-    account_id = await ensure_demo_account(int(user.id))
+    account_id = await ensure_demo_account()
     command = await enqueue_command(
         account_id=account_id,
         command_type=command_type,
@@ -45,7 +45,7 @@ async def assets():
 
 @router.get('/health')
 async def health(user: TelegramMiniAppUser = Depends(telegram_user)):
-    account_id = await ensure_demo_account(int(user.id))
+    account_id = await ensure_demo_account()
     snapshot = await realtime_snapshot(account_id)
     worker = snapshot.get('worker') or {}
     return {
@@ -60,7 +60,7 @@ async def health(user: TelegramMiniAppUser = Depends(telegram_user)):
 
 @router.get('/diagnostics')
 async def diagnostics(user: TelegramMiniAppUser = Depends(telegram_user)):
-    account_id = await ensure_demo_account(int(user.id))
+    account_id = await ensure_demo_account()
     snapshot = await realtime_snapshot(account_id)
     worker = snapshot.get('worker') or {}
     return {

@@ -25,7 +25,7 @@ async def analyze(req: AnalyzeRequest, user: TelegramMiniAppUser = Depends(teleg
     if req.pair.replace(' OTC', '').strip() not in DISPLAY_TO_ASSET:
         raise HTTPException(400, 'Unsupported OTC pair')
     try:
-        account_id = await ensure_demo_account(int(user.id))
+        account_id = await ensure_demo_account()
         command = await enqueue_command(
             account_id=account_id,
             command_type='ANALYZE_SIGNAL',
