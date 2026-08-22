@@ -42,6 +42,92 @@ $localUser = Get-LocalUser -Name $ServiceUser -ErrorAction Stop
 $serviceAccount = "$env:COMPUTERNAME\$ServiceUser"
 $serviceSid = $localUser.SID.Value
 
+# Password-based scheduled tasks require the account to have SeBatchLogonRight.
+# Some Windows installations do not grant it automatically when a local user is
+# used for Register-ScheduledTask, which causes Task Scheduler error 0x80070569.
+if (-not ('AlphaPulse.LsaRights' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+namespace AlphaPulse {
+    public static class LsaRights {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_OBJECT_ATTRIBUTES {
+            public int Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_UNICODE_STRING {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(
+            IntPtr SystemName,
+            ref LSA_OBJECT_ATTRIBUTES ObjectAttributes,
+            uint DesiredAccess,
+            out IntPtr PolicyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaAddAccountRights(
+            IntPtr PolicyHandle,
+            byte[] AccountSid,
+            LSA_UNICODE_STRING[] UserRights,
+            uint CountOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr PolicyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaNtStatusToWinError(uint Status);
+
+        public static void Grant(string sidText, string rightName) {
+            const uint POLICY_CREATE_ACCOUNT = 0x00000010;
+            const uint POLICY_LOOKUP_NAMES = 0x00000800;
+            var attrs = new LSA_OBJECT_ATTRIBUTES();
+            attrs.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+            IntPtr policy;
+            uint status = LsaOpenPolicy(IntPtr.Zero, ref attrs, POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES, out policy);
+            if (status != 0) {
+                throw new System.ComponentModel.Win32Exception((int)LsaNtStatusToWinError(status));
+            }
+
+            IntPtr buffer = IntPtr.Zero;
+            try {
+                var sid = new SecurityIdentifier(sidText);
+                var sidBytes = new byte[sid.BinaryLength];
+                sid.GetBinaryForm(sidBytes, 0);
+
+                buffer = Marshal.StringToHGlobalUni(rightName);
+                var right = new LSA_UNICODE_STRING {
+                    Buffer = buffer,
+                    Length = (ushort)(rightName.Length * 2),
+                    MaximumLength = (ushort)((rightName.Length + 1) * 2)
+                };
+                status = LsaAddAccountRights(policy, sidBytes, new[] { right }, 1);
+                if (status != 0) {
+                    throw new System.ComponentModel.Win32Exception((int)LsaNtStatusToWinError(status));
+                }
+            } finally {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+                LsaClose(policy);
+            }
+        }
+    }
+}
+'@
+}
+[AlphaPulse.LsaRights]::Grant($serviceSid, 'SeBatchLogonRight')
+
 if (-not (Test-Path -LiteralPath $configFile)) {
     @(
         'DATABASE_URL=',
@@ -72,4 +158,4 @@ Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName $TaskName -InputObject $task -User $serviceAccount -Password $passwordText -Force | Out-Null
 
 powercfg /change standby-timeout-ac 0 | Out-Null
-Write-Host "Installed/refreshed for $serviceAccount. Fill $configFile, then run: Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Installed/refreshed for $serviceAccount. Batch logon right granted. Fill $configFile, then run: Start-ScheduledTask -TaskName '$TaskName'"
