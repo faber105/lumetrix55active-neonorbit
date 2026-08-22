@@ -54,8 +54,6 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
         except Exception:
             logger.exception("Telegram bot could not initialize in worker maintenance")
     while not stop_event.is_set():
-        # Resolve ambiguous broker sends before any maintenance that could make
-        # a new trading decision. This path never resends an order.
         try:
             recovery = await reconcile_uncertain_executions()
             if recovery.get("recovered"):
@@ -80,14 +78,74 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
             pass
 
 
-async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
-    """Keep the Telegram bot responsive from the persistent Windows worker.
+async def _install_worker_bot_db_fallback(bot_main) -> None:
+    """Keep /start and verification independent of the unavailable Vercel API."""
+    from sqlalchemy import select
+    from backend.models.db_models import AsyncSessionLocal, User, utcnow
 
-    This is intentionally worker-only. It removes any stale Vercel webhook first
-    so Telegram has exactly one delivery transport, then runs aiogram polling
-    without signal handlers (required on Windows). Trading remains independent:
-    if Telegram polling fails, it is retried without stopping the worker.
-    """
+    def serialize_user(user: User | None):
+        if user is None:
+            return None
+        return {
+            "id": user.id,
+            "telegram_id": user.telegram_id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "status": user.status,
+            "click_time": user.click_time.isoformat() if user.click_time else None,
+            "pending_time": user.pending_time.isoformat() if user.pending_time else None,
+            "verified_time": user.verified_time.isoformat() if user.verified_time else None,
+            "attempts_count": user.attempts_count or 0,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+
+    async def local_get_user(telegram_id: int):
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
+            return serialize_user(user)
+
+    async def local_create_user(telegram_id: int, username: str, full_name: str):
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
+            if user is None:
+                user = User(
+                    telegram_id=int(telegram_id),
+                    username=(username or None),
+                    full_name=(full_name or None),
+                    status="NEW",
+                    attempts_count=0,
+                )
+                db.add(user)
+            else:
+                user.username = username or user.username
+                user.full_name = full_name or user.full_name
+            await db.commit()
+            await db.refresh(user)
+            return serialize_user(user)
+
+    async def local_set_status(telegram_id: int, status: str) -> bool:
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.telegram_id == int(telegram_id)))).scalar_one_or_none()
+            if user is None:
+                return False
+            value = str(status).upper()
+            user.status = value
+            now = utcnow()
+            if value == "VERIFIED":
+                user.verified_time = now
+            elif value == "PENDING":
+                user.pending_time = now
+            await db.commit()
+            return True
+
+    bot_main.get_user = local_get_user
+    bot_main.create_user = local_create_user
+    bot_main.set_status = local_set_status
+    logger.info("Telegram worker auth fallback is using Neon directly")
+
+
+async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
+    """Keep the Telegram bot responsive from the persistent Windows worker."""
     token = str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         logger.warning("Telegram polling disabled: TELEGRAM_BOT_TOKEN is empty")
@@ -100,7 +158,10 @@ async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
         polling_task: asyncio.Task | None = None
         stop_task: asyncio.Task | None = None
         try:
-            from bot.main import bot, dp
+            import bot.main as bot_main
+            bot = bot_main.bot
+            dp = bot_main.dp
+            await _install_worker_bot_db_fallback(bot_main)
 
             await bot.delete_webhook(drop_pending_updates=False)
             logger.info("Telegram webhook removed; Windows worker polling is active")
@@ -124,8 +185,6 @@ async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
                     pass
                 return
 
-            # Polling ended unexpectedly. Re-raise its exception so the retry
-            # loop records the real failure and restarts it after a short delay.
             await polling_task
         except asyncio.CancelledError:
             raise
@@ -145,15 +204,9 @@ async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
 def _require_demo_runtime() -> None:
     if str(os.getenv("VERCEL") or "").strip().lower() in {"1", "true", "yes", "on"}:
         raise RuntimeError("The persistent worker cannot run inside Vercel")
-    if str(os.getenv("POCKET_OPTION_DEMO") or "true").strip().lower() not in {
-        "1", "true", "yes", "on",
-    }:
+    if str(os.getenv("POCKET_OPTION_DEMO") or "true").strip().lower() not in {"1", "true", "yes", "on"}:
         raise RuntimeError("REAL AUTO execution is disabled; POCKET_OPTION_DEMO must be true")
-    missing = [
-        name
-        for name in ("DATABASE_URL", "ADMIN_ID", "POCKET_OPTION_SSID", "WORKER_SHARED_SECRET")
-        if not str(os.getenv(name) or "").strip()
-    ]
+    missing = [name for name in ("DATABASE_URL", "ADMIN_ID", "POCKET_OPTION_SSID", "WORKER_SHARED_SECRET") if not str(os.getenv(name) or "").strip()]
     if missing:
         raise RuntimeError(f"Missing worker configuration: {', '.join(missing)}")
     try:
@@ -180,14 +233,7 @@ async def run_worker() -> None:
     from backend.services.pocketoption_otc import market_data
     from backend.services.preload_next import ensure_preload_schema
     from backend.services.session_engine import ensure_schema
-    from backend.services.worker_protocol import (
-        acquire_lease,
-        ensure_demo_account,
-        ensure_worker_schema,
-        register_heartbeat,
-        release_lease,
-        worker_supervisor,
-    )
+    from backend.services.worker_protocol import acquire_lease, ensure_demo_account, ensure_worker_schema, register_heartbeat, release_lease, worker_supervisor
 
     await init_db()
     await ensure_schema()
@@ -216,15 +262,7 @@ async def run_worker() -> None:
     realtime_task = None
     if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
         import uvicorn
-        realtime_server = uvicorn.Server(
-            uvicorn.Config(
-                "worker.realtime_server:app",
-                host="127.0.0.1",
-                port=int(os.getenv("WORKER_HTTP_PORT") or 8765),
-                log_level=os.getenv("LOG_LEVEL", "info").lower(),
-                access_log=False,
-            )
-        )
+        realtime_server = uvicorn.Server(uvicorn.Config("worker.realtime_server:app", host="127.0.0.1", port=int(os.getenv("WORKER_HTTP_PORT") or 8765), log_level=os.getenv("LOG_LEVEL", "info").lower(), access_log=False))
         realtime_task = asyncio.create_task(realtime_server.serve(), name="alphapulse-worker-realtime")
     if not await start_auto_realtime_driver():
         supervisor.cancel()
@@ -256,10 +294,7 @@ async def run_worker() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     asyncio.run(run_worker())
 
 
