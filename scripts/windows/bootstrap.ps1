@@ -7,9 +7,26 @@ $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
 if (-not $pythonCommand) { $pythonCommand = Get-Command py.exe -ErrorAction Stop }
 
 Set-Location -LiteralPath $repoRoot
-if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
-    & $pythonCommand.Source -m venv .venv
+$venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$venvHealthy = $false
+if (Test-Path -LiteralPath $venvPython) {
+    try {
+        & $venvPython -c "import sys; print(sys.executable)" *> $null
+        $venvHealthy = ($LASTEXITCODE -eq 0)
+    } catch {
+        $venvHealthy = $false
+    }
 }
+
+if (-not $venvHealthy) {
+    if (Test-Path -LiteralPath (Join-Path $repoRoot '.venv')) {
+        Write-Host 'Existing .venv is broken or still points to the old Codex runtime; rebuilding it locally.'
+        Remove-Item -LiteralPath (Join-Path $repoRoot '.venv') -Recurse -Force
+    }
+    & $pythonCommand.Source -m venv .venv
+    if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed with exit code $LASTEXITCODE" }
+}
+
 $python = (Resolve-Path '.\.venv\Scripts\python.exe').Path
 & $python -m pip install --disable-pip-version-check --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip bootstrap failed with exit code $LASTEXITCODE" }
