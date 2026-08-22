@@ -1,0 +1,62 @@
+name: Remove dead mixed AUTO paths
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/remove-dead-mixed-auto.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Remove unreachable mixed-strategy branches
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('backend/services/session_engine.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n', '    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)\n', 1)
+          text = text.replace('    label = "Mixed Smart Confluence" if mixed_count else ("Smart Confluence" if strategy == "smart_confluence" else STRATEGY_LABELS.get(strategy, strategy))\n', '    label = STRATEGY_LABELS.get(strategy, strategy)\n', 1)
+          start = text.find('        if mixed_count:\n            # Second-pass confirmation')
+          if start >= 0:
+              end = text.find('\n        stored, duplicate = await save_signal(candidate_to_save, is_vip=False)', start)
+              if end < 0:
+                  raise SystemExit('mixed confirmation end not found')
+              text = text[:start] + text[end+1:]
+          text = text.replace(', "mixed": mixed_count, "confirmed": True}', ', "confirmed": True}', 1)
+          text = text.replace('message=("Mixed анализ → подтверждение пары пройдено · жду точную границу свечи" if mixed_count else "Все пары проанализированы · лучший подтверждённый сетап с payout ≥92% найден"),', 'message="Все пары проанализированы · лучший подтверждённый сетап выбранной стратегии с payout ≥92% найден",', 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('backend/services/preload_next.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace('    mixed_count = False\n    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n', '    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)\n', 1)
+          start = text.find('        if mixed_count:\n            try:\n                recheck = await signal_engine.evaluate_asset(')
+          if start >= 0:
+              end = text.find('\n        selected = candidate_to_save\n', start)
+              if end < 0:
+                  raise SystemExit('preload mixed confirmation end not found')
+              text = text[:start] + text[end:]
+          p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend worker
+          ! grep -q 'mixed_count' backend/services/session_engine.py
+          ! grep -q 'mixed_count' backend/services/preload_next.py
+          ! grep -q 'Mixed Smart' backend/services/session_engine.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Cleanup"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/session_engine.py backend/services/preload_next.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Remove dead mixed-strategy AUTO paths"
+          git push origin HEAD:codex-windows-worker-rebuild
