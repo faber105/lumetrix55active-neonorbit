@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -12,8 +13,14 @@ from sqlalchemy import text
 from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_realtime import notify_auto_change
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
-from backend.services.session_engine import session_history, session_state, validate_session_config
-from backend.services.worker_protocol import ensure_demo_account, enqueue_command
+from backend.services.session_engine import (
+    session_history,
+    session_state,
+    start_session,
+    stop_session,
+    validate_session_config,
+)
+from backend.services.worker_protocol import ensure_demo_account, enqueue_command, owns_lease, realtime_snapshot
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 
 router = APIRouter()
@@ -36,12 +43,21 @@ class PreviewRequest(StartSessionRequest):
 
 
 def _normalize_strategy(value: str | None) -> str:
-    # Older Mini App builds used smart_confluence as the initial AUTO value even
-    # though the rebuilt engine exposes one of three strict single strategies.
-    # Keep those cached clients functional and route the legacy default to the
-    # first supported strategy instead of rejecting START_SESSION before enqueue.
     raw = str(value or "").strip()
     return "trend_pulse" if raw == "smart_confluence" else raw
+
+
+def _is_local_worker(account_id: int) -> bool:
+    if str(os.getenv("APP_RUNTIME_ROLE") or "").strip().lower() != "worker":
+        return False
+    try:
+        return int(os.getenv("WORKER_ACCOUNT_ID") or 0) == int(account_id)
+    except (TypeError, ValueError):
+        return False
+
+
+async def _local_worker_ready(account_id: int) -> bool:
+    return _is_local_worker(account_id) and await owns_lease(account_id)
 
 
 def _bet_plan(base: float, payout: float, max_martingale: int) -> list[float]:
@@ -61,11 +77,7 @@ async def preview(data: PreviewRequest, _: TelegramMiniAppUser = Depends(admin_u
     values = validate_session_config(body)
     levels = _bet_plan(values["amount"], data.payout, values["max_martingale"])
     expected_net = round(values["amount"] * float(data.payout) / 100.0, 2)
-    projected = (
-        round(expected_net * int(values["target_wins"]), 2)
-        if values["mode"] == "count"
-        else float(values["target_profit"])
-    )
+    projected = round(expected_net * int(values["target_wins"]), 2) if values["mode"] == "count" else float(values["target_profit"])
     return {
         "levels": levels,
         "payout": float(data.payout),
@@ -201,11 +213,21 @@ def _decorate_live_state(payload: dict) -> dict:
     return payload
 
 
+async def _fast_state(user_id: int) -> dict:
+    account_id = await ensure_demo_account(int(user_id))
+    if await _local_worker_ready(account_id):
+        return _decorate_live_state(await realtime_snapshot(account_id))
+    return _decorate_live_state(await session_state())
+
+
 @router.get("/state")
-async def state(refresh: bool = Query(False), drive: bool = Query(False), _: TelegramMiniAppUser = Depends(admin_user)):
-    payload = await session_state(refresh_balance=refresh)
+async def state(refresh: bool = Query(False), drive: bool = Query(False), user: TelegramMiniAppUser = Depends(admin_user)):
+    if refresh:
+        payload = _decorate_live_state(await session_state(refresh_balance=True))
+    else:
+        payload = await _fast_state(int(user.id))
     payload["driver"] = {"status": "WORKER_DRIVEN", "legacy_drive_ignored": bool(drive)}
-    return _decorate_live_state(payload)
+    return payload
 
 
 @router.post("/tick")
@@ -226,6 +248,16 @@ async def start(
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     account_id = await ensure_demo_account(int(user.id))
+
+    if await _local_worker_ready(account_id):
+        try:
+            payload = _decorate_live_state(await start_session(body))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await notify_auto_change(wake_driver=True)
+        payload["driver"] = {"status": "LOCAL_STARTED"}
+        return payload
+
     command = await enqueue_command(
         account_id=account_id,
         command_type="START_SESSION",
@@ -233,7 +265,7 @@ async def start(
         idempotency_key=_command_key(int(user.id), "START_SESSION", body, x_idempotency_key),
     )
     await notify_auto_change(wake_driver=True)
-    payload = _decorate_live_state(await session_state())
+    payload = await _fast_state(int(user.id))
     payload["command"] = command
     payload["driver"] = {"status": "QUEUED"}
     return payload
@@ -246,6 +278,13 @@ async def stop(
 ):
     body = {"reason": "USER_STOP"}
     account_id = await ensure_demo_account(int(user.id))
+
+    if await _local_worker_ready(account_id):
+        payload = _decorate_live_state(await stop_session("USER_STOP"))
+        await notify_auto_change(wake_driver=True)
+        payload["driver"] = {"status": "LOCAL_STOPPED"}
+        return payload
+
     command = await enqueue_command(
         account_id=account_id,
         command_type="STOP_SESSION",
@@ -253,7 +292,7 @@ async def stop(
         idempotency_key=_command_key(int(user.id), "STOP_SESSION", body, x_idempotency_key),
     )
     await notify_auto_change(wake_driver=True)
-    payload = _decorate_live_state(await session_state())
+    payload = await _fast_state(int(user.id))
     payload["command"] = command
     payload["driver"] = {"status": "QUEUED"}
     return payload
