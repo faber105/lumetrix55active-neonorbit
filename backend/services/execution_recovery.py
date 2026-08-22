@@ -42,16 +42,18 @@ async def _runtime_payout() -> float:
         return 92.0
 
 
-async def _attach_recovered_position(execution: TradeExecution, signal: Signal, recovered) -> dict:
+async def _attach_recovered_position(execution: TradeExecution, signal: Signal, recovered, recovered_entry_price: float | None = None) -> dict:
     broker_order_id = str(recovered.order_id)
     placed_at = _naive(recovered.placed_at) or utcnow()
     expires_at = _naive(recovered.expires_at) or signal.expiry_time
-    entry_price = signal.entry_price or signal.analysis_price
+    entry_price = recovered_entry_price or signal.entry_price or signal.analysis_price
     if entry_price is None:
+        # Do not invent a price for a real broker execution. If the broker deal
+        # does not expose one, use a live quote only as a last observable value.
         try:
             entry_price = await market_data.latest_price(signal.asset)
         except Exception:
-            entry_price = 1.0
+            return {"status": "UNRESOLVED_PRICE", "execution_id": int(execution.id)}
     payout = await _runtime_payout()
 
     async with AsyncSessionLocal() as db:
@@ -203,7 +205,7 @@ async def reconcile_uncertain_executions(limit: int = 10) -> dict:
             if recovered is None:
                 unresolved += 1
                 continue
-            attached = await _attach_recovered_position(execution, signal, recovered)
+            attached = await _attach_recovered_position(execution, signal, recovered, client.last_open_price)
             if attached.get("status") in {"RECOVERED", "ALREADY_ATTACHED"}:
                 recovered_count += 1
             else:

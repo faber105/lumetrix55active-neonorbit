@@ -233,10 +233,14 @@ class DirectDemoTradingClient:
             if not isinstance(deal, dict):
                 continue
             if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:
+                self.last_open_payload = deal
+                self.last_open_price = self._open_price(deal)
                 return self._deal_to_order_result(deal, request_id, closed=False)
         for deal in closed:
             if not isinstance(deal, dict):
                 continue
             if self._request_id_from_deal(deal) == request_id or self._order_id(deal, "") == request_id:
+                self.last_open_payload = deal
+                self.last_open_price = self._open_price(deal)
                 return self._deal_to_order_result(deal, request_id, closed=True)
         return None
