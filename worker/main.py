@@ -9,6 +9,36 @@ from dotenv import load_dotenv
 
 
 logger = logging.getLogger("alphapulse.worker")
+HUNT_REGULAR = "HUNT_REGULAR"
+HUNT_FOUND = "HUNT_FOUND"
+REGULAR_CONFIDENCE = 72.0
+
+
+async def _regular_hunt_tick() -> None:
+    """Advance an admin-requested regular signal hunt on the worker only."""
+    from backend.models.db_models import utcnow
+    from backend.services.control import get_control, update_control
+    from backend.services.pocketoption_otc import OTC_ASSETS
+    from backend.services.signal_engine import signal_engine
+    from backend.services.signal_store import save_signal
+
+    control = await get_control()
+    if control is None or str(control.last_vip_status or "") != HUNT_REGULAR:
+        return
+    candidate = await signal_engine.scan_strategy(
+        control.selected_timeframe,
+        list(OTC_ASSETS.keys()),
+        control.selected_strategy,
+    )
+    now = utcnow()
+    if not candidate or float(candidate.get("confidence") or 0) < REGULAR_CONFIDENCE:
+        await update_control(last_scan_at=now, last_vip_status=HUNT_REGULAR)
+        return
+    _signal, duplicate = await save_signal(candidate, is_vip=False)
+    await update_control(
+        last_scan_at=now,
+        last_vip_status=HUNT_REGULAR if duplicate else HUNT_FOUND,
+    )
 
 
 async def _maintenance_loop(stop_event: asyncio.Event) -> None:
@@ -27,11 +57,15 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
         except Exception as exc:
             logger.warning("Manual signal reconciliation recovered after %s", type(exc).__name__)
         try:
+            await _regular_hunt_tick()
+        except Exception as exc:
+            logger.warning("Regular hunt recovered after %s", type(exc).__name__)
+        try:
             await run_due_vip(telegram_bot)
         except Exception as exc:
             logger.warning("VIP maintenance recovered after %s", type(exc).__name__)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=2.0)
         except asyncio.TimeoutError:
             pass
 
@@ -67,8 +101,6 @@ async def run_worker() -> None:
     os.environ["AUTO_REALTIME_DRIVER"] = "true"
     _require_demo_runtime()
 
-    # Imports happen only after the runtime guard so the public web runtime can
-    # never acquire worker-side resources as an import side effect.
     from backend.models.db_models import engine
     from backend.services.auto_realtime import start_auto_realtime_driver, stop_auto_realtime_driver
     from backend.services.database import init_db
