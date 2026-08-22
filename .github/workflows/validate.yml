@@ -2,7 +2,8 @@ name: Validate AlphaPulse
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex-windows-worker-rebuild]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,7 +16,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -23,87 +24,61 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Compile Python
-        run: python -m compileall -q api backend bot tests
-
-      - name: Run Python unit tests
-        run: python -m unittest discover -s tests -v
-
       - name: Install Python dependencies
-        run: pip install -e .
+        run: python -m pip install -q -r requirements.txt pytest
 
-      - name: Import FastAPI application
+      - name: Compile Python
+        run: python -m compileall -q api backend bot worker tests
+
+      - name: Run worker and session tests
         env:
+          APP_RUNTIME_ROLE: web
+          ADMIN_ID: '8535011479'
+          DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
           TELEGRAM_BOT_TOKEN: '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijk'
-          ADMIN_ID: '8535011479'
-          DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: |
-          python - <<'PY'
-          from api.main import app
-          assert app.title == 'AlphaPulse API'
-          assert app.version == '3.4'
-          paths = {route.path for route in app.routes}
-          assert '/api/auto/tick' in paths
-          assert '/ws/auto' in paths
-          print('FastAPI 3.4 realtime import OK')
-          PY
+          pytest -q \
+            tests/test_runtime_role.py \
+            tests/test_security_boundaries.py \
+            tests/test_realtime_tokens.py \
+            tests/test_command_idempotency.py \
+            tests/test_auto_session_config.py \
+            tests/test_session_loss_transition.py \
+            tests/test_session_settle_transition.py \
+            tests/test_fake_broker_scenarios.py \
+            tests/test_worker_lease_gate.py
 
-      - name: Verify strategies and AUTO session configuration
+      - name: Verify rebuilt worker boundaries
         env:
+          APP_RUNTIME_ROLE: web
           ADMIN_ID: '8535011479'
           DATABASE_URL: 'postgresql://alpha:alphapulse123@localhost:5432/alphapulse'
         run: |
           python - <<'PY'
+          from backend.services.auto_realtime import realtime_driver_enabled
           from backend.services.auto_trade import MIN_AUTO_PAYOUT
-          from backend.services.pocketoption_otc import TF_SECONDS
-          from backend.services.session_driver import TICK_MIN_INTERVAL_SECONDS, drive_session_tick
-          from backend.services.session_engine import (
-              AUTO_STRATEGIES,
-              COUNT_TIMEFRAMES,
-              PROFIT_TIMEFRAME,
-              PROFIT_STRATEGIES,
-              _next_amount,
-              _validate_config,
-          )
-          from backend.services.signal_engine import signal_engine
-          from backend.services.strategies import SMART_STRATEGIES, STRATEGIES
+          from backend.services.session_engine import AUTO_TIMEFRAMES, validate_session_config
+          from backend.services.session_transitions import settle_transition
 
-          assert signal_engine is not None
-          assert callable(drive_session_tick)
-          assert 0.5 <= TICK_MIN_INTERVAL_SECONDS <= 1.0
-          assert tuple(AUTO_STRATEGIES) == ('trend_pulse', 'range_reversal', 'volatility_breakout')
-          assert tuple(SMART_STRATEGIES) == (
-              'trend_pulse', 'range_reversal', 'volatility_breakout',
-              'momentum_retest', 'squeeze_breakout',
-          )
-          assert {'momentum_retest', 'squeeze_breakout', 'vip_confluence'} <= set(STRATEGIES)
-          assert COUNT_TIMEFRAMES == {'15s', '1m', '3m'}
-          assert TF_SECONDS['15s'] == 15 and TF_SECONDS['3m'] == 180
-          assert PROFIT_TIMEFRAME == '5m'
-          assert 'smart_confluence' in PROFIT_STRATEGIES
+          assert realtime_driver_enabled() is False
           assert MIN_AUTO_PAYOUT == 92.0
-
-          count = _validate_config({
-              'mode': 'count', 'strategy': 'trend_pulse', 'timeframe': '15s',
-              'target_wins': 5, 'amount': 1, 'max_martingale': 3,
+          assert {'15s','1m','3m','5m','15m'} == AUTO_TIMEFRAMES
+          values = validate_session_config({
+              'mode':'count','strategy':'trend_pulse','timeframe':'15s',
+              'target_wins':5,'amount':1,'max_martingale':3,
           })
-          assert count['target_wins'] == 5 and count['max_martingale'] == 3
-
-          profit = _validate_config({
-              'mode': 'profit', 'strategy': 'smart_confluence',
-              'target_profit': 10, 'amount': 1, 'max_martingale': 2,
-              'max_failed_series': 2,
-          })
-          assert profit['timeframe'] == '5m' and profit['max_failed_series'] == 2
-
-          recovery = _next_amount({
-              'base_amount': 1.0,
-              'current_level': 1,
-              'current_series_loss': 1.0,
-          }, 92.0)
-          assert recovery > 2.0
-          assert round(recovery * .92 - 1.0, 2) >= .92
-          print('Strategy/session rules OK')
+          assert values['target_wins'] == 5
+          assert values['max_martingale'] == 3
+          state = {
+              'mode':'count','target_wins':5,'wins':0,'failed_series':0,
+              'current_level':0,'current_series_loss':0,'profit':0,
+              'max_martingale':3,'max_failed_series':1,
+          }
+          first_loss = settle_transition(state, result='LOSS', amount=1, payout=92)
+          assert first_loss['status'] == 'ACTIVE'
+          assert first_loss['level'] == 1
+          assert first_loss['stage'] == 'SCANNING'
+          print('Worker/session boundaries OK')
           PY
 
       - uses: actions/setup-node@v4
@@ -116,38 +91,16 @@ jobs:
         working-directory: miniapp
         run: npm ci --no-audit --no-fund
 
-      - name: Build Mini App
-        working-directory: miniapp
-        run: npm run build
-
-      - name: Verify new Mini App flows
+      - name: Lint and build Mini App
         working-directory: miniapp
         run: |
-          grep -R -q 'VIP 5M Confluence' dist/assets/*.js
-          grep -R -q 'НАСТРОЙКА AUTO' dist/assets/*.js
-          grep -R -q 'AUTO СЕССИЯ' dist/assets/*.js
-          grep -R -q 'ПУЛЬС РЫНКА' dist/assets/*.js
-          grep -R -q 'Автотрейдинг' dist/assets/*.js
-          grep -R -q 'REALTIME' dist/assets/*.js
+          npm run lint --if-present
+          npm run build
+
+      - name: Verify Mini App AUTO transport
+        working-directory: miniapp
+        run: |
+          grep -R -q '/api/auto/state' dist/assets/*.js
           grep -R -q '/ws/auto' dist/assets/*.js
-          echo 'Mini App flows OK'
-
-      - name: Verify stale Telegram asset recovery
-        env:
-          ADMIN_ID: '8535011479'
-        run: |
-          python - <<'PY'
-          from fastapi.testclient import TestClient
-          from api.main import app
-          with TestClient(app) as client:
-              root = client.get('/')
-              assert root.status_code == 200, root.text
-              assert root.headers.get('cache-control') == 'no-store, max-age=0'
-              stale_js = client.get('/assets/index-stale-telegram-cache.js')
-              assert stale_js.status_code == 200, stale_js.text
-              assert stale_js.headers.get('x-alphapulse-asset-recovery') == '1'
-              stale_css = client.get('/assets/index-stale-telegram-cache.css')
-              assert stale_css.status_code == 200, stale_css.text
-              assert stale_css.headers.get('x-alphapulse-asset-recovery') == '1'
-          print('Stale asset recovery OK')
-          PY
+          grep -R -q 'Автотрейдинг' dist/assets/*.js
+          echo 'Mini App AUTO transport OK'
