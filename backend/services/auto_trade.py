@@ -15,7 +15,7 @@ from backend.models.db_models import (
 )
 from backend.services.broker_adapter import DemoBrokerAdapter
 from backend.services.control import admin_id
-from backend.services.pocket_demo_trading import DirectDemoTradingClient
+from backend.services.pocket_demo_trading import DirectDemoTradingClient, OrderUncertainError
 from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire_auth, market_data
 from backend.services.trade_mode import get_execution_mode, get_trade_account_mode
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
@@ -362,6 +362,16 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             if payout is None or payout < MIN_AUTO_PAYOUT:
                 await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")
                 return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
+            broker_balance = snapshot.get("balance")
+            if broker_balance is not None and float(broker_balance) + 1e-9 < float(amount):
+                await update_trade_runtime(
+                    stage="STOPPED", pending_signal_id=None, balance=float(broker_balance), amount=amount,
+                    message=f"Недостаточно средств · баланс {float(broker_balance):.2f}, для следующей сделки нужно {amount:.2f}",
+                )
+                return {
+                    "status": "STOP_REQUIRED", "reason": "INSUFFICIENT_FUNDS",
+                    "balance": float(broker_balance), "required": float(amount),
+                }
 
             if exact_entry:
                 remaining = (entry - utcnow()).total_seconds()
@@ -460,6 +470,20 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                 "broker_order_id": str(result.order_id),
                 "payout": payout, "balance": balance, "entry_time": _iso(placed_at), "scheduled_entry_time": _iso(entry),
                 "entry_delay_ms": round((placed_at - entry).total_seconds() * 1000) if exact_entry else None,
+            }
+        except OrderUncertainError as exc:
+            if execution is not None:
+                await _mark_execution(
+                    execution.id, "UNKNOWN", f"ORDER_UNCERTAIN:{exc.request_id}",
+                )
+            await update_trade_runtime(
+                stage="RECONCILING", pending_signal_id=int(signal["id"]),
+                message="Pocket не подтвердил ответ · сверяю сделку по request id, новые входы заблокированы",
+            )
+            return {
+                "status": "RECONCILING", "reason": "ORDER_UNCERTAIN",
+                "request_id": exc.request_id, "signal_id": int(signal["id"]),
+                "execution_id": execution.id if execution is not None else None,
             }
         except asyncio.TimeoutError:
             # The broker may have accepted the order even though its response
