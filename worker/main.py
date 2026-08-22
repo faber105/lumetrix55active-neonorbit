@@ -111,6 +111,7 @@ async def run_worker() -> None:
     _require_demo_runtime()
 
     from backend.models.db_models import engine
+    from backend.services.auto_trade import close_demo_trading_client
     from backend.services.auto_realtime import start_auto_realtime_driver, stop_auto_realtime_driver
     from backend.services.database import init_db
     from backend.services.pocketoption_otc import market_data
@@ -184,6 +185,7 @@ async def run_worker() -> None:
                 pass
         await release_lease(account_id)
         await register_heartbeat(status="OFFLINE")
+        await close_demo_trading_client()
         await market_data.close()
         await engine.dispose()
 

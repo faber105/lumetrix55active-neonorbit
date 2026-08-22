@@ -30,6 +30,7 @@ MIN_AUTO_PAYOUT = 92.0
 AUTO_DUE_WINDOW_SECONDS = max(5, min(10, int(os.getenv("AUTO_DUE_WINDOW_SECONDS", "7"))))
 ENTRY_GRACE_SECONDS = max(0.5, min(3.0, float(os.getenv("AUTO_ENTRY_GRACE_SECONDS", "1.5"))))
 _snapshot_cache: dict = {"at": 0.0, "data": None}
+_demo_trading_client: DirectDemoTradingClient | None = None
 
 
 def _to_utc_naive(value) -> datetime:
@@ -131,8 +132,27 @@ async def latest_execution() -> dict | None:
     }
 
 
+def _worker_persistent_broker_enabled() -> bool:
+    return str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() == "worker"
+
+
 def _build_trading_client() -> DemoBrokerAdapter:
-    return DirectDemoTradingClient(market_data.ssid)
+    global _demo_trading_client
+    if not _worker_persistent_broker_enabled():
+        return DirectDemoTradingClient(market_data.ssid)
+    if _demo_trading_client is None:
+        _demo_trading_client = DirectDemoTradingClient(market_data.ssid)
+    return _demo_trading_client
+
+
+async def close_demo_trading_client() -> None:
+    global _demo_trading_client
+    client, _demo_trading_client = _demo_trading_client, None
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.0) -> dict:
@@ -143,18 +163,26 @@ async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.
     await market_data._refresh_private_ssid()
     if not market_data.configured or not trading_is_demo():
         return {"balance": None, "balance_is_demo": None, "payouts": {}, "available_assets": {}}
-    client = DirectDemoTradingClient(market_data.ssid)
+    client = _build_trading_client()
     try:
         await asyncio.wait_for(client.connect(persistent=False), timeout=20)
-        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=1.7), timeout=4)
+        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.65), timeout=3)
+        captured = snapshot.get("captured_at")
+        if captured is not None and time.time() - float(captured) > 3.0 and _worker_persistent_broker_enabled():
+            # A half-open Socket.IO connection can look connected until the next
+            # receive. Reconnect once when telemetry stopped advancing.
+            await client.disconnect()
+            await asyncio.wait_for(client.connect(persistent=False), timeout=20)
+            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=3)
         _snapshot_cache["at"] = time.monotonic()
         _snapshot_cache["data"] = dict(snapshot)
         return snapshot
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if not _worker_persistent_broker_enabled():
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 def payout_for_asset(snapshot: dict, asset: str) -> float | None:
@@ -520,7 +548,7 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             await update_trade_runtime(stage="FAILED", pending_signal_id=None, message=f"Ошибка открытия: {type(exc).__name__}")
             return {"status": "FAILED", "error": type(exc).__name__}
         finally:
-            if client is not None:
+            if client is not None and not _worker_persistent_broker_enabled():
                 try:
                     await client.disconnect()
                 except Exception:
