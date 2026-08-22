@@ -95,7 +95,14 @@ if os.getenv("DATABASE_URL", "").strip():
     except Exception as exc:
         print(f"AlphaPulse runtime secret bootstrap failed: {type(exc).__name__}")
 
-production_host = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+production_host = str(
+    os.getenv("PUBLIC_BACKEND_URL")
+    or os.getenv("BACKEND_URL")
+    or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    or os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
+    or os.getenv("VERCEL_URL")
+    or ""
+).strip()
 if production_host:
     production_base_url = production_host if production_host.startswith(("http://", "https://")) else f"https://{production_host}"
 else:
