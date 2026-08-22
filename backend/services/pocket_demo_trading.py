@@ -93,7 +93,8 @@ class DirectDemoTradingClient:
     ) -> OrderResult:
         if not self._client.is_demo:
             raise RuntimeError("Direct trading client is demo-only")
-        if float(amount) <= 0:
+        amount = float(amount)
+        if amount <= 0:
             raise ValueError("Demo amount must be positive")
         if int(duration) < 5:
             raise ValueError("Demo duration must be at least 5 seconds")
@@ -102,6 +103,15 @@ class DirectDemoTradingClient:
         ws = self._client._ws
         if ws is None or ws.closed:
             raise RuntimeError("Pocket Option demo websocket is not open")
+
+        # The AUTO execution path refreshes account telemetry on this same
+        # client immediately before place_order. If Pocket has already told us
+        # the current DEMO balance, fail closed before sending openOrder.
+        balance = self._client.balance
+        if balance is not None and amount > float(balance) + 1e-9:
+            raise RuntimeError(
+                f"InsufficientFunds: balance={float(balance):.2f}, required={amount:.2f}"
+            )
 
         action = str(getattr(direction, "value", direction)).strip().lower()
         if action not in {"call", "put"}:
@@ -112,7 +122,7 @@ class DirectDemoTradingClient:
             "openOrder",
             {
                 "asset": str(asset),
-                "amount": float(amount),
+                "amount": amount,
                 "action": action,
                 "isDemo": 1,
                 "requestId": request_id,
@@ -142,7 +152,7 @@ class DirectDemoTradingClient:
                     return OrderResult(
                         order_id=self._order_id(payload, request_id),
                         asset=str(asset),
-                        amount=float(amount),
+                        amount=amount,
                         direction=direction,
                         duration=int(duration),
                         status=OrderStatus.ACTIVE,
