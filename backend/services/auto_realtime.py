@@ -101,6 +101,8 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
 
     if status in {"IDLE", "NOT_STARTED"}:
         target = 3.0
+    elif status in {"STANDBY", "LEASE_LOST"}:
+        target = 0.5
     elif status in {"ERROR", "WAIT_MARKET", "FAILED"}:
         target = 0.45
     elif (
@@ -123,6 +125,35 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
     return max(0.02, target - max(0.0, elapsed))
 
 
+async def _drive_worker_iteration(account_id: int) -> dict[str, Any]:
+    """Run one worker iteration only while this process owns the account lease.
+
+    The database lease is the final authority for broker ownership. A worker that
+    loses Neon connectivity long enough for its lease to expire must stop all AUTO
+    broker/session work immediately; otherwise an already-promoted standby worker
+    could trade the same account concurrently.
+    """
+    if account_id <= 0:
+        return {"status": "ERROR", "error": "WORKER_ACCOUNT_ID_MISSING"}
+
+    from backend.services.worker_protocol import owns_lease, process_one_command
+
+    if not await owns_lease(account_id):
+        return {"status": "STANDBY", "reason": "LEASE_NOT_OWNED"}
+
+    command = await process_one_command(account_id)
+    if command is not None:
+        return dict(command)
+
+    # Re-check immediately before broker/session driving. The lease can be lost
+    # between command polling and the trading tick during failover.
+    if not await owns_lease(account_id):
+        return {"status": "LEASE_LOST", "reason": "LEASE_NOT_OWNED"}
+
+    value = await adaptive_drive_session_tick()
+    return dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
+
+
 async def _driver_loop() -> None:
     global _last_result, _last_tick_at
     assert _stop_event is not None
@@ -132,16 +163,7 @@ async def _driver_loop() -> None:
         result: dict[str, Any]
         try:
             account_id = int(os.getenv("WORKER_ACCOUNT_ID") or 0)
-            command = None
-            if account_id > 0:
-                from backend.services.worker_protocol import process_one_command
-
-                command = await process_one_command(account_id)
-            if command is not None:
-                result = dict(command)
-            else:
-                value = await adaptive_drive_session_tick()
-                result = dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
+            result = await _drive_worker_iteration(account_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
