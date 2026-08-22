@@ -12,6 +12,8 @@ def loss_transition(session, *, amount, failed, level, series_loss):
 
     A fully lost martingale chain is a failed series in every AUTO mode. The
     cover limit is therefore a hard stop once ``max_failed_series`` is reached.
+    Martingale is session data (``current_level``), not a durable state by
+    itself, so the engine returns to SCANNING for the next confirmed setup.
     """
     series_loss += amount
     max_martingale = int(session["max_martingale"])
@@ -22,7 +24,7 @@ def loss_transition(session, *, amount, failed, level, series_loss):
             "level": level,
             "series_loss": series_loss,
             "status": "ACTIVE",
-            "stage": "MARTINGALE",
+            "stage": "SCANNING",
             "reason": None,
             "ended": None,
             "message": (
