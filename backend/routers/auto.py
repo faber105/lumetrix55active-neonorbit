@@ -12,6 +12,7 @@ from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
 from backend.services.session_driver import drive_session_tick
 from backend.services.cpu_guard import adaptive_drive_session_tick
+from backend.services.auto_realtime import notify_auto_change
 from backend.services.session_engine import session_history, session_state, start_session, stop_session
 from backend.services.trade_mode import set_execution_mode
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
@@ -182,7 +183,9 @@ async def state(refresh: bool = Query(False), drive: bool = Query(False), _: Tel
 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
-    return await adaptive_drive_session_tick()
+    result = await adaptive_drive_session_tick()
+    await notify_auto_change()
+    return result
 
 
 @router.post("/start")
@@ -197,6 +200,7 @@ async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admi
                 first_tick = {"status": "ERROR", "error": type(exc).__name__}
             payload = await session_state()
             payload["driver"] = first_tick
+        await notify_auto_change(wake_driver=True)
         return _decorate_live_state(payload)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -205,7 +209,9 @@ async def start(data: StartSessionRequest, _: TelegramMiniAppUser = Depends(admi
 @router.post("/stop")
 async def stop(_: TelegramMiniAppUser = Depends(admin_user)):
     await set_execution_mode("confirm")
-    return _decorate_live_state(await stop_session("USER_STOP"))
+    payload = _decorate_live_state(await stop_session("USER_STOP"))
+    await notify_auto_change(wake_driver=True)
+    return payload
 
 
 @router.get("/history")
