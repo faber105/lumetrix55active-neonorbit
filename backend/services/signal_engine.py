@@ -182,7 +182,35 @@ class SignalEngine:
             candidate = evaluate_best(candles, SMART_STRATEGIES)
         return None if candidate is None else await self._candidate_dict(asset, "5m", candidate, candles, is_vip=True)
 
-    async def _gather_candidates(self, assets: Iterable[str], evaluator) -> list[dict]:
+    async def _publish_auto_progress(self, completed: int, total: int, requested: list[str]) -> None:
+        """Publish live AUTO scan progress without making the browser drive the engine.
+
+        The persistent worker remains the only scanner. We update its shared runtime
+        after each completed pair so WebSocket/polling clients can render 1/N, 2/N,
+        ... immediately instead of appearing frozen until asyncio.gather finishes.
+        This is intentionally worker-only and only while the AUTO runtime is in a
+        scanning stage, so manual signal scans do not overwrite AUTO telemetry.
+        """
+        if str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() != "worker":
+            return
+        try:
+            from backend.services.trade_runtime import get_trade_runtime, update_trade_runtime
+
+            runtime = await get_trade_runtime()
+            if str(runtime.get("stage") or "").upper() not in {"SCANNING", "WAIT_PAYOUT"}:
+                return
+            await update_trade_runtime(
+                stage="SCANNING",
+                scanned_assets=requested,
+                scanned_count=int(completed),
+                eligible_assets=requested,
+                min_payout=92.0,
+                message=f"Анализ {completed}/{total} пар с payout ≥92%",
+            )
+        except Exception as exc:
+            logger.debug("AUTO progress publish skipped: %s", type(exc).__name__)
+
+    async def _gather_candidates(self, assets: Iterable[str], evaluator, *, publish_progress: bool = False) -> list[dict]:
         requested = list(dict.fromkeys(str(asset) for asset in assets if asset))
         eligible_scope, discovered_count = get_auto_scan_scope()
         if eligible_scope and discovered_count and len(requested) >= discovered_count:
@@ -208,11 +236,32 @@ class SignalEngine:
         tasks = [asyncio.create_task(one(asset)) for asset in requested]
         if not tasks:
             return []
-        results = await asyncio.gather(*tasks)
-        return [item for item in results if item]
+
+        results: list[dict] = []
+        completed = 0
+        total = len(tasks)
+        for task in asyncio.as_completed(tasks):
+            try:
+                item = await task
+            except Exception:
+                for pending in tasks:
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            completed += 1
+            if item:
+                results.append(item)
+            if publish_progress:
+                await self._publish_auto_progress(completed, total, requested)
+        return results
 
     async def scan_strategy_candidates(self, timeframe: str, assets: Iterable[str], strategy: str) -> list[dict]:
-        results = await self._gather_candidates(assets, lambda asset: self.evaluate_asset(asset, timeframe, strategy))
+        results = await self._gather_candidates(
+            assets,
+            lambda asset: self.evaluate_asset(asset, timeframe, strategy),
+            publish_progress=True,
+        )
         return sorted(results, key=lambda x: float(x.get("confidence") or 0), reverse=True)
 
     async def scan_strategy(self, timeframe: str, assets: Iterable[str], strategy: str) -> Optional[dict]:
