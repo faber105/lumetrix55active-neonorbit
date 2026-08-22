@@ -28,7 +28,7 @@ function alphaPulseRuntimePatch() {
         )
         next = next.replace(
           'const timeoutMs = Number(options.timeoutMs || 4500);',
-          'const timeoutMs = Number(options.timeoutMs || 9000);'
+          'const timeoutMs = Number(options.timeoutMs || 20000);'
         )
         next = next.replace(
           'const connect = async () => {\n    if (stopped || !getTelegramInitData()) return;',
