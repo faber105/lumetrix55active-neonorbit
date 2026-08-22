@@ -73,9 +73,9 @@ class PocketOptionOTCService:
         self._last_error = None
         self._auth_kind = 'none'
         self._private_secret_loaded = False
-        runtime_role = os.getenv('APP_RUNTIME_ROLE', 'web').strip().lower()
+        self._runtime_role = os.getenv('APP_RUNTIME_ROLE', 'web').strip().lower()
         # Pocket credentials are local-worker secrets and are ignored by web/serverless runtimes.
-        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip() if runtime_role == 'worker' else '')
+        self._apply_ssid(os.getenv('POCKET_OPTION_SSID', '').strip() if self._runtime_role == 'worker' else '')
 
     def _apply_ssid(self, value: str) -> None:
         self.ssid = (value or '').strip()
@@ -133,6 +133,17 @@ class PocketOptionOTCService:
         websocket._alphapulse_regular_42_patch = True
 
     def _make_client(self):
+        # The worker owns the broker connection. Always use AlphaPulse's direct
+        # Socket.IO transport there so candles, telemetry, settlement and orders
+        # share the same handshake semantics. Falling back to the legacy library
+        # after a successful direct auth caused repeated auth timeouts in the
+        # persistent Windows runtime.
+        if self._runtime_role == 'worker':
+            from backend.services.pocket_direct import DirectPocketOptionClient
+
+            self._auth_kind = 'direct-worker'
+            return DirectPocketOptionClient(self.ssid, is_demo=self.demo)
+
         from pocketoptionapi_async.client import AsyncPocketOptionClient
 
         payload = _parse_wire_auth(self.ssid)
@@ -183,7 +194,7 @@ class PocketOptionOTCService:
                 raise MarketDataUnavailable('Pocket Option market source is not configured')
             try:
                 client = self._make_client()
-                ok = await asyncio.wait_for(client.connect(persistent=False), timeout=35)
+                ok = await asyncio.wait_for(client.connect(persistent=True), timeout=35)
                 if not ok:
                     raise RuntimeError('Pocket Option session rejected or authentication timed out')
                 self._client = client
@@ -219,7 +230,7 @@ class PocketOptionOTCService:
             'connected': self._client is not None and bool(getattr(self._client, 'is_connected', True)),
             'auth_format': self._auth_kind,
             'demo': self.demo,
-            'provider': 'Pocket Option web-session stream (read-only, unofficial client)',
+            'provider': 'Pocket Option direct worker stream' if self._runtime_role == 'worker' else 'Pocket Option web-session stream (read-only, unofficial client)',
             'last_error': self._last_error,
         }
 
