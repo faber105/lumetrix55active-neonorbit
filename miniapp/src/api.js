@@ -89,6 +89,60 @@ export function patchJson(path, payload = {}) {
   });
 }
 
+export function connectAutoRealtime({ onState, onStatus } = {}) {
+  let socket = null;
+  let stopped = false;
+  let retryTimer = null;
+  let retryDelay = 250;
+
+  const report = (value) => {
+    try { onStatus?.(value); } catch {}
+  };
+
+  const scheduleReconnect = () => {
+    if (stopped || retryTimer) return;
+    report({ connected: false, driving: false, reconnecting: true });
+    retryTimer = window.setTimeout(() => {
+      retryTimer = null;
+      connect();
+    }, retryDelay);
+    retryDelay = Math.min(5000, Math.round(retryDelay * 1.7));
+  };
+
+  const connect = () => {
+    if (stopped || !getTelegramInitData()) return;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    socket = new WebSocket(`${protocol}//${window.location.host}/ws/auto`);
+    report({ connected: false, driving: false, reconnecting: true });
+
+    socket.addEventListener("open", () => {
+      retryDelay = 250;
+      socket?.send(JSON.stringify({ type: "auth", init_data: getTelegramInitData() }));
+    });
+    socket.addEventListener("message", (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === "ready") {
+          report({ connected: true, driving: Boolean(message.realtime_driver), reconnecting: false });
+        } else if (message?.type === "auto_state" && message.data) {
+          onState?.(normalizeTimeValue(message.data));
+        }
+      } catch {}
+    });
+    socket.addEventListener("close", scheduleReconnect);
+    socket.addEventListener("error", () => {
+      try { socket?.close(); } catch {}
+    });
+  };
+
+  connect();
+  return () => {
+    stopped = true;
+    if (retryTimer) window.clearTimeout(retryTimer);
+    try { socket?.close(1000, "Mini App closed realtime stream"); } catch {}
+  };
+}
+
 let timezoneSyncPromise = null;
 export function syncDeviceTimezone() {
   if (!TG_ID) return Promise.resolve(null);
