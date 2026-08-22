@@ -12,6 +12,7 @@ logger = logging.getLogger("alphapulse.worker")
 HUNT_REGULAR = "HUNT_REGULAR"
 HUNT_FOUND = "HUNT_FOUND"
 REGULAR_CONFIDENCE = 72.0
+DEFAULT_PUBLIC_BACKEND = "https://lumetrix55active-neonorbit.vercel.app"
 
 
 async def _regular_hunt_tick() -> None:
@@ -77,6 +78,68 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
             await asyncio.wait_for(stop_event.wait(), timeout=2.0)
         except asyncio.TimeoutError:
             pass
+
+
+async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
+    """Keep the Telegram bot responsive from the persistent Windows worker.
+
+    This is intentionally worker-only. It removes any stale Vercel webhook first
+    so Telegram has exactly one delivery transport, then runs aiogram polling
+    without signal handlers (required on Windows). Trading remains independent:
+    if Telegram polling fails, it is retried without stopping the worker.
+    """
+    token = str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        logger.warning("Telegram polling disabled: TELEGRAM_BOT_TOKEN is empty")
+        return
+
+    os.environ.setdefault("BACKEND_URL", DEFAULT_PUBLIC_BACKEND)
+    os.environ.setdefault("MINI_APP_URL", DEFAULT_PUBLIC_BACKEND)
+
+    while not stop_event.is_set():
+        polling_task: asyncio.Task | None = None
+        stop_task: asyncio.Task | None = None
+        try:
+            from bot.main import bot, dp
+
+            await bot.delete_webhook(drop_pending_updates=False)
+            logger.info("Telegram webhook removed; Windows worker polling is active")
+
+            polling_task = asyncio.create_task(
+                dp.start_polling(bot, handle_signals=False),
+                name="alphapulse-telegram-polling",
+            )
+            stop_task = asyncio.create_task(stop_event.wait(), name="alphapulse-telegram-stop-wait")
+            done, _pending = await asyncio.wait(
+                {polling_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if stop_task in done and stop_event.is_set():
+                if not polling_task.done():
+                    await dp.stop_polling()
+                try:
+                    await polling_task
+                except asyncio.CancelledError:
+                    pass
+                return
+
+            # Polling ended unexpectedly. Re-raise its exception so the retry
+            # loop records the real failure and restarts it after a short delay.
+            await polling_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Telegram polling crashed; retrying in 5 seconds")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+        finally:
+            if stop_task is not None and not stop_task.done():
+                stop_task.cancel()
+            if polling_task is not None and not polling_task.done() and stop_event.is_set():
+                polling_task.cancel()
 
 
 def _require_demo_runtime() -> None:
@@ -148,6 +211,7 @@ async def run_worker() -> None:
 
     supervisor = asyncio.create_task(worker_supervisor(stop_event, account_id), name="alphapulse-worker-supervisor")
     maintenance = asyncio.create_task(_maintenance_loop(stop_event), name="alphapulse-worker-maintenance")
+    telegram_polling = asyncio.create_task(_telegram_polling_loop(stop_event), name="alphapulse-telegram-runtime")
     realtime_server = None
     realtime_task = None
     if str(os.getenv("REALTIME_TRANSPORT") or "polling").strip().lower() == "wss":
@@ -165,6 +229,7 @@ async def run_worker() -> None:
     if not await start_auto_realtime_driver():
         supervisor.cancel()
         maintenance.cancel()
+        telegram_polling.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
 
     logger.info("AlphaPulse Windows worker started in DEMO-only mode")
@@ -178,7 +243,7 @@ async def run_worker() -> None:
             realtime_server.should_exit = True
         if realtime_task is not None:
             await realtime_task
-        for task in (supervisor, maintenance):
+        for task in (supervisor, maintenance, telegram_polling):
             try:
                 await task
             except asyncio.CancelledError:
