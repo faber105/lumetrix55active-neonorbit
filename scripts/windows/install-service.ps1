@@ -20,9 +20,6 @@ $runtimeRoot = Join-Path $baseRoot 'runtime'
 $runner = Join-Path $PSScriptRoot 'run-worker.ps1'
 New-Item -ItemType Directory -Force -Path $configRoot,$logRoot,$runtimeRoot | Out-Null
 
-# Generate a fresh high-entropy password on every registration. Use the
-# instance API for compatibility with Windows PowerShell / .NET Framework,
-# where RandomNumberGenerator.Fill is unavailable.
 $passwordBytes = [byte[]]::new(36)
 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
 try {
@@ -42,9 +39,6 @@ $localUser = Get-LocalUser -Name $ServiceUser -ErrorAction Stop
 $serviceAccount = "$env:COMPUTERNAME\$ServiceUser"
 $serviceSid = $localUser.SID.Value
 
-# Password-based scheduled tasks require the account to have SeBatchLogonRight.
-# Some Windows installations do not grant it automatically when a local user is
-# used for Register-ScheduledTask, which causes Task Scheduler error 0x80070569.
 if (-not ('AlphaPulse.LsaRights' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -145,12 +139,24 @@ if (-not (Test-Path -LiteralPath $configFile)) {
 
 icacls $repoRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)RX" 'SYSTEM:(OI)(CI)F' | Out-Null
 icacls $configRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)R" 'SYSTEM:(OI)(CI)F' | Out-Null
-# worker.env may have been created or rewritten before the folder ACL was hardened,
-# leaving it with a stale explicit ACL. Grant the service account read access to
-# the file itself so the scheduled task can always load local secrets.
 icacls $configFile /inheritance:r /grant:r "${env:USERNAME}:F" "${ServiceUser}:R" 'SYSTEM:F' | Out-Null
 icacls $logRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)M" 'SYSTEM:(OI)(CI)F' | Out-Null
 icacls $runtimeRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "${ServiceUser}:(OI)(CI)M" 'SYSTEM:(OI)(CI)F' | Out-Null
+
+# A venv created from a per-user Python installation still launches the base
+# interpreter from pyvenv.cfg. The dedicated worker account therefore needs
+# read/execute access to that stable Python directory as well.
+$pyvenvConfig = Join-Path $repoRoot '.venv\pyvenv.cfg'
+if (Test-Path -LiteralPath $pyvenvConfig) {
+    $homeLine = Get-Content -LiteralPath $pyvenvConfig | Where-Object { $_ -match '^home\s*=\s*' } | Select-Object -First 1
+    if ($homeLine) {
+        $pythonHome = ($homeLine -replace '^home\s*=\s*','').Trim()
+        if ($pythonHome -and (Test-Path -LiteralPath $pythonHome)) {
+            icacls $pythonHome /grant "${ServiceUser}:(OI)(CI)RX" /T /C | Out-Null
+            Write-Host "Worker read/execute access granted to base Python: $pythonHome"
+        }
+    }
+}
 
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File `"$runner`""
 $trigger = New-ScheduledTaskTrigger -AtStartup
