@@ -97,10 +97,39 @@ async def telegram_user(
     return _verify_init_data(x_telegram_init_data or "")
 
 
+async def _sole_worker_broker_owner(telegram_id: int) -> bool:
+    """Allow the single Pocket fleet owner to control the local Windows gateway.
+
+    This is intentionally worker-only and only applies while every active broker
+    account belongs to one Telegram owner. It avoids granting global admin rights
+    to unrelated account owners if the deployment later becomes multi-tenant.
+    """
+    if str(os.getenv("APP_RUNTIME_ROLE") or "").strip().lower() != "worker":
+        return False
+    try:
+        from sqlalchemy import text
+        from backend.models.db_models import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    text("""SELECT DISTINCT owner_telegram_id
+                        FROM broker_accounts
+                        WHERE status='ACTIVE'
+                        ORDER BY owner_telegram_id
+                        LIMIT 2""")
+                )
+            ).scalars().all()
+        owners = [int(value) for value in rows if value is not None]
+        return len(owners) == 1 and owners[0] == int(telegram_id)
+    except Exception:
+        return False
+
+
 async def admin_user(
     x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
 ) -> TelegramMiniAppUser:
     user = _verify_init_data(x_telegram_init_data or "")
-    if not is_admin_id(user.id):
-        raise HTTPException(403, "Admin access required")
-    return user
+    if is_admin_id(user.id) or await _sole_worker_broker_owner(user.id):
+        return user
+    raise HTTPException(403, "Admin access required")
