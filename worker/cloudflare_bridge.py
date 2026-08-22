@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from urllib.parse import urlparse
 
 import aiohttp
@@ -35,19 +36,27 @@ async def _handle_request(http: aiohttp.ClientSession, ws: aiohttp.ClientWebSock
     }
     body = payload.get("body")
     url = f"http://127.0.0.1:{int(os.getenv('WORKER_HTTP_PORT') or 8765)}{path}"
+    started = time.monotonic()
     try:
+        # Cloudflare relay currently waits 18s. Keep the localhost hop below that
+        # boundary, but do not kill legitimate worker routes after the old 8s
+        # timeout while Neon/Pocket background work is briefly busy.
+        timeout = aiohttp.ClientTimeout(total=16.0, connect=2.0, sock_connect=2.0, sock_read=15.5)
         async with http.request(
             method,
             url,
             headers=headers,
             data=None if method in {"GET", "HEAD"} else ("" if body is None else str(body)),
-            timeout=aiohttp.ClientTimeout(total=8.0),
+            timeout=timeout,
         ) as response:
             text = await response.text()
             response_headers = {}
             content_type = response.headers.get("content-type")
             if content_type:
                 response_headers["content-type"] = content_type
+            elapsed = time.monotonic() - started
+            if elapsed >= 2.0:
+                logger.warning("Slow local gateway request %.2fs %s %s -> %s", elapsed, method, path, response.status)
             message = {
                 "type": "response",
                 "id": req_id,
@@ -56,6 +65,8 @@ async def _handle_request(http: aiohttp.ClientSession, ws: aiohttp.ClientWebSock
                 "body": text,
             }
     except Exception as exc:
+        elapsed = time.monotonic() - started
+        logger.warning("Local gateway request failed after %.2fs %s %s: %s", elapsed, method, path, type(exc).__name__)
         message = {
             "type": "response",
             "id": req_id,
@@ -76,7 +87,7 @@ async def run_cloudflare_bridge(stop_event: asyncio.Event) -> None:
         return
 
     delay = 1.0
-    connector = aiohttp.TCPConnector(limit=24, ttl_dns_cache=300)
+    connector = aiohttp.TCPConnector(limit=48, limit_per_host=32, ttl_dns_cache=300)
     async with aiohttp.ClientSession(connector=connector) as http:
         while not stop_event.is_set():
             try:
