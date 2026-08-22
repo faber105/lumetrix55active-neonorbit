@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 $statusOutput = & $statusScript | Select-Object -Last 1
 $status = $statusOutput | ConvertFrom-Json
 if (-not $status.safe_to_update) {
-    throw "Update blocked: active_sessions=$($status.active_sessions), unresolved_positions=$($status.unresolved_positions)"
+    throw "Update blocked: active_sessions=$($status.active_sessions), unresolved_positions=$($status.unresolved_positions), unresolved_executions=$($status.unresolved_executions)"
 }
 
 Set-Location -LiteralPath $repoRoot
