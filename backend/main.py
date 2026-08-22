@@ -18,13 +18,23 @@ from backend.services.cpu_guard import adaptive_drive_session_tick
 from backend.services.vip_runtime_fix import run_due_vip
 from backend.services.session_engine import ensure_schema
 from backend.services.preload_next import ensure_preload_schema
+from backend.services.auto_realtime import (
+    driver_health,
+    start_auto_realtime_driver,
+    stop_auto_realtime_driver,
+)
 
 
 def _deployment_base_url() -> str:
     explicit = str(os.getenv('PUBLIC_BACKEND_URL') or os.getenv('BACKEND_URL') or '').strip().rstrip('/')
     if explicit:
         return explicit
-    host = str(os.getenv('VERCEL_PROJECT_PRODUCTION_URL') or os.getenv('VERCEL_URL') or '').strip().rstrip('/')
+    host = str(
+        os.getenv('RENDER_EXTERNAL_HOSTNAME')
+        or os.getenv('VERCEL_PROJECT_PRODUCTION_URL')
+        or os.getenv('VERCEL_URL')
+        or ''
+    ).strip().rstrip('/')
     if not host:
         return ''
     if host.startswith('http://') or host.startswith('https://'):
@@ -114,7 +124,13 @@ async def lifespan(app):
             await configure_webhook()
     except Exception:
         logger.exception('Webhook setup failed; API remains available')
+    try:
+        await start_auto_realtime_driver()
+    except Exception:
+        logger.exception('Persistent AUTO realtime driver failed to start')
     yield
+    try:await stop_auto_realtime_driver()
+    except Exception:pass
     try:await market_data.close()
     except Exception:pass
 
@@ -153,6 +169,7 @@ async def _health_payload():
         'scanner':'adaptive-timeframe-driver','telegram_configured':TELEGRAM_ENABLED,
         'database_configured':bool(os.getenv('DATABASE_URL','').strip()),
         'backend_url':BACKEND_URL or None,
+        'auto_realtime':driver_health(),
         'source':{
             'provider':os.getenv('VERCEL_GIT_PROVIDER','manual'),
             'repository':'/'.join(p for p in (os.getenv('VERCEL_GIT_REPO_OWNER',''),os.getenv('VERCEL_GIT_REPO_SLUG','')) if p) or 'unknown',
