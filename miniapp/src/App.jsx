@@ -4,10 +4,10 @@ import { TG, TG_ID, apiFetch, connectAutoRealtime, patchJson, postJson } from ".
 
 const PAIRS=[["EUR/USD","eu","us"],["GBP/USD","gb","us"],["USD/JPY","us","jp"],["USD/CHF","us","ch"],["AUD/USD","au","us"],["USD/CAD","us","ca"],["NZD/USD","nz","us"],["EUR/GBP","eu","gb"],["EUR/JPY","eu","jp"],["GBP/JPY","gb","jp"]];
 const MANUAL_TF=["15s","1m","3m","5m","15m"],AUTO_TF=["15s","1m","3m","5m","15m"];
-const AUTO_STRATEGIES=[{id:"smart_confluence",icon:"✦",name:"Mixed Smart",desc:"Быстрый поиск по всем стратегиям + повторное подтверждение перед входом",tone:"gold"},{id:"trend_pulse",icon:"↗",name:"Trend Pulse",desc:"EMA 9/21/50/200 · ADX/DMI · MACD · RSI",tone:"violet"},{id:"range_reversal",icon:"↔",name:"Range Reversal",desc:"Bollinger · RSI · слабый ADX · rejection",tone:"cyan"},{id:"volatility_breakout",icon:"⚡",name:"Volatility Breakout",desc:"Donchian · ATR expansion · DMI · momentum",tone:"orange"}];
+const AUTO_STRATEGIES=[{id:"trend_pulse",icon:"↗",name:"Trend Pulse",desc:"EMA 9/21/50/200 · ADX/DMI · MACD · RSI",tone:"violet"},{id:"range_reversal",icon:"↔",name:"Range Reversal",desc:"Bollinger · RSI · слабый ADX · rejection",tone:"cyan"},{id:"volatility_breakout",icon:"⚡",name:"Volatility Breakout",desc:"Donchian · ATR expansion · DMI · momentum",tone:"orange"}];
 const PROFIT_STRATEGIES=AUTO_STRATEGIES;
 const STRATEGY_NAME=Object.fromEntries([...PROFIT_STRATEGIES,{id:"vip_confluence",name:"VIP 5M Confluence"},{id:"market_bias",name:"Live Market Bias"}].map(x=>[x.id,x.name]));
-const strategyLabel=value=>String(value||"").split("+").filter(Boolean).map(id=>STRATEGY_NAME[id]||id).join(" + ")||"—";
+const strategyLabel=value=>STRATEGY_NAME[String(value||"")]||String(value||"—");
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const safeMessage=e=>e?.body?.detail||e?.message||"Неизвестная ошибка";
 const toDate=v=>{const d=v?new Date(v):null;return d&&!Number.isNaN(d.getTime())?d:null};

@@ -27,8 +27,8 @@ from backend.services.trade_mode import set_execution_mode, set_trade_account_mo
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
 
 AUTO_TIMEFRAMES = {"15s", "1m", "3m", "5m", "15m"}
-PROFIT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
-COUNT_STRATEGIES = set(AUTO_STRATEGIES) | {"smart_confluence"}
+PROFIT_STRATEGIES = set(AUTO_STRATEGIES)
+COUNT_STRATEGIES = set(AUTO_STRATEGIES)
 COUNT_MIN_CONFIDENCE = 70.0
 COUNT_CONFIRM_CONFIDENCE = 68.0
 PROFIT_MIN_CONFIDENCE = 82.0
@@ -214,7 +214,7 @@ async def session_state(*, refresh_balance=False):
 
 def validate_session_config(config):
     mode = str(config.get("mode") or "count").lower()
-    strategy = str(config.get("strategy") or ("smart_confluence" if str(config.get("mode") or "count").lower() == "count" else "trend_pulse"))
+    strategy = str(config.get("strategy") or "trend_pulse")
     amount = round(float(1 if config.get("amount") is None else config["amount"]), 2)
     max_martingale = int(config.get("max_martingale", 3))
     if amount < 1 or amount > MAX_SESSION_AMOUNT:
@@ -603,18 +603,11 @@ async def session_tick():
     strategy = str(session["strategy"])
     timeframe = str(session["timeframe"])
 
-    # Fast COUNT mode (15s/1m/3m) uses a mixed strategy pool. We first
-    # rank the strongest setups across all smart strategies, then re-check only
-    # the selected pair/strategy before scheduling the exact candle-boundary entry.
-    # This avoids waiting for one rare strategy while still requiring confirmation.
-    mixed_count = strategy == "smart_confluence"
-    if mixed_count:
-        candidates = await signal_engine.scan_best_candidates(timeframe, scan_assets)
-        threshold = COUNT_MIN_CONFIDENCE
-        strategy = "smart_confluence"
-    else:
-        candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)
-        threshold = COUNT_MIN_CONFIDENCE if session["mode"] == "count" else PROFIT_MIN_CONFIDENCE
+    # Exactly one user-selected strategy owns the session. No hidden
+    # strategy pool is allowed to change the setup model mid-session.
+    mixed_count = False
+    candidates = await signal_engine.scan_strategy_candidates(timeframe, scan_assets, strategy)
+    threshold = COUNT_MIN_CONFIDENCE if session["mode"] == "count" else PROFIT_MIN_CONFIDENCE
 
     confirmed = [candidate for candidate in candidates if float(candidate.get("confidence") or 0) >= threshold]
     # One scan -> one order candidate. Rank all tradable setups explicitly so

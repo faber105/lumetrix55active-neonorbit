@@ -225,18 +225,10 @@ async def _prepare(session: dict, position: PaperPosition) -> dict | None:
         )
         return {"status": "WAIT_PAYOUT", "eligible": 0, "seconds_to_expiry": round(remaining, 1)}
     timeframe = str(session.get("timeframe") or "5m")
-    strategy = str(session.get("strategy") or "smart_confluence")
-    mixed_count = strategy == "smart_confluence"
-
-    if mixed_count:
-        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
-        threshold = COUNT_MIN_CONFIDENCE
-    elif strategy == "smart_confluence":
-        candidates = await signal_engine.scan_best_candidates(timeframe, eligible_assets)
-        threshold = PROFIT_MIN_CONFIDENCE
-    else:
-        candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)
-        threshold = PROFIT_MIN_CONFIDENCE
+    strategy = str(session.get("strategy") or "trend_pulse")
+    mixed_count = False
+    candidates = await signal_engine.scan_strategy_candidates(timeframe, eligible_assets, strategy)
+    threshold = COUNT_MIN_CONFIDENCE if str(session.get("mode")) == "count" else PROFIT_MIN_CONFIDENCE
 
     confirmed = sorted(
         [
