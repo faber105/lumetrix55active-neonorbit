@@ -48,9 +48,23 @@ def test_zero_win_target_is_rejected_instead_of_silently_replaced():
         validate_session_config(
             {
                 "mode": "count",
-                "strategy": "smart_confluence",
+                "strategy": "trend_pulse",
                 "timeframe": "1m",
                 "target_wins": 0,
+                "amount": 1,
+                "max_martingale": 0,
+            }
+        )
+
+
+def test_mixed_strategy_alias_is_rejected():
+    with pytest.raises(ValueError, match="Unknown AUTO strategy"):
+        validate_session_config(
+            {
+                "mode": "count",
+                "strategy": "smart_confluence",
+                "timeframe": "1m",
+                "target_wins": 1,
                 "amount": 1,
                 "max_martingale": 0,
             }
