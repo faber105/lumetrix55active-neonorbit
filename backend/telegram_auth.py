@@ -55,11 +55,6 @@ def _verify_init_data(init_data: str) -> TelegramMiniAppUser:
     if not received_hash:
         raise HTTPException(401, "Telegram initData hash missing")
 
-    # Bot API 9.x Mini Apps may include the new `signature` field in initData.
-    # For bot-token HMAC validation Telegram's current data-check-string contains
-    # all received fields except `hash`, so `signature` must not be discarded.
-    # Keep a legacy variant as a compatibility fallback for older clients that
-    # generated the hash before the signature field was introduced.
     expected_hash = _telegram_hash(token, values)
     valid = hmac.compare_digest(expected_hash, received_hash)
     if not valid and "signature" in values:
@@ -97,15 +92,14 @@ async def telegram_user(
     return _verify_init_data(x_telegram_init_data or "")
 
 
-async def _sole_worker_broker_owner(telegram_id: int) -> bool:
-    """Allow the single Pocket fleet owner to control the local Windows gateway.
+async def _sole_broker_owner(telegram_id: int) -> bool:
+    """Allow the sole active Pocket broker owner to control its own runtime.
 
-    This is intentionally worker-only and only applies while every active broker
-    account belongs to one Telegram owner. It avoids granting global admin rights
-    to unrelated account owners if the deployment later becomes multi-tenant.
+    The check is database-backed instead of relying on APP_RUNTIME_ROLE because
+    the FastAPI gateway can import dependencies before the worker role variable
+    is visible to every module. Access is granted only when there is exactly one
+    distinct active broker owner and it matches the signed Telegram initData.
     """
-    if str(os.getenv("APP_RUNTIME_ROLE") or "").strip().lower() != "worker":
-        return False
     try:
         from sqlalchemy import text
         from backend.models.db_models import AsyncSessionLocal
@@ -130,6 +124,6 @@ async def admin_user(
     x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
 ) -> TelegramMiniAppUser:
     user = _verify_init_data(x_telegram_init_data or "")
-    if is_admin_id(user.id) or await _sole_worker_broker_owner(user.id):
+    if is_admin_id(user.id) or await _sole_broker_owner(user.id):
         return user
     raise HTTPException(403, "Admin access required")
