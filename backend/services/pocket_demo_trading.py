@@ -82,7 +82,15 @@ class DirectDemoTradingClient:
                     continue
         return None
 
-    async def place_order(self, *, asset: str, amount: float, direction, duration: int) -> OrderResult:
+    async def place_order(
+        self,
+        *,
+        asset: str,
+        amount: float,
+        direction,
+        duration: int,
+        idempotency_key: str | None = None,
+    ) -> OrderResult:
         if not self._client.is_demo:
             raise RuntimeError("Direct trading client is demo-only")
         if float(amount) <= 0:
@@ -99,7 +107,7 @@ class DirectDemoTradingClient:
         if action not in {"call", "put"}:
             raise ValueError("Direction must be call or put")
 
-        request_id = str(uuid.uuid4())
+        request_id = str(idempotency_key or uuid.uuid4())[:128]
         order_payload = [
             "openOrder",
             {
@@ -144,3 +152,10 @@ class DirectDemoTradingClient:
                     )
 
         raise RuntimeError("Pocket Option did not confirm demo order")
+
+    async def find_order(self, idempotency_key: str) -> OrderResult | None:
+        # The current unofficial transport has no reliable order-by-client-id
+        # endpoint. Returning None is explicit: UNKNOWN remains blocked for
+        # operator/broker reconciliation and is never resent automatically.
+        del idempotency_key
+        return None

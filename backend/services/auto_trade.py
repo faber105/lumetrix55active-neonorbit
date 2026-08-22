@@ -13,6 +13,7 @@ from backend.models.db_models import (
     AsyncSessionLocal, AutoTradeControl, PaperPosition, Signal, SignalDirection,
     SignalResult, TradeExecution, utcnow,
 )
+from backend.services.broker_adapter import DemoBrokerAdapter
 from backend.services.control import admin_id
 from backend.services.pocket_demo_trading import DirectDemoTradingClient
 from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire_auth, market_data
@@ -130,7 +131,7 @@ async def latest_execution() -> dict | None:
     }
 
 
-def _build_trading_client():
+def _build_trading_client() -> DemoBrokerAdapter:
     return DirectDemoTradingClient(market_data.ssid)
 
 
@@ -401,7 +402,16 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                 await update_trade_runtime(stage="OPENING", message="Отправляю подтверждённый DEMO ордер")
 
             direction = OrderDirection.CALL if signal["direction"] == "BUY" else OrderDirection.PUT
-            result = await asyncio.wait_for(client.place_order(asset=signal["asset"], amount=amount, direction=direction, duration=duration), timeout=20)
+            result = await asyncio.wait_for(
+                client.place_order(
+                    asset=signal["asset"],
+                    amount=amount,
+                    direction=direction,
+                    duration=duration,
+                    idempotency_key=f"execution:{execution.id}",
+                ),
+                timeout=20,
+            )
             status_value = getattr(result.status, "value", str(result.status)).lower()
             if result.status == OrderStatus.CANCELLED or result.error_message:
                 raise RuntimeError(result.error_message or "Pocket Option cancelled the order")
