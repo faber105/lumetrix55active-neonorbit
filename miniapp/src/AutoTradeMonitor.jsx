@@ -3,15 +3,22 @@ import { TG_ID, apiFetch } from "./api";
 
 const STAGES = {
   IDLE: ["Ожидание", "neutral"],
+  CREATED: ["Сессия создана", "neutral"],
   SCANNING: ["Сканирую рынок", "scan"],
-  SIGNAL_FOUND: ["Сигнал найден", "found"],
-  WAIT_ENTRY: ["Жду точное время входа", "wait"],
+  PREPARING: ["Сигнал подготовлен", "found"],
   OPENING: ["Отправляю ордер", "opening"],
   OPEN: ["Сделка открыта · LIVE", "open"],
+  RESOLVING: ["Считываю результат Pocket", "wait"],
+  COMPLETED: ["Сессия завершена", "closed"],
+  STOPPED: ["Сессия остановлена", "closed"],
+  FAILED: ["Ошибка исполнения", "error"],
+  // Legacy runtime aliases remain display-only during migration.
+  SIGNAL_FOUND: ["Сигнал найден", "found"],
+  WAIT_ENTRY: ["Жду точное время входа", "wait"],
   CLOSED: ["Сделка закрыта", "closed"],
   PAYOUT_TOO_LOW: ["Выплата ниже порога", "warn"],
   MISSED_ENTRY: ["Вход пропущен", "warn"],
-  FAILED: ["Ошибка исполнения", "error"],
+  RECONCILING: ["Сверяю результат Pocket", "wait"],
 };
 
 function money(value) {
@@ -36,12 +43,12 @@ export default function AutoTradeMonitor() {
     let timer = null;
     const load = async () => {
       try {
-        const data = await apiFetch("/api/admin/state");
+        const data = await apiFetch(`/api/admin/state?_=${Date.now()}`);
         if (!stopped) setState(data);
       } catch (error) {
         if (!stopped && (error?.status === 401 || error?.status === 403)) setState(null);
       }
-      if (!stopped) timer = window.setTimeout(load, 900);
+      if (!stopped) timer = window.setTimeout(load, 1000);
     };
     load();
     return () => { stopped = true; if (timer) window.clearTimeout(timer); };
@@ -53,10 +60,10 @@ export default function AutoTradeMonitor() {
   }, []);
 
   const runtime = state?.auto_runtime || {};
-  const stage = String(runtime.stage || "IDLE");
-  const visible = Boolean(state?.auto_trade_enabled) || !["IDLE", "CLOSED"].includes(stage) || stage === "OPEN";
+  const stage = String(runtime.stage || "IDLE").toUpperCase();
+  const visible = Boolean(state?.auto_trade_enabled) || !["IDLE", "CLOSED", "COMPLETED", "STOPPED"].includes(stage) || stage === "OPEN";
   const countdown = useMemo(() => {
-    if (!runtime.entry_time || !["SIGNAL_FOUND", "WAIT_ENTRY"].includes(stage)) return null;
+    if (!runtime.entry_time || !["PREPARING", "SIGNAL_FOUND", "WAIT_ENTRY"].includes(stage)) return null;
     const target = new Date(runtime.entry_time).getTime();
     if (!Number.isFinite(target)) return null;
     return Math.max(0, (target - now) / 1000);
@@ -67,7 +74,7 @@ export default function AutoTradeMonitor() {
   const payout = Number(runtime.payout_percent);
   const balance = state.pocket_balance ?? runtime.balance;
   const minPayout = Number(state.min_auto_payout || 92);
-  const active = ["SCANNING", "SIGNAL_FOUND", "WAIT_ENTRY", "OPENING"].includes(stage);
+  const active = ["SCANNING", "PREPARING", "SIGNAL_FOUND", "WAIT_ENTRY", "OPENING", "RESOLVING", "RECONCILING"].includes(stage);
 
   return (
     <aside className={`auto-monitor ${tone}`}>
