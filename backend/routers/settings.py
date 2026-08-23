@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -147,6 +148,9 @@ async def save_pocket_credentials(
         await close_demo_trading_client()
         await market_data.close()
         await market_data._refresh_private_ssid(force=True)
+        # Do not hold the Mini App request open for the full Pocket handshake.
+        # Reconnect in the worker loop and let normal health/state calls reflect success/failure.
+        asyncio.create_task(market_data.connect(), name=f'pocket-reconnect-{mode}')
 
     return {
         'ok': True,
