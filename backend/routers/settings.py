@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from backend.services.database import get_db
 from backend.telegram_auth import TelegramMiniAppUser, admin_user, is_admin_id, telegram_user
 
 router = APIRouter()
+logger = logging.getLogger('alphapulse.settings')
 
 
 class Update(BaseModel):
@@ -113,6 +115,15 @@ async def _credential_change_is_safe() -> bool:
     return not any((active, positions, executions))
 
 
+async def _reconnect_market(mode: str) -> None:
+    try:
+        from backend.services.pocketoption_otc import market_data
+        await market_data.connect()
+        logger.info('Pocket %s credential connected after Mini App update', mode.upper())
+    except Exception as exc:
+        logger.warning('Pocket %s reconnect after Mini App update failed: %s', mode.upper(), exc)
+
+
 @router.get('/pocket-credentials')
 async def pocket_credentials(_: TelegramMiniAppUser = Depends(admin_user)):
     from backend.services.pocket_credentials import credential_status
@@ -148,9 +159,7 @@ async def save_pocket_credentials(
         await close_demo_trading_client()
         await market_data.close()
         await market_data._refresh_private_ssid(force=True)
-        # Do not hold the Mini App request open for the full Pocket handshake.
-        # Reconnect in the worker loop and let normal health/state calls reflect success/failure.
-        asyncio.create_task(market_data.connect(), name=f'pocket-reconnect-{mode}')
+        asyncio.create_task(_reconnect_market(mode), name=f'pocket-reconnect-{mode}')
 
     return {
         'ok': True,
