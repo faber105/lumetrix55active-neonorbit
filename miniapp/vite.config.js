@@ -19,6 +19,13 @@ function alphaPulseRuntimePatch() {
         if (!next.includes('import "./preload_ui_sync.js";')) {
           next = 'import "./preload_ui_sync.js";\n' + next
         }
+        if (!next.includes('PocketCredentialSettings')) {
+          next = 'import PocketCredentialSettings from "./PocketCredentialSettings.jsx";\n' + next
+          next = next.replace(
+            '<section className="glass system-card">',
+            '<PocketCredentialSettings/><section className="glass system-card">'
+          )
+        }
       }
 
       if (isApi) {
