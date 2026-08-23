@@ -4,12 +4,12 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.db_models import MLState, UserSettings, utcnow
+from backend.models.db_models import AsyncSessionLocal, MLState, UserSettings, utcnow
 from backend.services.database import get_db
-from backend.telegram_auth import TelegramMiniAppUser, is_admin_id, telegram_user
+from backend.telegram_auth import TelegramMiniAppUser, admin_user, is_admin_id, telegram_user
 
 router = APIRouter()
 
@@ -23,6 +23,11 @@ class Update(BaseModel):
 class TimezoneUpdate(BaseModel):
     name: str | None = None
     offset_minutes: int
+
+
+class PocketCredentialUpdate(BaseModel):
+    mode: str
+    ssid: str
 
 
 def ser(s):
@@ -84,8 +89,6 @@ async def save_timezone(
     user: TelegramMiniAppUser = Depends(telegram_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Browser timezone is the only reliable way to know the user's device time.
-    # Telegram Bot API itself does not expose a user's timezone.
     offset = max(-840, min(840, int(data.offset_minutes)))
     name = (data.name or '').strip()[:80]
     key = f'__user_tz__:{user.id}'
@@ -99,3 +102,56 @@ async def save_timezone(
         state.updated_at = utcnow()
     await db.commit()
     return {'ok': True, 'name': name, 'offset_minutes': offset}
+
+
+async def _credential_change_is_safe() -> bool:
+    async with AsyncSessionLocal() as db:
+        active = int((await db.execute(text("SELECT COUNT(*) FROM auto_trade_sessions WHERE status='ACTIVE'"))).scalar_one() or 0)
+        positions = int((await db.execute(text("SELECT COUNT(*) FROM auto_trade_legs WHERE result IN ('PENDING','UNKNOWN')"))).scalar_one() or 0)
+        executions = int((await db.execute(text("SELECT COUNT(*) FROM trade_executions WHERE status IN ('EXECUTING','UNKNOWN')"))).scalar_one() or 0)
+    return not any((active, positions, executions))
+
+
+@router.get('/pocket-credentials')
+async def pocket_credentials(_: TelegramMiniAppUser = Depends(admin_user)):
+    from backend.services.pocket_credentials import credential_status
+    from backend.services.trade_mode import get_trade_account_mode
+    return {
+        'selected_mode': await get_trade_account_mode(),
+        'credentials': await credential_status(),
+    }
+
+
+@router.post('/pocket-credentials')
+async def save_pocket_credentials(
+    data: PocketCredentialUpdate,
+    _: TelegramMiniAppUser = Depends(admin_user),
+):
+    mode = str(data.mode or '').strip().lower()
+    if mode not in {'demo', 'real'}:
+        raise HTTPException(400, 'mode must be demo or real')
+    if not await _credential_change_is_safe():
+        raise HTTPException(409, 'Stop the active AUTO session before replacing Pocket credentials')
+
+    from backend.services.pocket_credentials import credential_status, save_pocket_credential
+    from backend.services.trade_mode import get_trade_account_mode
+    try:
+        await save_pocket_credential(mode, str(data.ssid or '').strip())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    selected = await get_trade_account_mode()
+    if selected == mode:
+        from backend.services.auto_trade import close_demo_trading_client
+        from backend.services.pocketoption_otc import market_data
+        await close_demo_trading_client()
+        await market_data.close()
+        await market_data._refresh_private_ssid(force=True)
+
+    return {
+        'ok': True,
+        'mode': mode,
+        'selected_mode': selected,
+        'credentials': await credential_status(),
+        'reconnect': selected == mode,
+    }
