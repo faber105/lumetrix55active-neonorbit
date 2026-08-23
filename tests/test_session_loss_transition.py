@@ -3,9 +3,9 @@ import unittest
 from backend.services.session_transitions import loss_transition
 
 
-def _session(max_martingale=3, max_failed_series=1):
+def _session(max_martingale=3, max_failed_series=1, mode="count"):
     return {
-        "mode": "count",
+        "mode": mode,
         "max_martingale": max_martingale,
         "max_failed_series": max_failed_series,
     }
@@ -25,11 +25,11 @@ class LossTransitionTests(unittest.TestCase):
                 series_loss=series_loss,
             )
             self.assertEqual(state["status"], "ACTIVE")
-            self.assertEqual(state["stage"], "MARTINGALE")
+            self.assertEqual(state["stage"], "SCANNING")
             self.assertEqual(state["level"], current_level + 1)
             series_loss = state["series_loss"]
 
-    def test_loss_on_last_cover_stops_count_session(self):
+    def test_count_mode_continues_after_full_lost_chain(self):
         state = loss_transition(
             _session(),
             amount=9.10,
@@ -38,14 +38,14 @@ class LossTransitionTests(unittest.TestCase):
             series_loss=7.45,
         )
 
-        self.assertEqual(state["status"], "STOPPED")
-        self.assertEqual(state["stage"], "STOPPED")
-        self.assertEqual(state["reason"], "FAILED_SERIES_LIMIT")
+        self.assertEqual(state["status"], "ACTIVE")
+        self.assertEqual(state["stage"], "SCANNING")
+        self.assertIsNone(state["reason"])
         self.assertEqual(state["level"], 0)
         self.assertEqual(state["series_loss"], 0)
-        self.assertIn("3/3", state["message"])
+        self.assertEqual(state["failed"], 1)
 
-    def test_zero_cover_session_stops_after_first_loss(self):
+    def test_zero_cover_count_session_continues_after_loss(self):
         state = loss_transition(
             _session(max_martingale=0),
             amount=1.0,
@@ -54,11 +54,25 @@ class LossTransitionTests(unittest.TestCase):
             series_loss=0,
         )
 
+        self.assertEqual(state["status"], "ACTIVE")
+        self.assertEqual(state["stage"], "SCANNING")
+        self.assertEqual(state["level"], 0)
+
+    def test_profit_mode_stops_at_failed_series_limit(self):
+        state = loss_transition(
+            _session(mode="profit"),
+            amount=9.10,
+            failed=0,
+            level=3,
+            series_loss=7.45,
+        )
+
         self.assertEqual(state["status"], "STOPPED")
-        self.assertEqual(state["reason"], "FAILED_SERIES_LIMIT")
+        self.assertEqual(state["stage"], "STOPPED")
+        self.assertEqual(state["reason"], "MAX_FAILED_SERIES")
 
     def test_profit_mode_can_continue_until_failed_series_limit(self):
-        session = {"mode": "profit", "max_martingale": 3, "max_failed_series": 2}
+        session = _session(mode="profit", max_failed_series=2)
         state = loss_transition(
             session,
             amount=9.10,

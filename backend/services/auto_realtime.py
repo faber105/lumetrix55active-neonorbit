@@ -24,16 +24,16 @@ def _truthy(value: str | None) -> bool:
 
 
 def realtime_driver_enabled() -> bool:
-    """Enable the persistent engine only on a long-running runtime.
+    """Enable the persistent engine only in the explicit worker runtime.
 
-    Vercel functions must not create a process-wide trading loop. Render sets the
-    flag explicitly in render.yaml, while local development can opt in with the
-    same environment variable.
+    A deployment flag alone is intentionally insufficient: an accidentally
+    copied environment variable must never start a trading loop in Vercel or in
+    the public web process.
     """
-    configured = os.getenv("AUTO_REALTIME_DRIVER")
-    if configured is not None:
-        return _truthy(configured)
-    return _truthy(os.getenv("RENDER"))
+    if _truthy(os.getenv("VERCEL")):
+        return False
+    role = str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower()
+    return role == "worker" and _truthy(os.getenv("AUTO_REALTIME_DRIVER"))
 
 
 def _change_condition() -> asyncio.Condition:
@@ -101,6 +101,8 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
 
     if status in {"IDLE", "NOT_STARTED"}:
         target = 3.0
+    elif status in {"STANDBY", "LEASE_LOST"}:
+        target = 0.5
     elif status in {"ERROR", "WAIT_MARKET", "FAILED"}:
         target = 0.45
     elif (
@@ -109,11 +111,14 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
         or status in {
             "OPEN",
             "OPENING",
+            "PREPARING",
+            "RESOLVING",
             "WAIT_ENTRY",
             "SCHEDULED",
             "PREPARED",
             "WAIT_CLOSE",
             "PRELOAD_RETRY",
+            "RECONCILING",
         }
     ):
         target = 0.08
@@ -121,6 +126,35 @@ def _next_delay(result: dict[str, Any], elapsed: float) -> float:
         target = 0.18
 
     return max(0.02, target - max(0.0, elapsed))
+
+
+async def _drive_worker_iteration(account_id: int) -> dict[str, Any]:
+    """Run one worker iteration only while this process owns the account lease.
+
+    The database lease is the final authority for broker ownership. A worker that
+    loses Neon connectivity long enough for its lease to expire must stop all AUTO
+    broker/session work immediately; otherwise an already-promoted standby worker
+    could trade the same account concurrently.
+    """
+    if account_id <= 0:
+        return {"status": "ERROR", "error": "WORKER_ACCOUNT_ID_MISSING"}
+
+    from backend.services.worker_protocol import owns_lease, process_one_command
+
+    if not await owns_lease(account_id):
+        return {"status": "STANDBY", "reason": "LEASE_NOT_OWNED"}
+
+    command = await process_one_command(account_id)
+    if command is not None:
+        return dict(command)
+
+    # Re-check immediately before broker/session driving. The lease can be lost
+    # between command polling and the trading tick during failover.
+    if not await owns_lease(account_id):
+        return {"status": "LEASE_LOST", "reason": "LEASE_NOT_OWNED"}
+
+    value = await adaptive_drive_session_tick()
+    return dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
 
 
 async def _driver_loop() -> None:
@@ -131,8 +165,8 @@ async def _driver_loop() -> None:
         started = time.monotonic()
         result: dict[str, Any]
         try:
-            value = await adaptive_drive_session_tick()
-            result = dict(value) if isinstance(value, dict) else {"status": "UNKNOWN"}
+            account_id = int(os.getenv("WORKER_ACCOUNT_ID") or 0)
+            result = await _drive_worker_iteration(account_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

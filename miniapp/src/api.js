@@ -1,4 +1,13 @@
-export const API = window.location.origin;
+const buildApi = String(import.meta.env.VITE_API_BASE || "").trim();
+const queryApi = new URLSearchParams(window.location.search).get("api") || "";
+const CDN_API = "https://birthday-map-race-packing.trycloudflare.com";
+const isCloudflareCdn = /(?:^|\.)(?:workers\.dev|pages\.dev)$/i.test(window.location.hostname);
+if (queryApi && !isCloudflareCdn) {
+  try { localStorage.setItem("ap_api_base", queryApi); } catch {}
+}
+let savedApi = "";
+try { savedApi = localStorage.getItem("ap_api_base") || ""; } catch {}
+export const API = String(buildApi || (isCloudflareCdn ? CDN_API : "") || queryApi || savedApi || window.location.origin).replace(/\/$/, "");
 
 export function getTelegramWebApp() {
   return window.Telegram?.WebApp || null;
@@ -52,31 +61,112 @@ function normalizeTimeValue(value, key = "") {
   return value;
 }
 
-export async function apiFetch(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    ...options,
-    headers: telegramHeaders(options.headers || {}),
-  });
-  let body = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  if (!response.ok) {
-    const message = body?.detail || body?.error || `${response.status} ${response.statusText}`;
-    const error = new Error(message);
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-  return normalizeTimeValue(body);
+const inflightGets = new Map();
+const memoryCache = new Map();
+const CACHE_RULES = [
+  [/^\/api\/admin\/state(?:\?|$)/, 30000, "ap_cache_admin"],
+  [/^\/api\/auto\/state(?:\?|$)/, 900, "ap_cache_auto_state"],
+  [/^\/api\/auto-preload\/state(?:\?|$)/, 1200, "ap_cache_auto_preload"],
+];
+
+function cacheRule(path) {
+  return CACHE_RULES.find(([pattern]) => pattern.test(path)) || null;
 }
 
-export function postJson(path, payload = {}) {
+function readPersistentCache(key, maxAge) {
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || Date.now() - Number(parsed.at || 0) > maxAge) return null;
+    return normalizeTimeValue(parsed.value);
+  } catch {
+    return null;
+  }
+}
+
+function writePersistentCache(key, value) {
+  if (!key) return;
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), value })); } catch {}
+}
+
+async function requestJson(path, options = {}) {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+  const timeoutMs = Number(options.timeoutMs || 4500);
+  let timeout = null;
+  let onAbort = null;
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else {
+      onAbort = () => controller.abort(externalSignal.reason);
+      externalSignal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+  timeout = window.setTimeout(() => controller.abort(new DOMException("API timeout", "TimeoutError")), timeoutMs);
+  try {
+    const response = await fetch(`${API}${path}`, {
+      ...options,
+      signal: controller.signal,
+      mode: "cors",
+      cache: options.cache || "no-store",
+      headers: telegramHeaders(options.headers || {}),
+    });
+    let body = null;
+    try { body = await response.json(); } catch { body = null; }
+    if (!response.ok) {
+      const message = body?.detail || body?.error || `${response.status} ${response.statusText}`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    return normalizeTimeValue(body);
+  } finally {
+    if (timeout) window.clearTimeout(timeout);
+    if (externalSignal && onAbort) externalSignal.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function apiFetch(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method !== "GET") return requestJson(path, options);
+
+  const rule = cacheRule(path);
+  const now = Date.now();
+  if (rule) {
+    const [, ttl, storageKey] = rule;
+    const cached = memoryCache.get(storageKey);
+    if (cached && now - cached.at <= ttl) return cached.value;
+    const persisted = readPersistentCache(storageKey, ttl);
+    if (persisted != null) {
+      memoryCache.set(storageKey, { at: now, value: persisted });
+      return persisted;
+    }
+  }
+
+  const key = `${path}|${JSON.stringify(options.headers || {})}`;
+  if (inflightGets.has(key)) return inflightGets.get(key);
+
+  const promise = requestJson(path, options)
+    .then((value) => {
+      if (rule) {
+        const [, , storageKey] = rule;
+        memoryCache.set(storageKey, { at: Date.now(), value });
+        writePersistentCache(storageKey, value);
+      }
+      return value;
+    })
+    .finally(() => inflightGets.delete(key));
+  inflightGets.set(key, promise);
+  return promise;
+}
+
+export function postJson(path, payload = {}, extraHeaders = {}) {
   return apiFetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...extraHeaders },
     body: JSON.stringify(payload),
   });
 }
@@ -93,7 +183,10 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   let socket = null;
   let stopped = false;
   let retryTimer = null;
-  let retryDelay = 250;
+  let pollTimer = null;
+  let retryDelay = 500;
+  let lastSequence = 0;
+  let pollBusy = false;
 
   const report = (value) => {
     try { onStatus?.(value); } catch {}
@@ -101,31 +194,74 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
 
   const scheduleReconnect = () => {
     if (stopped || retryTimer) return;
-    report({ connected: false, driving: false, reconnecting: true });
+    startPolling();
+    report({ connected: false, driving: false, reconnecting: true, transport: "polling" });
     retryTimer = window.setTimeout(() => {
       retryTimer = null;
       connect();
     }, retryDelay);
-    retryDelay = Math.min(5000, Math.round(retryDelay * 1.7));
+    retryDelay = Math.min(8000, Math.round(retryDelay * 1.7));
   };
 
-  const connect = () => {
+  const stopPolling = () => {
+    if (pollTimer) window.clearInterval(pollTimer);
+    pollTimer = null;
+    pollBusy = false;
+  };
+
+  const poll = async () => {
+    if (stopped || pollBusy) return;
+    pollBusy = true;
+    try {
+      const state = await apiFetch("/api/auto/state?drive=false");
+      onState?.(state);
+      report({ connected: true, driving: true, reconnecting: false, transport: "polling" });
+    } catch {
+      report({ connected: false, driving: false, reconnecting: true, transport: "polling" });
+    } finally {
+      pollBusy = false;
+    }
+  };
+
+  const startPolling = () => {
+    if (stopped || pollTimer) return;
+    void poll();
+    pollTimer = window.setInterval(poll, 1200);
+  };
+
+  const connect = async () => {
     if (stopped || !getTelegramInitData()) return;
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(`${protocol}//${window.location.host}/ws/auto`);
-    report({ connected: false, driving: false, reconnecting: true });
+    let config;
+    try {
+      config = await postJson("/api/live/realtime-token");
+    } catch {
+      startPolling();
+      scheduleReconnect();
+      return;
+    }
+    if (config?.transport !== "wss" || !config?.url || !config?.token) {
+      startPolling();
+      return;
+    }
+    socket = new WebSocket(config.url);
+    report({ connected: false, driving: false, reconnecting: true, transport: "wss" });
 
     socket.addEventListener("open", () => {
-      retryDelay = 250;
-      socket?.send(JSON.stringify({ type: "auth", init_data: getTelegramInitData() }));
+      retryDelay = 500;
+      socket?.send(JSON.stringify({ type: "auth", token: config.token, last_sequence: lastSequence }));
     });
     socket.addEventListener("message", (event) => {
       try {
         const message = JSON.parse(event.data);
         if (message?.type === "ready") {
-          report({ connected: true, driving: Boolean(message.realtime_driver), reconnecting: false });
+          stopPolling();
+          report({ connected: true, driving: true, reconnecting: false, transport: "wss" });
         } else if (message?.type === "auto_state" && message.data) {
-          onState?.(normalizeTimeValue(message.data));
+          lastSequence = Math.max(lastSequence, Number(message.data.sequence || 0));
+          const state = normalizeTimeValue(message.data);
+          memoryCache.set("ap_cache_auto_state", { at: Date.now(), value: state });
+          writePersistentCache("ap_cache_auto_state", state);
+          onState?.(state);
         }
       } catch {}
     });
@@ -139,6 +275,7 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   return () => {
     stopped = true;
     if (retryTimer) window.clearTimeout(retryTimer);
+    stopPolling();
     try { socket?.close(1000, "Mini App closed realtime stream"); } catch {}
   };
 }
@@ -148,9 +285,7 @@ export function syncDeviceTimezone() {
   if (!TG_ID) return Promise.resolve(null);
   if (timezoneSyncPromise) return timezoneSyncPromise;
   let name = "";
-  try {
-    name = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {}
+  try { name = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch {}
   const offsetMinutes = -new Date().getTimezoneOffset();
   timezoneSyncPromise = postJson("/api/settings/timezone", {
     name,
@@ -160,5 +295,5 @@ export function syncDeviceTimezone() {
 }
 
 if (TG_ID) {
-  setTimeout(() => { syncDeviceTimezone(); }, 0);
+  setTimeout(() => { syncDeviceTimezone(); }, 1200);
 }

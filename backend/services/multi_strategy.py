@@ -254,62 +254,6 @@ def _execution_strategies(selected: Iterable[str]) -> tuple[str, ...]:
     return items
 
 
-def _validate_config(config: dict) -> dict:
-    mode = str(config.get("mode") or "count").lower()
-    selected = split_strategy_key(config.get("strategy"))
-    strategy_key = "+".join(selected)
-    amount = round(float(config.get("amount") or 1), 2)
-    max_martingale = int(config.get("max_martingale", 3))
-
-    if amount < 1 or amount > session_engine.MAX_SESSION_AMOUNT:
-        raise ValueError("Amount must be between 1 and 50000")
-    if max_martingale < 0 or max_martingale > 3:
-        raise ValueError("Martingale covers must be between 0 and 3")
-
-    if mode == "count":
-        timeframe = str(config.get("timeframe") or "1m")
-        target = int(config.get("target_wins") or 5)
-        if any(strategy not in session_engine.COUNT_STRATEGIES for strategy in selected):
-            raise ValueError("Unknown AUTO strategy")
-        if timeframe not in session_engine.COUNT_TIMEFRAMES:
-            raise ValueError("Count mode timeframe must be 15s, 1m or 3m")
-        if target < 5 or target > 25:
-            raise ValueError("Target wins must be between 5 and 25")
-        return {
-            "mode": mode,
-            "strategy": strategy_key,
-            "timeframe": timeframe,
-            "target_wins": target,
-            "target_profit": None,
-            "amount": amount,
-            "max_martingale": max_martingale,
-            "max_failed_series": 1,
-        }
-
-    if mode == "profit":
-        target = round(float(config.get("target_profit") or 1), 2)
-        failed = int(config.get("max_failed_series") or 1)
-        allowed_profit = set(session_engine.PROFIT_STRATEGIES) | {"mixed_smart"}
-        if any(strategy not in allowed_profit for strategy in selected):
-            raise ValueError("Unknown profit-mode strategy")
-        if target <= 0:
-            raise ValueError("Target profit must be positive")
-        if failed < 1 or failed > 10:
-            raise ValueError("Failed-series limit must be between 1 and 10")
-        return {
-            "mode": mode,
-            "strategy": strategy_key,
-            "timeframe": session_engine.PROFIT_TIMEFRAME,
-            "target_wins": None,
-            "target_profit": target,
-            "amount": amount,
-            "max_martingale": max_martingale,
-            "max_failed_series": failed,
-        }
-
-    raise ValueError("Unknown session mode")
-
-
 _ORIGINAL_SCAN_STRATEGY = signal_engine.scan_strategy_candidates
 _ORIGINAL_SCAN_BEST = signal_engine.scan_best_candidates
 _ORIGINAL_SESSION_TICK = session_engine.session_tick
@@ -444,7 +388,6 @@ async def _settle(session):
     return settled
 
 
-session_engine._validate_config = _validate_config
 session_engine._event = _event
 session_engine._settle = _settle
 signal_engine.scan_strategy_candidates = _scan_strategy_candidates

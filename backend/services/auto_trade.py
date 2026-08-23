@@ -6,15 +6,16 @@ import os
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from backend.models.db_models import (
     AsyncSessionLocal, AutoTradeControl, PaperPosition, Signal, SignalDirection,
     SignalResult, TradeExecution, utcnow,
 )
+from backend.services.broker_adapter import DemoBrokerAdapter
 from backend.services.control import admin_id
-from backend.services.pocket_demo_trading import DirectDemoTradingClient
+from backend.services.pocket_demo_trading import DirectDemoTradingClient, OrderUncertainError
 from backend.services.pocketoption_otc import MarketDataUnavailable, _parse_wire_auth, market_data
 from backend.services.trade_mode import get_execution_mode, get_trade_account_mode
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
@@ -29,6 +30,7 @@ MIN_AUTO_PAYOUT = 92.0
 AUTO_DUE_WINDOW_SECONDS = max(5, min(10, int(os.getenv("AUTO_DUE_WINDOW_SECONDS", "7"))))
 ENTRY_GRACE_SECONDS = max(0.5, min(3.0, float(os.getenv("AUTO_ENTRY_GRACE_SECONDS", "1.5"))))
 _snapshot_cache: dict = {"at": 0.0, "data": None}
+_demo_trading_client: DirectDemoTradingClient | None = None
 
 
 def _to_utc_naive(value) -> datetime:
@@ -130,8 +132,27 @@ async def latest_execution() -> dict | None:
     }
 
 
-def _build_trading_client():
-    return DirectDemoTradingClient(market_data.ssid)
+def _worker_persistent_broker_enabled() -> bool:
+    return str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() == "worker"
+
+
+def _build_trading_client() -> DemoBrokerAdapter:
+    global _demo_trading_client
+    if not _worker_persistent_broker_enabled():
+        return DirectDemoTradingClient(market_data.ssid)
+    if _demo_trading_client is None:
+        _demo_trading_client = DirectDemoTradingClient(market_data.ssid)
+    return _demo_trading_client
+
+
+async def close_demo_trading_client() -> None:
+    global _demo_trading_client
+    client, _demo_trading_client = _demo_trading_client, None
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.0) -> dict:
@@ -142,18 +163,26 @@ async def get_demo_account_snapshot(*, force: bool = False, max_age: float = 12.
     await market_data._refresh_private_ssid()
     if not market_data.configured or not trading_is_demo():
         return {"balance": None, "balance_is_demo": None, "payouts": {}, "available_assets": {}}
-    client = DirectDemoTradingClient(market_data.ssid)
+    client = _build_trading_client()
     try:
         await asyncio.wait_for(client.connect(persistent=False), timeout=20)
-        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=1.7), timeout=4)
+        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.65), timeout=3)
+        captured = snapshot.get("captured_at")
+        if captured is not None and time.time() - float(captured) > 3.0 and _worker_persistent_broker_enabled():
+            # A half-open Socket.IO connection can look connected until the next
+            # receive. Reconnect once when telemetry stopped advancing.
+            await client.disconnect()
+            await asyncio.wait_for(client.connect(persistent=False), timeout=20)
+            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=3)
         _snapshot_cache["at"] = time.monotonic()
         _snapshot_cache["data"] = dict(snapshot)
         return snapshot
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if not _worker_persistent_broker_enabled():
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 def payout_for_asset(snapshot: dict, asset: str) -> float | None:
@@ -205,6 +234,8 @@ async def _mark_execution(execution_id: int, status: str, error: str | None = No
 
 
 async def _basic_guard(signal: dict, *, confirmed: bool) -> dict | None:
+    if str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() != "worker":
+        return {"status": "WORKER_REQUIRED"}
     tid = admin_id()
     control = await get_auto_trade_control()
     if tid <= 0 or control is None or not control.enabled:
@@ -220,6 +251,26 @@ async def _basic_guard(signal: dict, *, confirmed: bool) -> dict | None:
         return {"status": "REAL_CONFIRMATION_REQUIRED", "account": "real", "reason": "open_manually_in_pocket"}
     if connected_account != "demo":
         return {"status": "ACCOUNT_MISMATCH", "account": connected_account, "selected_account": selected_account}
+    from backend.services.worker_protocol import ensure_demo_account, owns_lease
+
+    account_id = await ensure_demo_account(tid)
+    if not await owns_lease(account_id):
+        return {"status": "LEASE_REQUIRED", "account_id": account_id}
+    async with AsyncSessionLocal() as db:
+        active_session = (
+            await db.execute(
+                text("""SELECT status,active_position_id,pending_signal_id
+                    FROM auto_trade_sessions WHERE account_id=:account
+                    ORDER BY id DESC LIMIT 1"""),
+                {"account": account_id},
+            )
+        ).mappings().first()
+    if not active_session or str(active_session["status"]) != "ACTIVE":
+        return {"status": "SESSION_NOT_ACTIVE"}
+    if active_session.get("active_position_id"):
+        return {"status": "ACTIVE_POSITION_EXISTS"}
+    if int(active_session.get("pending_signal_id") or 0) != int(signal.get("id") or 0):
+        return {"status": "SIGNAL_NOT_CLAIMED"}
     if not confirmed and await get_execution_mode() != "auto":
         return {"status": "CONFIRMATION_REQUIRED", "execution_mode": "confirm"}
     return None
@@ -339,6 +390,16 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             if payout is None or payout < MIN_AUTO_PAYOUT:
                 await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")
                 return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}
+            broker_balance = snapshot.get("balance")
+            if broker_balance is not None and float(broker_balance) + 1e-9 < float(amount):
+                await update_trade_runtime(
+                    stage="STOPPED", pending_signal_id=None, balance=float(broker_balance), amount=amount,
+                    message=f"Недостаточно средств · баланс {float(broker_balance):.2f}, для следующей сделки нужно {amount:.2f}",
+                )
+                return {
+                    "status": "STOP_REQUIRED", "reason": "INSUFFICIENT_FUNDS",
+                    "balance": float(broker_balance), "required": float(amount),
+                }
 
             if exact_entry:
                 remaining = (entry - utcnow()).total_seconds()
@@ -379,7 +440,16 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
                 await update_trade_runtime(stage="OPENING", message="Отправляю подтверждённый DEMO ордер")
 
             direction = OrderDirection.CALL if signal["direction"] == "BUY" else OrderDirection.PUT
-            result = await asyncio.wait_for(client.place_order(asset=signal["asset"], amount=amount, direction=direction, duration=duration), timeout=20)
+            result = await asyncio.wait_for(
+                client.place_order(
+                    asset=signal["asset"],
+                    amount=amount,
+                    direction=direction,
+                    duration=duration,
+                    idempotency_key=f"execution:{execution.id}",
+                ),
+                timeout=20,
+            )
             status_value = getattr(result.status, "value", str(result.status)).lower()
             if result.status == OrderStatus.CANCELLED or result.error_message:
                 raise RuntimeError(result.error_message or "Pocket Option cancelled the order")
@@ -425,17 +495,60 @@ async def _execute_signal(signal: dict, *, confirmed: bool, exact_entry: bool) -
             logger.warning("Admin demo trade opened signal=%s asset=%s exact_entry=%s", signal["id"], signal["asset"], exact_entry)
             return {
                 "status": "OPEN", "position_id": position.id, "amount": amount, "account": "demo", "confirmed": confirmed,
+                "broker_order_id": str(result.order_id),
                 "payout": payout, "balance": balance, "entry_time": _iso(placed_at), "scheduled_entry_time": _iso(entry),
                 "entry_delay_ms": round((placed_at - entry).total_seconds() * 1000) if exact_entry else None,
+            }
+        except OrderUncertainError as exc:
+            if execution is not None:
+                await _mark_execution(
+                    execution.id, "UNKNOWN", f"ORDER_UNCERTAIN:{exc.request_id}",
+                )
+            await update_trade_runtime(
+                stage="RECONCILING", pending_signal_id=int(signal["id"]),
+                message="Pocket не подтвердил ответ · сверяю сделку по request id, новые входы заблокированы",
+            )
+            return {
+                "status": "RECONCILING", "reason": "ORDER_UNCERTAIN",
+                "request_id": exc.request_id, "signal_id": int(signal["id"]),
+                "execution_id": execution.id if execution is not None else None,
+            }
+        except asyncio.TimeoutError:
+            # The broker may have accepted the order even though its response
+            # was lost. Never retry or continue scanning until reconciliation
+            # has resolved this execution.
+            if execution is not None:
+                await _mark_execution(
+                    execution.id,
+                    "UNKNOWN",
+                    "ORDER_TIMEOUT_RECONCILIATION_REQUIRED",
+                )
+            await update_trade_runtime(
+                stage="RECONCILING",
+                message="Ответ Pocket не получен · сверяю ордер, новые входы заблокированы",
+            )
+            return {
+                "status": "RECONCILING",
+                "reason": "ORDER_TIMEOUT",
+                "signal_id": int(signal["id"]),
+                "execution_id": execution.id if execution is not None else None,
             }
         except Exception as exc:
             logger.exception("Auto trade failed for signal %s: %s", signal.get("id"), type(exc).__name__)
             if execution is not None:
                 await _mark_execution(execution.id, "FAILED", type(exc).__name__)
+            compact = str(exc).replace(" ", "").lower()
+            if "notenoughfunds" in compact or "insufficientfunds" in compact:
+                await update_trade_runtime(
+                    stage="STOPPED",
+                    pending_signal_id=None,
+                    message="Недостаточно средств для следующей DEMO ставки",
+                )
+                return {"status": "STOP_REQUIRED", "reason": "INSUFFICIENT_FUNDS"}
             await update_trade_runtime(stage="FAILED", pending_signal_id=None, message=f"Ошибка открытия: {type(exc).__name__}")
             return {"status": "FAILED", "error": type(exc).__name__}
         finally:
-            if client is not None:
+            if client is not None and not _worker_persistent_broker_enabled():
                 try:
                     await client.disconnect()
                 except Exception:

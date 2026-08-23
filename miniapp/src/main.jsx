@@ -1,6 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './smart_confluence_ui.js'
+import './preload_ui_sync.js'
 import App from './App.jsx'
 
 const telegram = window.Telegram?.WebApp
@@ -34,16 +36,17 @@ function syncTelegramViewport() {
 
 function requestImmersiveTelegramMode() {
   if (!telegram) return
+  const supports = (version) => Boolean(telegram.isVersionAtLeast?.(version))
   try { telegram.ready?.() } catch {}
   try { telegram.expand?.() } catch {}
-  try { telegram.disableVerticalSwipes?.() } catch {}
-  try { telegram.enableClosingConfirmation?.() } catch {}
-  try { telegram.setHeaderColor?.('#070a12') } catch {}
-  try { telegram.setBackgroundColor?.('#070a12') } catch {}
-  try { telegram.setBottomBarColor?.('#070a12') } catch {}
-  try { telegram.lockOrientation?.() } catch {}
+  try { if (supports('7.7')) telegram.disableVerticalSwipes?.() } catch {}
+  try { if (supports('6.2')) telegram.enableClosingConfirmation?.() } catch {}
+  try { if (supports('6.1')) telegram.setHeaderColor?.('#070a12') } catch {}
+  try { if (supports('6.1')) telegram.setBackgroundColor?.('#070a12') } catch {}
+  try { if (supports('7.10')) telegram.setBottomBarColor?.('#070a12') } catch {}
+  try { if (supports('8.0')) telegram.lockOrientation?.() } catch {}
   try {
-    if (!telegram.isFullscreen) telegram.requestFullscreen?.()
+    if (supports('8.0') && !telegram.isFullscreen) telegram.requestFullscreen?.()
   } catch {}
   syncTelegramViewport()
 }

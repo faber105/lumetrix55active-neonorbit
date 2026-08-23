@@ -1,0 +1,73 @@
+name: Persistent worker trading socket hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/persistent-trading-socket-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Reuse worker broker socket for telemetry and order entry
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('backend/services/auto_trade.py')
+          text = p.read_text(encoding='utf-8')
+
+          marker = '_snapshot_cache: dict = {"at": 0.0, "data": None}\n'
+          if '_demo_trading_client:' not in text:
+              text = text.replace(marker, marker + '_demo_trading_client: DirectDemoTradingClient | None = None\n', 1)
+
+          old = '''def _build_trading_client() -> DemoBrokerAdapter:\n    return DirectDemoTradingClient(market_data.ssid)\n\n\nasync def get_demo_account_snapshot'''
+          new = '''def _worker_persistent_broker_enabled() -> bool:\n    return str(os.getenv("APP_RUNTIME_ROLE") or "web").strip().lower() == "worker"\n\n\ndef _build_trading_client() -> DemoBrokerAdapter:\n    global _demo_trading_client\n    if not _worker_persistent_broker_enabled():\n        return DirectDemoTradingClient(market_data.ssid)\n    if _demo_trading_client is None:\n        _demo_trading_client = DirectDemoTradingClient(market_data.ssid)\n    return _demo_trading_client\n\n\nasync def close_demo_trading_client() -> None:\n    global _demo_trading_client\n    client, _demo_trading_client = _demo_trading_client, None\n    if client is not None:\n        try:\n            await client.disconnect()\n        except Exception:\n            pass\n\n\nasync def get_demo_account_snapshot'''
+          if old not in text:
+              raise SystemExit('build client anchor missing')
+          text = text.replace(old, new, 1)
+
+          old = '''    client = DirectDemoTradingClient(market_data.ssid)\n    try:\n        await asyncio.wait_for(client.connect(persistent=False), timeout=20)\n        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=1.7), timeout=4)\n        _snapshot_cache["at"] = time.monotonic()\n        _snapshot_cache["data"] = dict(snapshot)\n        return snapshot\n    finally:\n        try:\n            await client.disconnect()\n        except Exception:\n            pass\n'''
+          new = '''    client = _build_trading_client()\n    try:\n        await asyncio.wait_for(client.connect(persistent=False), timeout=20)\n        snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.65), timeout=3)\n        captured = snapshot.get("captured_at")\n        if captured is not None and time.time() - float(captured) > 3.0 and _worker_persistent_broker_enabled():\n            # A half-open Socket.IO connection can look connected until the next\n            # receive. Reconnect once when telemetry stopped advancing.\n            await client.disconnect()\n            await asyncio.wait_for(client.connect(persistent=False), timeout=20)\n            snapshot = await asyncio.wait_for(client.account_snapshot(listen_seconds=0.8), timeout=3)\n        _snapshot_cache["at"] = time.monotonic()\n        _snapshot_cache["data"] = dict(snapshot)\n        return snapshot\n    finally:\n        if not _worker_persistent_broker_enabled():\n            try:\n                await client.disconnect()\n            except Exception:\n                pass\n'''
+          if old not in text:
+              raise SystemExit('snapshot client anchor missing')
+          text = text.replace(old, new, 1)
+
+          old = '''        finally:\n            if client is not None:\n                try:\n                    await client.disconnect()\n                except Exception:\n                    pass\n'''
+          new = '''        finally:\n            if client is not None and not _worker_persistent_broker_enabled():\n                try:\n                    await client.disconnect()\n                except Exception:\n                    pass\n'''
+          if old not in text:
+              raise SystemExit('execution disconnect anchor missing')
+          text = text.replace(old, new, 1)
+          p.write_text(text, encoding='utf-8')
+
+          p = Path('worker/main.py')
+          text = p.read_text(encoding='utf-8')
+          anchor = '    from backend.models.db_models import engine\n'
+          if 'close_demo_trading_client' not in text:
+              text = text.replace(anchor, anchor + '    from backend.services.auto_trade import close_demo_trading_client\n', 1)
+          text = text.replace(
+              '        await market_data.close()\n        await engine.dispose()\n',
+              '        await close_demo_trading_client()\n        await market_data.close()\n        await engine.dispose()\n',
+              1,
+          )
+          p.write_text(text, encoding='utf-8')
+      - name: Validate
+        run: |
+          python -m compileall -q backend worker
+          grep -q '_demo_trading_client: DirectDemoTradingClient' backend/services/auto_trade.py
+          grep -q 'listen_seconds=0.65' backend/services/auto_trade.py
+          grep -q 'close_demo_trading_client' worker/main.py
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/auto_trade.py worker/main.py
+          git commit -m "Reuse persistent Pocket socket for worker execution"
+          git push origin HEAD:codex-windows-worker-rebuild

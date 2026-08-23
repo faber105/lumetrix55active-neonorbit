@@ -15,7 +15,6 @@ from backend.models.db_models import (
     TradeExecution,
     utcnow,
 )
-from backend.services.pocket_demo_trading import DirectDemoTradingClient
 from backend.services.pocketoption_otc import MarketDataUnavailable, market_data
 
 logger = logging.getLogger("alphapulse.positions")
@@ -338,17 +337,21 @@ async def sync_broker_positions(telegram_id: int) -> dict:
 
 
 async def _closed_broker_deals() -> dict[str, dict]:
+    """Read closed deals from the worker's already-authenticated Pocket stream.
+
+    Creating a fresh Socket.IO session after every expiry added seconds of
+    handshake latency. The market-data client is worker-local and reused, so
+    settlement can observe the broker result on the next hot AUTO tick.
+    """
     try:
         await market_data._refresh_private_ssid()
         if not market_data.configured:
             return {}
-        client = DirectDemoTradingClient(market_data.ssid)
-        try:
-            if not await client.connect(persistent=False):
-                return {}
-            deals = await client._client.get_closed_deals(listen_seconds=0.20)
-        finally:
-            await client.disconnect()
+        client = await market_data.connect()
+        getter = getattr(client, "get_closed_deals", None)
+        if getter is None:
+            return {}
+        deals = await getter(listen_seconds=0.45)
         return {_deal_id(row): row for row in deals if isinstance(row, dict) and _deal_id(row)}
     except Exception as exc:
         logger.warning("Pocket closed-deals sync failed: %s", type(exc).__name__)

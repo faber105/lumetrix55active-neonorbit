@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+config/worker.env
 runtime_secrets.json
 __pycache__/
 *.py[cod]

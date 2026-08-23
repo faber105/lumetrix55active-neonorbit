@@ -1,0 +1,78 @@
+name: Worker-only signal routing hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/signals-worker-routing-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Route public signal analysis through Windows worker
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          p = Path('backend/routers/signals.py')
+          text = p.read_text(encoding='utf-8')
+
+          text = text.replace(
+              'from backend.telegram_auth import TelegramMiniAppUser, telegram_user',
+              'from backend.telegram_auth import TelegramMiniAppUser, admin_user, telegram_user\nfrom backend.services.worker_protocol import await_command, enqueue_command, ensure_demo_account',
+              1,
+          )
+
+          helper_anchor = 'router = APIRouter()\nlogger = logging.getLogger(\'alphapulse.signals\')\n'
+          helper = '''router = APIRouter()\nlogger = logging.getLogger('alphapulse.signals')\n\n\nasync def _worker_call(user_id: int, command_type: str, payload: dict, key: str, timeout: float = 25.0) -> dict:\n    account_id = await ensure_demo_account(int(user_id))\n    command = await enqueue_command(\n        account_id=account_id, command_type=command_type, payload=payload, idempotency_key=key[:128]\n    )\n    try:\n        return await await_command(int(command['id']), account_id, timeout_seconds=timeout)\n    except TimeoutError as exc:\n        raise HTTPException(503, 'Windows worker is not responding') from exc\n    except RuntimeError as exc:\n        raise HTTPException(503, 'Windows worker could not complete market analysis') from exc\n'''
+          if '_worker_call(' not in text:
+              text = text.replace(helper_anchor, helper, 1)
+
+          analyze_start = text.index("@router.post('/analyze')")
+          analyze_end = text.index('\n\nclass StrategyScanRequest', analyze_start)
+          analyze_new = '''@router.post('/analyze')\nasync def analyze(\n    req: AnalyzeRequest,\n    user: TelegramMiniAppUser = Depends(telegram_user),\n    db: AsyncSession = Depends(get_db),\n):\n    del db\n    payload = req.model_dump(exclude={'user_id'})\n    result = await _worker_call(\n        int(user.id), 'ANALYZE_SIGNAL', payload,\n        f"analyze:{int(user.id)}:{req.pair}:{req.timeframe}:{req.strategy}:{int(datetime.now(timezone.utc).timestamp() // 2)}",\n    )\n    if result.get('signal'):\n        result['signal']['source'] = 'manual'\n    return result\n'''
+          text = text[:analyze_start] + analyze_new + text[analyze_end:]
+
+          scan_start = text.index("@router.post('/scan-strategy')")
+          scan_end = text.index('\n\nclass ScanRequest', scan_start)
+          scan_new = '''@router.post('/scan-strategy')\nasync def scan_strategy(\n    req: StrategyScanRequest,\n    user: TelegramMiniAppUser = Depends(telegram_user),\n    db: AsyncSession = Depends(get_db),\n):\n    del db\n    payload = req.model_dump()\n    return await _worker_call(\n        int(user.id), 'SCAN_STRATEGY', payload,\n        f"scan-strategy:{int(user.id)}:{req.strategy}:{req.timeframe}:{int(datetime.now(timezone.utc).timestamp() // 3)}",\n    )\n'''
+          text = text[:scan_start] + scan_new + text[scan_end:]
+
+          best_start = text.index("@router.post('/scan-best')")
+          best_end = text.index("\n\n@router.post('/reconcile')", best_start)
+          best_new = '''@router.post('/scan-best')\nasync def scan_best(\n    req: ScanRequest,\n    user: TelegramMiniAppUser = Depends(telegram_user),\n    db: AsyncSession = Depends(get_db),\n):\n    del db\n    payload = req.model_dump()\n    return await _worker_call(\n        int(user.id), 'SCAN_BEST', payload,\n        f"scan-best:{int(user.id)}:{req.timeframe}:{int(datetime.now(timezone.utc).timestamp() // 3)}",\n    )\n'''
+          text = text[:best_start] + best_new + text[best_end:]
+
+          rec_start = text.index("@router.post('/reconcile')")
+          rec_end = text.index("\n\n@router.get('/history')", rec_start)
+          rec_new = '''@router.post('/reconcile')\nasync def reconcile(user: TelegramMiniAppUser = Depends(admin_user)):\n    return await _worker_call(\n        int(user.id), 'RECONCILE_SIGNALS', {},\n        f"reconcile-signals:{int(user.id)}:{int(datetime.now(timezone.utc).timestamp() // 3)}",\n    )\n'''
+          text = text[:rec_start] + rec_new + text[rec_end:]
+
+          p.write_text(text, encoding='utf-8')
+      - name: Validate worker boundary
+        run: |
+          python -m compileall -q backend worker
+          grep -q "'ANALYZE_SIGNAL'" backend/routers/signals.py
+          grep -q "'SCAN_STRATEGY'" backend/routers/signals.py
+          grep -q "'SCAN_BEST'" backend/routers/signals.py
+          grep -q "'RECONCILE_SIGNALS'" backend/routers/signals.py
+          ! grep -A30 "@router.post('/analyze')" backend/routers/signals.py | grep -q 'signal_engine'
+          ! grep -A30 "@router.post('/scan-strategy')" backend/routers/signals.py | grep -q 'signal_engine'
+          ! grep -A30 "@router.post('/scan-best')" backend/routers/signals.py | grep -q 'signal_engine'
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/routers/signals.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Route signal analysis through Windows worker"
+          git push origin HEAD:codex-windows-worker-rebuild

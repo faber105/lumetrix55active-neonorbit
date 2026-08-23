@@ -1,0 +1,54 @@
+name: Uncertain order recovery hotfix
+
+on:
+  push:
+    branches: [codex-windows-worker-rebuild]
+    paths:
+      - .github/workflows/uncertain-order-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-windows-worker-rebuild
+          fetch-depth: 0
+      - name: Patch uncertain order handling
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('backend/services/auto_trade.py')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace(
+              'from backend.services.pocket_demo_trading import DirectDemoTradingClient',
+              'from backend.services.pocket_demo_trading import DirectDemoTradingClient, OrderUncertainError',
+              1,
+          )
+
+          payout_block = '''            payout = payout_for_asset(snapshot, signal["asset"])\n            if payout is None or payout < MIN_AUTO_PAYOUT:\n                await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")\n                return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}\n\n            if exact_entry:\n'''
+          payout_new = '''            payout = payout_for_asset(snapshot, signal["asset"])\n            if payout is None or payout < MIN_AUTO_PAYOUT:\n                await reset_trade_runtime("PAYOUT_TOO_LOW", f"Выплата {payout if payout is not None else '—'}% < {MIN_AUTO_PAYOUT:g}% — сигнал пропущен")\n                return {"status": "PAYOUT_TOO_LOW", "payout": payout, "min_payout": MIN_AUTO_PAYOUT}\n            broker_balance = snapshot.get("balance")\n            if broker_balance is not None and float(broker_balance) + 1e-9 < float(amount):\n                await update_trade_runtime(\n                    stage="STOPPED", pending_signal_id=None, balance=float(broker_balance), amount=amount,\n                    message=f"Недостаточно средств · баланс {float(broker_balance):.2f}, для следующей сделки нужно {amount:.2f}",\n                )\n                return {\n                    "status": "STOP_REQUIRED", "reason": "INSUFFICIENT_FUNDS",\n                    "balance": float(broker_balance), "required": float(amount),\n                }\n\n            if exact_entry:\n'''
+          if '"required": float(amount)' not in text and payout_block in text:
+              text = text.replace(payout_block, payout_new, 1)
+
+          timeout_anchor = '''        except asyncio.TimeoutError:\n            # The broker may have accepted the order even though its response\n            # was lost. Never retry or continue scanning until reconciliation\n            # has resolved this execution.\n'''
+          uncertain = '''        except OrderUncertainError as exc:\n            if execution is not None:\n                await _mark_execution(\n                    execution.id, "UNKNOWN", f"ORDER_UNCERTAIN:{exc.request_id}",\n                )\n            await update_trade_runtime(\n                stage="RECONCILING", pending_signal_id=int(signal["id"]),\n                message="Pocket не подтвердил ответ · сверяю сделку по request id, новые входы заблокированы",\n            )\n            return {\n                "status": "RECONCILING", "reason": "ORDER_UNCERTAIN",\n                "request_id": exc.request_id, "signal_id": int(signal["id"]),\n                "execution_id": execution.id if execution is not None else None,\n            }\n''' + timeout_anchor
+          if 'except OrderUncertainError as exc:' not in text:
+              if timeout_anchor not in text:
+                  raise SystemExit('timeout anchor missing')
+              text = text.replace(timeout_anchor, uncertain, 1)
+
+          p.write_text(text, encoding='utf-8')
+      - name: Validate syntax
+        run: python -m compileall -q backend
+      - name: Commit
+        run: |
+          git config user.name "AlphaPulse Worker Hotfix"
+          git config user.email "actions@users.noreply.github.com"
+          git add backend/services/auto_trade.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Fence uncertain Pocket order outcomes"
+          git push origin HEAD:codex-windows-worker-rebuild
