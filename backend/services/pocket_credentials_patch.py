@@ -24,7 +24,9 @@ async def _refresh_private_ssid(self, force: bool = False) -> None:
 
     changed = desired != str(getattr(self, 'ssid', '') or '') or bool(getattr(self, 'demo', True)) != desired_demo
     if force or changed:
-        await self._drop_client()
+        # close() must be used here: the persistent transport patch intentionally
+        # keeps a healthy socket alive when ordinary candle retries call _drop_client().
+        await self.close()
         self.demo = desired_demo
         self._apply_ssid(desired)
         # Account mode is authoritative even when the wire frame omits isDemo/currentUrl.
