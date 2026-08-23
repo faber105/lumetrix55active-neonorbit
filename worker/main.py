@@ -12,11 +12,11 @@ logger = logging.getLogger("alphapulse.worker")
 HUNT_REGULAR = "HUNT_REGULAR"
 HUNT_FOUND = "HUNT_FOUND"
 REGULAR_CONFIDENCE = 72.0
-DEFAULT_PUBLIC_BACKEND = "https://lumetrix55active-neonorbit.vercel.app"
+DEFAULT_PUBLIC_APP = "https://lumetrix55active-neonorbit.onerfaber.workers.dev"
 
 
 async def _regular_hunt_tick() -> None:
-    """Advance an admin-requested regular signal hunt on the worker only."""
+    """Advance an admin-requested regular signal hunt on the persistent worker only."""
     from backend.models.db_models import utcnow
     from backend.services.control import get_control, update_control
     from backend.services.pocketoption_otc import OTC_ASSETS
@@ -79,7 +79,7 @@ async def _maintenance_loop(stop_event: asyncio.Event) -> None:
 
 
 async def _install_worker_bot_db_fallback(bot_main) -> None:
-    """Keep /start and verification independent of the unavailable Vercel API."""
+    """Keep /start and verification independent of an external API deployment."""
     from sqlalchemy import text
     from backend.models.db_models import AsyncSessionLocal, utcnow
 
@@ -154,14 +154,17 @@ async def _install_worker_bot_db_fallback(bot_main) -> None:
 
 
 async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
-    """Keep the Telegram bot responsive from the persistent Windows worker."""
+    """Keep the Telegram bot responsive from the persistent worker."""
+    if str(os.getenv("WORKER_ENABLE_TELEGRAM_POLLING") or "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        logger.info("Telegram polling disabled by WORKER_ENABLE_TELEGRAM_POLLING")
+        return
     token = str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         logger.warning("Telegram polling disabled: TELEGRAM_BOT_TOKEN is empty")
         return
 
-    os.environ.setdefault("BACKEND_URL", DEFAULT_PUBLIC_BACKEND)
-    os.environ.setdefault("MINI_APP_URL", DEFAULT_PUBLIC_BACKEND)
+    os.environ.setdefault("BACKEND_URL", DEFAULT_PUBLIC_APP)
+    os.environ.setdefault("MINI_APP_URL", DEFAULT_PUBLIC_APP)
 
     while not stop_event.is_set():
         polling_task: asyncio.Task | None = None
@@ -173,7 +176,7 @@ async def _telegram_polling_loop(stop_event: asyncio.Event) -> None:
             await _install_worker_bot_db_fallback(bot_main)
 
             await bot.delete_webhook(drop_pending_updates=False)
-            logger.info("Telegram webhook removed; Windows worker polling is active")
+            logger.info("Telegram webhook removed; persistent worker polling is active")
 
             polling_task = asyncio.create_task(
                 dp.start_polling(bot, handle_signals=False),
@@ -233,6 +236,7 @@ async def run_worker() -> None:
     load_dotenv(override=False)
     os.environ["APP_RUNTIME_ROLE"] = "worker"
     os.environ["AUTO_REALTIME_DRIVER"] = "true"
+    os.environ.setdefault("WORKER_ID", "alphapulse-oracle-milan-1" if os.name != "nt" else "alphapulse-windows")
     _require_demo_runtime()
 
     from backend.models.db_models import engine
@@ -243,6 +247,7 @@ async def run_worker() -> None:
     from backend.services.preload_next import ensure_preload_schema
     from backend.services.session_engine import ensure_schema
     from backend.services.worker_protocol import acquire_lease, ensure_demo_account, ensure_worker_schema, register_heartbeat, release_lease, worker_supervisor
+    from worker.cloudflare_bridge import run_cloudflare_bridge
 
     await init_db()
     await ensure_schema()
@@ -267,6 +272,7 @@ async def run_worker() -> None:
     supervisor = asyncio.create_task(worker_supervisor(stop_event, account_id), name="alphapulse-worker-supervisor")
     maintenance = asyncio.create_task(_maintenance_loop(stop_event), name="alphapulse-worker-maintenance")
     telegram_polling = asyncio.create_task(_telegram_polling_loop(stop_event), name="alphapulse-telegram-runtime")
+    cloudflare_bridge = asyncio.create_task(run_cloudflare_bridge(stop_event), name="alphapulse-cloudflare-bridge")
 
     import uvicorn
     gateway_server = uvicorn.Server(
@@ -281,19 +287,18 @@ async def run_worker() -> None:
     gateway_task = asyncio.create_task(gateway_server.serve(), name="alphapulse-worker-gateway")
 
     if not await start_auto_realtime_driver():
-        supervisor.cancel()
-        maintenance.cancel()
-        telegram_polling.cancel()
+        for task in (supervisor, maintenance, telegram_polling, cloudflare_bridge):
+            task.cancel()
         gateway_server.should_exit = True
         gateway_task.cancel()
         raise RuntimeError("Persistent AUTO driver did not start")
 
-    logger.info("AlphaPulse Windows worker started in DEMO-only mode")
-    logger.info("Windows Mini App gateway listening on 127.0.0.1:%s", os.getenv("WORKER_HTTP_PORT") or "8765")
+    logger.info("AlphaPulse persistent DEMO worker started")
+    logger.info("Local Mini App gateway listening on 127.0.0.1:%s", os.getenv("WORKER_HTTP_PORT") or "8765")
     try:
         await stop_event.wait()
     finally:
-        logger.info("AlphaPulse Windows worker is stopping")
+        logger.info("AlphaPulse persistent worker is stopping")
         await stop_auto_realtime_driver()
         stop_event.set()
         gateway_server.should_exit = True
@@ -301,7 +306,7 @@ async def run_worker() -> None:
             await gateway_task
         except asyncio.CancelledError:
             pass
-        for task in (supervisor, maintenance, telegram_polling):
+        for task in (supervisor, maintenance, telegram_polling, cloudflare_bridge):
             try:
                 await task
             except asyncio.CancelledError:
