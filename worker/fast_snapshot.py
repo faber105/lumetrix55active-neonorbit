@@ -95,7 +95,16 @@ async def fast_realtime_snapshot(account_id: int, *, after_sequence: int = 0) ->
                               ) e
                         ), '[]'::json) AS events,
                         (SELECT row_to_json(l) FROM lease l) AS lease,
-                        (SELECT payload FROM ml_state WHERE strategy='__auto_trade_runtime__') AS runtime
+                        (SELECT payload FROM ml_state WHERE strategy='__auto_trade_runtime__') AS runtime,
+                        COALESCE((
+                            SELECT enabled
+                              FROM auto_preload_config
+                             WHERE telegram_id=(SELECT owner_telegram_id FROM account)
+                        ), FALSE) AS preload_enabled,
+                        (SELECT row_to_json(p)
+                           FROM auto_preload_candidates p
+                          WHERE p.session_id=(SELECT id FROM latest_session)
+                          LIMIT 1) AS preload_candidate
                     """
                 ),
                 {"account": int(account_id), "after": after},
@@ -109,6 +118,7 @@ async def fast_realtime_snapshot(account_id: int, *, after_sequence: int = 0) ->
     legs = _array(row.get("legs"))
     events = _array(row.get("events"))
     lease = _object(row.get("lease"))
+    preload_candidate = _object(row.get("preload_candidate"))
 
     event_rows: list[dict] = []
     for raw in events:
@@ -165,5 +175,7 @@ async def fast_realtime_snapshot(account_id: int, *, after_sequence: int = 0) ->
         "min_payout": 92.0,
         "sequence": latest_sequence,
         "worker": worker,
+        "preload_enabled": bool(row.get("preload_enabled")),
+        "preload_candidate": preload_candidate,
         "server_time": now,
     })
