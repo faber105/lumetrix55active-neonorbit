@@ -109,7 +109,7 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
   const poll = async () => {
     if (stopped || inFlight || !getTelegramInitData()) return;
     if (document.hidden) {
-      schedule(900);
+      schedule(1200);
       return;
     }
     inFlight = true;
@@ -118,11 +118,11 @@ export function connectAutoRealtime({ onState, onStatus } = {}) {
       failures = 0;
       try { onState?.(data); } catch {}
       report({ connected: true, driving: true, transport: "fast-http", reconnecting: false });
-      schedule(data?.active ? 250 : 650);
+      schedule(data?.active ? 600 : 1200);
     } catch (_) {
       failures += 1;
       report({ connected: false, driving: false, transport: "fast-http", reconnecting: true });
-      schedule(Math.min(2500, 250 + failures * 250));
+      schedule(Math.min(3000, 600 + failures * 300));
     } finally {
       inFlight = false;
     }
