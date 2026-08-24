@@ -21,7 +21,6 @@ async def _candidate(session_id: int) -> dict | None:
 
 
 async def _reset_consumed(session_id: int) -> None:
-    """A consumed candidate belongs to the previous trade and must never stop the next preload scan."""
     async with AsyncSessionLocal() as db:
         await db.execute(
             text("""
@@ -42,7 +41,6 @@ async def _reset_consumed(session_id: int) -> None:
 
 
 async def _sync_prepared_pair(session: dict, candidate: dict) -> None:
-    """The pair shown in UI/logs must come from the exact signal_id that will be executed."""
     signal_id = candidate.get("signal_id")
     if not signal_id:
         return
@@ -65,7 +63,9 @@ async def _sync_prepared_pair(session: dict, candidate: dict) -> None:
 
 
 async def _announce_profit_preanalysis(session: dict) -> None:
-    """Make the 120-second profit-mode preload window visible and auditable without spamming events."""
+    # OFF is authoritative: no preload stage, no preload log, no hidden scan.
+    if not await preload_next.get_preload_enabled():
+        return
     if str(session.get("mode")) != "profit" or not session.get("active_position_id"):
         return
     async with AsyncSessionLocal() as db:
@@ -109,6 +109,11 @@ async def _announce_profit_preanalysis(session: dict) -> None:
 
 
 async def preload_cycle() -> dict | None:
+    # Read the server flag before touching candidate/session state. OFF must remain
+    # OFF even while an AUTO session is already active.
+    if not await preload_next.get_preload_enabled():
+        return None
+
     session = await _active()
     if not session or str(session.get("status")) != "ACTIVE":
         return await preload_next.preload_cycle()
