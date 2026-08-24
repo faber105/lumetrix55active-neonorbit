@@ -174,3 +174,9 @@ async def await_command(command_id: int, account_id: int, *, timeout_seconds: fl
             raise RuntimeError(str(row.get("error") or "Worker command failed"))
         await asyncio.sleep(0.12)
     raise TimeoutError("Worker command queued")
+
+
+async def realtime_snapshot(account_id: int, *, after_sequence: int = 0) -> dict[str, Any]:
+    # Compatibility wrapper used by the admin router. Keep it to one DB round trip.
+    from worker.fast_snapshot import fast_realtime_snapshot
+    return await fast_realtime_snapshot(account_id, after_sequence=after_sequence)
