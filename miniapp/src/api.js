@@ -55,6 +55,7 @@ function normalizeTimeValue(value, key = "") {
 export async function apiFetch(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
     ...options,
+    cache: options.cache || "no-store",
     headers: telegramHeaders(options.headers || {}),
   });
   let body = null;
@@ -90,56 +91,54 @@ export function patchJson(path, payload = {}) {
 }
 
 export function connectAutoRealtime({ onState, onStatus } = {}) {
-  let socket = null;
   let stopped = false;
-  let retryTimer = null;
-  let retryDelay = 250;
+  let timer = null;
+  let inFlight = false;
+  let failures = 0;
 
   const report = (value) => {
     try { onStatus?.(value); } catch {}
   };
 
-  const scheduleReconnect = () => {
-    if (stopped || retryTimer) return;
-    report({ connected: false, driving: false, reconnecting: true });
-    retryTimer = window.setTimeout(() => {
-      retryTimer = null;
-      connect();
-    }, retryDelay);
-    retryDelay = Math.min(5000, Math.round(retryDelay * 1.7));
+  const schedule = (delay) => {
+    if (stopped) return;
+    if (timer) window.clearTimeout(timer);
+    timer = window.setTimeout(poll, delay);
   };
 
-  const connect = () => {
-    if (stopped || !getTelegramInitData()) return;
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    socket = new WebSocket(`${protocol}//${window.location.host}/ws/auto`);
-    report({ connected: false, driving: false, reconnecting: true });
-
-    socket.addEventListener("open", () => {
-      retryDelay = 250;
-      socket?.send(JSON.stringify({ type: "auth", init_data: getTelegramInitData() }));
-    });
-    socket.addEventListener("message", (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        if (message?.type === "ready") {
-          report({ connected: true, driving: Boolean(message.realtime_driver), reconnecting: false });
-        } else if (message?.type === "auto_state" && message.data) {
-          onState?.(normalizeTimeValue(message.data));
-        }
-      } catch {}
-    });
-    socket.addEventListener("close", scheduleReconnect);
-    socket.addEventListener("error", () => {
-      try { socket?.close(); } catch {}
-    });
+  const poll = async () => {
+    if (stopped || inFlight || !getTelegramInitData()) return;
+    if (document.hidden) {
+      schedule(900);
+      return;
+    }
+    inFlight = true;
+    try {
+      const data = await apiFetch(`/api/auto/state?drive=false&_=${Date.now()}`);
+      failures = 0;
+      try { onState?.(data); } catch {}
+      report({ connected: true, driving: true, transport: "fast-http", reconnecting: false });
+      schedule(data?.active ? 250 : 650);
+    } catch (_) {
+      failures += 1;
+      report({ connected: false, driving: false, transport: "fast-http", reconnecting: true });
+      schedule(Math.min(2500, 250 + failures * 250));
+    } finally {
+      inFlight = false;
+    }
   };
 
-  connect();
+  report({ connected: false, driving: false, transport: "fast-http", reconnecting: true });
+  poll();
+  const onVisible = () => {
+    if (!document.hidden) poll();
+  };
+  document.addEventListener("visibilitychange", onVisible);
+
   return () => {
     stopped = true;
-    if (retryTimer) window.clearTimeout(retryTimer);
-    try { socket?.close(1000, "Mini App closed realtime stream"); } catch {}
+    document.removeEventListener("visibilitychange", onVisible);
+    if (timer) window.clearTimeout(timer);
   };
 }
 
