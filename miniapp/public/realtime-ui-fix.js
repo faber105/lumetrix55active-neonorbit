@@ -1,7 +1,8 @@
 (() => {
   const nativeFetch = window.fetch.bind(window);
   let preloadEnabled = false;
-  let busy = false;
+  let inFlight = false;
+  let stopped = false;
   let timer = null;
 
   function initData() {
@@ -13,62 +14,60 @@
   }
 
   function renderPreload() {
-    document.querySelectorAll('.ap-preload').forEach((node) => {
-      const title = node.querySelector('strong');
-      const badge = title?.querySelector('b');
-      const small = node.querySelector('small');
-      if (badge) badge.textContent = preloadEnabled ? 'ON' : 'OFF';
-      if (small) small.textContent = preloadEnabled
-        ? 'Следующий вход анализируется параллельно'
-        : 'Ранний поиск выключен';
-      node.classList.toggle('enabled', preloadEnabled);
-      node.classList.toggle('disabled', !preloadEnabled);
-      const visual = node.querySelector('i');
-      if (visual) visual.style.opacity = preloadEnabled ? '1' : '.45';
-    });
+    const node = document.querySelector('.ap-preload');
+    if (!node) return;
+    const badge = node.querySelector('strong b');
+    const small = node.querySelector('small');
+    if (badge && badge.textContent !== (preloadEnabled ? 'ON' : 'OFF')) {
+      badge.textContent = preloadEnabled ? 'ON' : 'OFF';
+    }
+    const text = preloadEnabled ? 'Следующий вход анализируется параллельно' : 'Ранний поиск выключен';
+    if (small && small.textContent !== text) small.textContent = text;
+    node.classList.toggle('enabled', preloadEnabled);
+    node.classList.toggle('disabled', !preloadEnabled);
+    const visual = node.querySelector('i');
+    if (visual) visual.style.opacity = preloadEnabled ? '1' : '.45';
   }
 
-  async function loadPreload() {
-    if (busy || !document.querySelector('.ap-preload')) return;
+  async function poll() {
+    if (stopped) return;
+    if (document.hidden || inFlight || !document.querySelector('.ap-preload')) {
+      timer = setTimeout(poll, 900);
+      return;
+    }
     const tg = initData();
-    if (!tg) return;
-    busy = true;
+    if (!tg) {
+      timer = setTimeout(poll, 900);
+      return;
+    }
+    inFlight = true;
     try {
       const response = await nativeFetch(`/api/auto/state?drive=false&_=${Date.now()}`, {
         headers: { 'X-Telegram-Init-Data': tg },
         cache: 'no-store',
       });
-      if (!response.ok) return;
-      const state = await response.json();
-      preloadEnabled = Boolean(state?.preload_enabled);
-      renderPreload();
+      if (response.ok) {
+        const state = await response.json();
+        preloadEnabled = Boolean(state?.preload_enabled);
+        renderPreload();
+      }
     } catch (_) {
     } finally {
-      busy = false;
+      inFlight = false;
+      timer = setTimeout(poll, 900);
     }
   }
 
-  const observer = new MutationObserver(() => {
-    // Never show the legacy hardcoded ON while waiting for server state.
-    renderPreload();
-    if (document.querySelector('.ap-preload')) loadPreload();
-  });
-
   function start() {
-    observer.observe(document.documentElement, { childList: true, subtree: true });
     renderPreload();
-    loadPreload();
-    timer = setInterval(() => {
-      if (document.hidden) return;
-      if (document.querySelector('.ap-preload')) loadPreload();
-    }, 350);
+    timer = setTimeout(poll, 250);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 
   window.addEventListener('pagehide', () => {
-    observer.disconnect();
-    if (timer) clearInterval(timer);
+    stopped = true;
+    if (timer) clearTimeout(timer);
   }, { once: true });
 })();
