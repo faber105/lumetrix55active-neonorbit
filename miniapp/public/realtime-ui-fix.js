@@ -12,26 +12,6 @@
     } catch { return ''; }
   }
 
-  async function loadPreload() {
-    if (busy || !document.querySelector('.ap-preload')) return;
-    const tg = initData();
-    if (!tg) return;
-    busy = true;
-    try {
-      const response = await nativeFetch(`/api/auto-preload/state?_=${Date.now()}`, {
-        headers: { 'X-Telegram-Init-Data': tg },
-        cache: 'no-store',
-      });
-      if (!response.ok) return;
-      const state = await response.json();
-      preloadEnabled = Boolean(state?.enabled);
-      renderPreload();
-    } catch (_) {
-    } finally {
-      busy = false;
-    }
-  }
-
   function renderPreload() {
     document.querySelectorAll('.ap-preload').forEach((node) => {
       const title = node.querySelector('strong');
@@ -48,7 +28,28 @@
     });
   }
 
+  async function loadPreload() {
+    if (busy || !document.querySelector('.ap-preload')) return;
+    const tg = initData();
+    if (!tg) return;
+    busy = true;
+    try {
+      const response = await nativeFetch(`/api/auto/state?drive=false&_=${Date.now()}`, {
+        headers: { 'X-Telegram-Init-Data': tg },
+        cache: 'no-store',
+      });
+      if (!response.ok) return;
+      const state = await response.json();
+      preloadEnabled = Boolean(state?.preload_enabled);
+      renderPreload();
+    } catch (_) {
+    } finally {
+      busy = false;
+    }
+  }
+
   const observer = new MutationObserver(() => {
+    // Never show the legacy hardcoded ON while waiting for server state.
     renderPreload();
     if (document.querySelector('.ap-preload')) loadPreload();
   });
@@ -60,7 +61,7 @@
     timer = setInterval(() => {
       if (document.hidden) return;
       if (document.querySelector('.ap-preload')) loadPreload();
-    }, 700);
+    }, 350);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });

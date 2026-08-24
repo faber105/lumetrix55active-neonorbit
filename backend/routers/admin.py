@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 
 from backend.models.db_models import AsyncSessionLocal, PaperPosition, Signal, utcnow
 from backend.routers.signals import out
@@ -27,8 +29,8 @@ from backend.services.trade_mode import (
     set_trade_account_mode,
 )
 from backend.services.trade_runtime import get_trade_runtime, reset_trade_runtime, update_trade_runtime
-from backend.services.worker_protocol import ensure_demo_account, realtime_snapshot
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
+from worker.fast_snapshot import fast_realtime_snapshot
 
 router = APIRouter()
 VIP_CONFIDENCE = 82.0
@@ -53,31 +55,64 @@ class ControlPatch(BaseModel):
     execution_mode: str | None = None
 
 
+async def _demo_account_id(user_id: int) -> int | None:
+    async with AsyncSessionLocal() as db:
+        value = (
+            await db.execute(
+                text("""SELECT id FROM broker_accounts
+                    WHERE owner_telegram_id=:uid AND mode='DEMO' AND status='ACTIVE'
+                    ORDER BY id DESC LIMIT 1"""),
+                {"uid": int(user_id)},
+            )
+        ).scalar_one_or_none()
+    return int(value) if value is not None else None
+
+
 async def _worker_state(user_id: int) -> dict:
     try:
-        account_id = await ensure_demo_account(int(user_id))
-        return await realtime_snapshot(account_id)
+        account_id = await _demo_account_id(int(user_id))
+        if account_id is None:
+            return {"worker": {"status": "OFFLINE"}, "runtime": {}}
+        return await fast_realtime_snapshot(account_id)
     except Exception:
         return {"worker": {"status": "OFFLINE"}, "runtime": {}}
 
 
-async def _state_payload(user_id: int) -> dict:
-    control = await get_control()
-    auto_control = await get_auto_trade_control()
-    account_mode = await get_trade_account_mode()
-    execution_mode = await get_execution_mode()
-    runtime = await get_trade_runtime()
-    worker_snapshot = await _worker_state(user_id)
-    worker = worker_snapshot.get("worker") or {}
-    worker_runtime = worker_snapshot.get("runtime") or {}
-    if worker_runtime:
-        runtime = {**runtime, **worker_runtime}
-
+async def _market_rows() -> tuple[Signal | None, int]:
     async with AsyncSessionLocal() as db:
         latest = (await db.execute(select(Signal).order_by(desc(Signal.created_at)).limit(1))).scalar_one_or_none()
         open_positions = int((await db.execute(
             select(func.count()).select_from(PaperPosition).where(PaperPosition.status == "OPEN")
         )).scalar_one() or 0)
+    return latest, open_positions
+
+
+async def _state_payload(user_id: int) -> dict:
+    (
+        control,
+        auto_control,
+        account_mode,
+        execution_mode,
+        runtime,
+        worker_snapshot,
+        execution,
+        market_rows,
+    ) = await asyncio.gather(
+        get_control(),
+        get_auto_trade_control(),
+        get_trade_account_mode(),
+        get_execution_mode(),
+        get_trade_runtime(),
+        _worker_state(user_id),
+        latest_execution(),
+        _market_rows(),
+    )
+
+    worker = worker_snapshot.get("worker") or {}
+    worker_runtime = worker_snapshot.get("runtime") or {}
+    if worker_runtime:
+        runtime = {**runtime, **worker_runtime}
+    latest, open_positions = market_rows
 
     payload = serialize_control(control)
     payload.update(serialize_auto_trade(auto_control))
@@ -91,14 +126,14 @@ async def _state_payload(user_id: int) -> dict:
             "configured": worker_status in {"ONLINE", "DEGRADED"},
             "connected": worker_status == "ONLINE",
             "demo": True,
-            "provider": "Windows worker / Pocket Option DEMO",
+            "provider": "OCI worker / Pocket Option DEMO",
             "worker_status": worker_status,
             "heartbeat_age_seconds": worker.get("heartbeat_age_seconds"),
         },
         "worker": worker,
         "open_positions": open_positions,
         "latest_signal": out(latest) if latest else None,
-        "latest_execution": await latest_execution(),
+        "latest_execution": execution,
         "trade_account": "demo",
         "trade_account_mode": account_mode,
         "account_matches_mode": account_mode == "demo",
@@ -185,7 +220,7 @@ async def patch_state(data: ControlPatch, user: TelegramMiniAppUser = Depends(ad
     if requested_auto is True:
         await update_trade_runtime(
             stage="SCANNING", pending_signal_id=None, min_payout=MIN_AUTO_PAYOUT,
-            message=f"AUTO включён · Windows worker сканирует пары с выплатой ≥{MIN_AUTO_PAYOUT:g}%",
+            message=f"AUTO включён · OCI worker сканирует пары с выплатой ≥{MIN_AUTO_PAYOUT:g}%",
         )
     elif requested_auto is False:
         await update_control(last_vip_status="HUNT_STOPPED", last_scan_at=utcnow())
