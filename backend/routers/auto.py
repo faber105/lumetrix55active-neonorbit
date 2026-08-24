@@ -13,19 +13,8 @@ from sqlalchemy import text
 from backend.models.db_models import AsyncSessionLocal
 from backend.services.auto_realtime import notify_auto_change
 from backend.services.auto_trade import MIN_AUTO_PAYOUT
-from backend.services.session_engine import (
-    session_history,
-    session_state,
-    start_session,
-    stop_session,
-    validate_session_config,
-)
-from backend.services.worker_protocol import (
-    await_command,
-    ensure_demo_account,
-    enqueue_command,
-    owns_lease,
-)
+from backend.services.session_engine import session_history, start_session, stop_session, validate_session_config
+from backend.services.worker_protocol import ensure_demo_account, enqueue_command, owns_lease
 from backend.telegram_auth import TelegramMiniAppUser, admin_user
 from worker.fast_snapshot import fast_realtime_snapshot
 
@@ -64,6 +53,26 @@ def _is_local_worker(account_id: int) -> bool:
 
 async def _local_worker_ready(account_id: int) -> bool:
     return _is_local_worker(account_id) and await owns_lease(account_id)
+
+
+async def _existing_account_id(user_id: int) -> int | None:
+    async with AsyncSessionLocal() as db:
+        value = (
+            await db.execute(
+                text("""SELECT id FROM broker_accounts
+                    WHERE owner_telegram_id=:uid AND mode='DEMO' AND status='ACTIVE'
+                    ORDER BY id DESC LIMIT 1"""),
+                {"uid": int(user_id)},
+            )
+        ).scalar_one_or_none()
+    return int(value) if value is not None else None
+
+
+async def _account_id_for_read(user_id: int) -> int:
+    value = await _existing_account_id(int(user_id))
+    if value is not None:
+        return value
+    return await ensure_demo_account(int(user_id))
 
 
 def _bet_plan(base: float, payout: float, max_martingale: int) -> list[float]:
@@ -220,14 +229,16 @@ def _decorate_live_state(payload: dict) -> dict:
 
 
 async def _fast_state(user_id: int) -> dict:
-    account_id = await ensure_demo_account(int(user_id))
+    account_id = await _account_id_for_read(int(user_id))
     return _decorate_live_state(await fast_realtime_snapshot(account_id))
+
+
+async def _fast_state_account(account_id: int) -> dict:
+    return _decorate_live_state(await fast_realtime_snapshot(int(account_id)))
 
 
 @router.get("/state")
 async def state(refresh: bool = Query(False), drive: bool = Query(False), user: TelegramMiniAppUser = Depends(admin_user)):
-    # UI reads are always nonblocking. `refresh` is accepted for backward
-    # compatibility but never contacts Pocket from the public/API runtime.
     payload = await _fast_state(int(user.id))
     payload["driver"] = {"status": "WORKER_DRIVEN", "legacy_drive_ignored": bool(drive), "legacy_refresh_ignored": bool(refresh)}
     return payload
@@ -236,25 +247,6 @@ async def state(refresh: bool = Query(False), drive: bool = Query(False), user: 
 @router.post("/tick")
 async def tick(_: TelegramMiniAppUser = Depends(admin_user)):
     return {"status": "WORKER_DRIVEN"}
-
-
-async def _command_result_or_state(command: dict, account_id: int, user_id: int) -> dict:
-    try:
-        result = await await_command(int(command["id"]), int(account_id), timeout_seconds=1.25)
-        if isinstance(result, dict) and result.get("session") is not None:
-            payload = _decorate_live_state(result)
-        else:
-            payload = await _fast_state(int(user_id))
-        payload["command"] = command
-        payload["driver"] = {"status": "ACKNOWLEDGED"}
-        return payload
-    except TimeoutError:
-        payload = await _fast_state(int(user_id))
-        payload["command"] = command
-        payload["driver"] = {"status": "QUEUED"}
-        return payload
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from exc
 
 
 @router.post("/start")
@@ -287,7 +279,10 @@ async def start(
         idempotency_key=_command_key(int(user.id), "START_SESSION", body, x_idempotency_key),
     )
     await notify_auto_change(wake_driver=True)
-    return await _command_result_or_state(command, account_id, int(user.id))
+    payload = await _fast_state_account(account_id)
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
+    return payload
 
 
 @router.post("/stop")
@@ -311,7 +306,10 @@ async def stop(
         idempotency_key=_command_key(int(user.id), "STOP_SESSION", body, x_idempotency_key),
     )
     await notify_auto_change(wake_driver=True)
-    return await _command_result_or_state(command, account_id, int(user.id))
+    payload = await _fast_state_account(account_id)
+    payload["command"] = command
+    payload["driver"] = {"status": "QUEUED"}
+    return payload
 
 
 @router.get("/history")
