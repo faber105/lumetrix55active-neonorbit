@@ -30,7 +30,8 @@ def _deployment_base_url() -> str:
     if explicit:
         return explicit
     host = str(
-        os.getenv('RENDER_EXTERNAL_HOSTNAME')
+        os.getenv('RAILWAY_PUBLIC_DOMAIN')
+        or os.getenv('RENDER_EXTERNAL_HOSTNAME')
         or os.getenv('VERCEL_PROJECT_PRODUCTION_URL')
         or os.getenv('VERCEL_URL')
         or ''
