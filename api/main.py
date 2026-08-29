@@ -98,6 +98,7 @@ if os.getenv("DATABASE_URL", "").strip():
 production_host = str(
     os.getenv("PUBLIC_BACKEND_URL")
     or os.getenv("BACKEND_URL")
+    or os.getenv("RAILWAY_PUBLIC_DOMAIN")
     or os.getenv("RENDER_EXTERNAL_HOSTNAME")
     or os.getenv("VERCEL_PROJECT_PRODUCTION_URL")
     or os.getenv("VERCEL_URL")
@@ -110,6 +111,13 @@ else:
 os.environ["BACKEND_URL"] = production_base_url.rstrip("/")
 production_mini_app_url = f"{production_base_url.rstrip('/')}?v=20260821-2500"
 os.environ["MINI_APP_URL"] = production_mini_app_url
+
+# Railway runs the API, persistent worker and Telegram gateway in one Uvicorn
+# process.  Long polling would require a second process which the Docker image
+# intentionally does not start, so Telegram updates must arrive at the API
+# webhook.  This does not replace or rotate the existing bot token.
+if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+    os.environ["TELEGRAM_UPDATE_MODE"] = "webhook"
 
 from backend.services import pocketoption_otc as _po_service
 from backend.services.pocket_telemetry import TelemetryPocketOptionClient
